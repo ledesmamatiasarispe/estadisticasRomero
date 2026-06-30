@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GNC API — Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface2: #21262d;
+  --border: #30363d;
+  --accent: #4fc3f7;
+  --accent-dim: #1e3a5f;
+  --red: #ef5350;
+  --green: #66bb6a;
+  --yellow: #ffa726;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --sidebar-w: 200px;
+  --header-h: 52px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 14px; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+/* Header */
+#header { height: var(--header-h); background: var(--surface); border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 16px; gap: 12px; flex-shrink: 0; }
+#header h1 { font-size: 16px; font-weight: 600; color: var(--accent); }
+#header .spacer { flex: 1; }
+#sync-status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.sync-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); flex-shrink:0; }
+.sync-dot.syncing { background: var(--yellow); animation: pulse 1s infinite; }
+.sync-dot.error { background: var(--red); }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+#btn-sync { background: var(--accent-dim); color: var(--accent); border: 1px solid var(--accent); padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+#btn-sync:hover { background: var(--accent); color: #000; }
+
+/* Layout */
+#layout { display: flex; flex: 1; overflow: hidden; }
+
+/* Sidebar */
+#sidebar { width: var(--sidebar-w); background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; padding: 8px 0; overflow-y: auto; }
+.nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 16px; cursor: pointer; color: var(--muted); transition: all .15s; font-size: 13px; border-left: 3px solid transparent; }
+.nav-item:hover { color: var(--text); background: var(--surface2); }
+.nav-item.active { color: var(--accent); background: var(--accent-dim); border-left-color: var(--accent); }
+.nav-icon { width: 18px; text-align: center; }
+
+/* Main panel */
+#main { flex: 1; overflow-y: auto; padding: 20px 24px; }
+
+/* Breadcrumb */
+.breadcrumb { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; color: var(--muted); font-size: 12px; }
+.bc-link { cursor: pointer; }
+.bc-link:hover { color: var(--accent); }
+.bc-sep { color: var(--border); }
+.bc-cur { color: var(--text); }
+
+/* KPI cards */
+.kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.kpi-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+.kpi-label { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); margin-bottom: 6px; }
+.kpi-value { font-size: 28px; font-weight: 700; }
+.kpi-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.c-blue { color: var(--accent); }
+.c-green { color: var(--green); }
+.c-red { color: var(--red); }
+.c-yellow { color: var(--yellow); }
+
+/* Section title */
+.sec-title { font-size: 16px; font-weight: 600; margin-bottom: 14px; }
+
+/* Grid 2 cols */
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
+@media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
+
+/* Card */
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+.card-title { font-size: 11px; font-weight: 600; color: var(--muted); margin-bottom: 12px; text-transform: uppercase; letter-spacing: .5px; }
+
+/* Table */
+.tbl-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { background: var(--surface2); color: var(--muted); font-weight: 500; text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+th.sort { cursor: pointer; user-select: none; }
+th.sort:hover { color: var(--text); }
+td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
+tr:last-child td { border-bottom: none; }
+.tr-link { cursor: pointer; }
+.tr-link:hover td { background: #1a2744; }
+.tag { display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+.tag-g { background: #1b3a1f; color: var(--green); }
+.tag-r { background: #3a1b1b; color: var(--red); }
+.tag-y { background: #3a2e1b; color: var(--yellow); }
+
+/* Inputs */
+.row-gap { display: flex; gap: 10px; margin-bottom: 14px; align-items: center; }
+.inp { background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 7px 12px; border-radius: 6px; font-size: 13px; outline: none; }
+.inp:focus { border-color: var(--accent); }
+.inp-grow { flex: 1; }
+
+/* Pagination */
+.page-bar { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.page-btn { background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 5px 10px; border-radius: 5px; cursor: pointer; font-size: 12px; }
+.page-btn:hover { border-color: var(--accent); color: var(--accent); }
+.page-btn:disabled { opacity: .4; cursor: default; }
+.page-info { font-size: 12px; color: var(--muted); }
+
+/* Charts */
+.chart-box { position: relative; height: 240px; }
+
+/* DB card */
+.db-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; display: flex; align-items: center; gap: 16px; cursor: pointer; transition: border-color .15s; }
+.db-card:hover { border-color: var(--accent); }
+.db-card .db-icon { font-size: 32px; }
+.db-card .db-info .db-title { font-weight: 600; margin-bottom: 4px; }
+.db-card .db-info .db-sub { color: var(--muted); font-size: 12px; }
+.db-card .db-btn { margin-left: auto; background: var(--accent-dim); color: var(--accent); border: 1px solid var(--accent); padding: 6px 14px; border-radius: 6px; font-size: 12px; flex-shrink: 0; }
+
+/* Explorer */
+#exp-wrap { display: flex; height: calc(100vh - var(--header-h) - 60px); overflow: hidden; margin: 0 -24px -20px; }
+#exp-list { width: 220px; border-right: 1px solid var(--border); overflow-y: auto; flex-shrink: 0; }
+.exp-search { padding: 8px; border-bottom: 1px solid var(--border); }
+.exp-search input { width: 100%; }
+.exp-tbl-item { padding: 8px 14px; cursor: pointer; font-size: 12px; color: var(--muted); border-left: 3px solid transparent; }
+.exp-tbl-item:hover { background: var(--surface2); color: var(--text); }
+.exp-tbl-item.active { border-left-color: var(--accent); background: var(--accent-dim); color: var(--accent); }
+.exp-tbl-cnt { font-size: 11px; color: var(--muted); }
+#exp-panel { flex: 1; overflow-y: auto; padding: 16px; }
+.exp-tbl-name { font-size: 16px; font-weight: 600; margin-bottom: 10px; }
+.exp-toolbar { display: flex; gap: 8px; margin-bottom: 10px; align-items: center; }
+.exp-toolbar input { flex: 1; }
+.exp-btn { background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 6px 12px; border-radius: 5px; cursor: pointer; font-size: 12px; }
+.exp-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* Defect bars */
+.def-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.def-lbl { width: 150px; font-size: 12px; text-align: right; flex-shrink: 0; color: var(--muted); }
+.def-bg { flex: 1; background: var(--surface2); border-radius: 3px; height: 14px; overflow: hidden; }
+.def-fill { height: 100%; background: var(--red); border-radius: 3px; }
+.def-cnt { width: 50px; font-size: 12px; font-weight: 600; }
+
+/* Loading / empty */
+.loading { color: var(--muted); padding: 40px; text-align: center; }
+.empty { color: var(--muted); padding: 20px; text-align: center; font-style: italic; font-size: 13px; }
+
+/* Progress bar */
+#sync-progress { position: fixed; bottom: 0; left: 0; right: 0; background: var(--surface); border-top: 1px solid var(--border); padding: 6px 16px 7px; display: none; z-index: 100; }
+#sync-progress.visible { display: block; }
+.prog-row { display: flex; align-items: center; gap: 10px; }
+.prog-phase { font-size: 11px; color: var(--muted); white-space: nowrap; min-width: 180px; }
+.prog-track { flex: 1; height: 4px; background: var(--surface2); border-radius: 2px; overflow: hidden; }
+.prog-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width .3s; }
+.prog-fill.indeterminate { width: 30% !important; animation: prog-slide 1.2s ease-in-out infinite; }
+.prog-pct { font-size: 11px; color: var(--muted); min-width: 36px; text-align: right; }
+@keyframes prog-slide { 0%{transform:translateX(-120%)} 100%{transform:translateX(400%)} }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <h1>&#9881; GNC API</h1>
+  <div class="spacer"></div>
+  <div id="sync-status">
+    <div class="sync-dot" id="sync-dot"></div>
+    <span id="sync-label">Cargando...</span>
+  </div>
+  <button id="btn-sync" onclick="triggerSync()">&#8635; Sincronizar</button>
+</div>
+
+<div id="sync-progress">
+  <div class="prog-row">
+    <span class="prog-phase" id="prog-phase"></span>
+    <div class="prog-track"><div class="prog-fill" id="prog-fill"></div></div>
+    <span class="prog-pct" id="prog-pct"></span>
+  </div>
+</div>
+
+<div id="layout">
+  <nav id="sidebar">
+    <div class="nav-item active" data-sec="dashboard" onclick="go('dashboard')">
+      <span class="nav-icon">&#128202;</span> Dashboard
+    </div>
+    <div class="nav-item" data-sec="clientes" onclick="go('clientes')">
+      <span class="nav-icon">&#127981;</span> Clientes
+    </div>
+    <div class="nav-item" data-sec="analisis" onclick="go('analisis')">
+      <span class="nav-icon">&#128269;</span> An&#225;lisis
+    </div>
+  </nav>
+  <main id="main">
+    <div class="loading">Iniciando...</div>
+  </main>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────────
+const S = {
+  sec: 'dashboard',
+  charts: {},
+  explorer: { tables: [], active: null, page: 1, search: '', sort: null, dir: 'asc' },
+  clienteData: null,   // cache for current client piezas
+};
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+function $id(id) { return document.getElementById(id); }
+function setMain(html) { $id('main').innerHTML = html; }
+function fmt(n) { return n == null ? '—' : Number(n).toLocaleString('es-AR'); }
+
+function tagClass(tasa) { return tasa > 10 ? 'tag-r' : tasa > 0 ? 'tag-y' : 'tag-g'; }
+
+async function api(path) {
+  const r = await fetch(path);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+function destroyCharts() {
+  for (const k in S.charts) { try { S.charts[k].destroy(); } catch(e){} }
+  S.charts = {};
+}
+
+function chartDefaults() {
+  return {
+    responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { labels: { color: '#8b949e', font: { size: 11 } } } },
+    scales: {
+      x: { ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
+      y: { ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
+    },
+  };
+}
+
+// ── Navigation ─────────────────────────────────────────────────────────────────
+function go(sec, data) {
+  S.sec = sec;
+  const base = { cliente: 'clientes', pieza: 'clientes', db: 'dashboard' }[sec] || sec;
+  document.querySelectorAll('.nav-item').forEach(el =>
+    el.classList.toggle('active', el.dataset.sec === base)
+  );
+  destroyCharts();
+  const fn = { dashboard: showDashboard, clientes: showClientes, cliente: ()=>showCliente(data),
+                pieza: ()=>showPieza(data), analisis: showAnalisis, db: showExplorer }[sec];
+  if (fn) fn();
+}
+
+// ── Sync ───────────────────────────────────────────────────────────────────────
+let _syncTimer;
+async function pollSync() {
+  try {
+    const s = await api('/api/sync/status');
+    const dot = $id('sync-dot');
+    const lbl = $id('sync-label');
+    if (!dot) return;
+    dot.className = 'sync-dot' + (s.status === 'syncing' ? ' syncing' : s.status === 'error' ? ' error' : '');
+    lbl.textContent = s.status === 'syncing' ? 'Sincronizando...'
+      : s.status === 'error' ? 'Error en sync'
+      : s.last_sync ? 'Sync: ' + s.last_sync.slice(0,16)
+      : 'Listo';
+
+    // Progress bar
+    const bar = $id('sync-progress');
+    const fill = $id('prog-fill');
+    const phase = $id('prog-phase');
+    const pct = $id('prog-pct');
+    if (s.status === 'syncing') {
+      bar.classList.add('visible');
+      const p = s.progress || {};
+      phase.textContent = p.phase || 'Sincronizando...';
+      if (p.total > 0) {
+        const perc = Math.round(p.done / p.total * 100);
+        fill.classList.remove('indeterminate');
+        fill.style.width = perc + '%';
+        pct.textContent = perc + '%';
+      } else {
+        fill.classList.add('indeterminate');
+        fill.style.width = '30%';
+        pct.textContent = '';
+      }
+      _syncTimer = setTimeout(pollSync, 2000);
+    } else {
+      bar.classList.remove('visible');
+    }
+  } catch(e) {}
+}
+
+async function triggerSync() {
+  try { await fetch('/api/sync', { method: 'POST' }); pollSync(); } catch(e) {}
+}
+
+// ── Dashboard ──────────────────────────────────────────────────────────────────
+async function showDashboard() {
+  setMain('<div class="loading">Cargando dashboard...</div>');
+  let d;
+  try { d = await api('/api/analytics/overview'); }
+  catch(e) { setMain('<div class="loading">Error al cargar datos. Esperá que termine el sync.</div>'); return; }
+
+  const { año_actual, entregadas_año, devueltas_año, tasa_devolucion, tendencia, top_clientes, n_tablas } = d;
+
+  setMain(`
+    <div class="sec-title">Dashboard</div>
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-label">Clientes activos</div>
+        <div class="kpi-value c-blue" id="kpi-act">—</div>
+        <div class="kpi-sub">&#250;ltimos 2 a&#241;os</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Entregadas ${año_actual}</div>
+        <div class="kpi-value c-blue">${fmt(entregadas_año)}</div>
+        <div class="kpi-sub">piezas</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Tasa devoluci&#243;n</div>
+        <div class="kpi-value ${tasa_devolucion > 10 ? 'c-red' : tasa_devolucion > 5 ? 'c-yellow' : 'c-green'}">${tasa_devolucion}%</div>
+        <div class="kpi-sub">${fmt(devueltas_año)} devueltas en ${año_actual}</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Rechazadas ${año_actual}</div>
+        <div class="kpi-value c-yellow" id="kpi-rech">—</div>
+        <div class="kpi-sub">en producci&#243;n</div>
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-title">Tendencia 5 a&#241;os — Entregas vs. Devoluciones</div>
+        <div class="chart-box"><canvas id="chart-trend"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Top clientes — &#250;ltimos 2 a&#241;os</div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>#</th><th>Cliente</th><th style="text-align:right">Entregadas</th></tr></thead>
+            <tbody>${top_clientes.map((c,i) => `
+              <tr class="tr-link" onclick="go('cliente','${c.codigo}')">
+                <td style="color:var(--muted);width:30px">${i+1}</td>
+                <td>
+                  <div>${c.fantasia || c.nombre}</div>
+                  <div style="font-size:11px;color:var(--muted)">${c.codigo}</div>
+                </td>
+                <td style="text-align:right;font-weight:600">${fmt(c.entregadas)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="db-card" onclick="go('db')">
+      <div class="db-icon">&#128452;</div>
+      <div class="db-info">
+        <div class="db-title">Base de datos Access</div>
+        <div class="db-sub">${n_tablas} tablas sincronizadas &middot; Click para explorar</div>
+      </div>
+      <div class="db-btn">Ver tablas &#8594;</div>
+    </div>
+  `);
+
+  // Fill rechazadas from tendencia
+  const curr = tendencia.find(t => t.año === String(año_actual));
+  if (curr) $id('kpi-rech').textContent = fmt(curr.rechazadas);
+
+  // Fill client count asynchronously
+  api('/api/analytics/clientes').then(cls => {
+    const el = $id('kpi-act');
+    if (el) el.textContent = cls.filter(c => c.n_piezas > 0).length;
+  }).catch(() => {});
+
+  // Trend chart
+  S.charts.trend = new Chart($id('chart-trend'), {
+    type: 'bar',
+    data: {
+      labels: tendencia.map(t => t.año),
+      datasets: [
+        { label: 'Entregadas', data: tendencia.map(t=>t.entregadas), backgroundColor: '#4fc3f7bb', borderRadius: 4 },
+        { label: 'Devueltas',  data: tendencia.map(t=>t.devueltas),  backgroundColor: '#ef5350bb', borderRadius: 4 },
+        { label: 'Rechazadas', data: tendencia.map(t=>t.rechazadas), backgroundColor: '#ffa726bb', borderRadius: 4 },
+      ],
+    },
+    options: chartDefaults(),
+  });
+}
+
+// ── Clientes ───────────────────────────────────────────────────────────────────
+let _allClientes = [];
+async function showClientes() {
+  setMain('<div class="loading">Cargando clientes...</div>');
+  try { _allClientes = await api('/api/analytics/clientes'); }
+  catch(e) { setMain('<div class="loading">Error al cargar clientes.</div>'); return; }
+  renderClientesList('');
+}
+
+function renderClientesList(q) {
+  const fl = _allClientes.filter(c => !q
+    || c.nombre.toLowerCase().includes(q)
+    || c.codigo.toLowerCase().includes(q)
+    || (c.fantasia || '').toLowerCase().includes(q)
+  );
+  setMain(`
+    <div class="sec-title">Clientes <span style="font-size:13px;color:var(--muted);font-weight:400">(${fl.length})</span></div>
+    <div class="row-gap">
+      <input class="inp inp-grow" id="cl-q" placeholder="Buscar por nombre o c&#243;digo..."
+        oninput="renderClientesList(this.value.toLowerCase())" value="${q}">
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>C&#243;digo</th><th>Nombre</th><th style="text-align:right">Piezas</th></tr></thead>
+        <tbody>${fl.length
+          ? fl.map(c => `
+            <tr class="tr-link" onclick="go('cliente','${c.codigo}')">
+              <td><code style="color:var(--accent)">${c.codigo}</code></td>
+              <td>
+                <div>${c.fantasia || c.nombre}</div>
+                ${c.fantasia && c.fantasia !== c.nombre
+                  ? `<div style="font-size:11px;color:var(--muted)">${c.nombre}</div>` : ''}
+              </td>
+              <td style="text-align:right;color:var(--muted)">${c.n_piezas}</td>
+            </tr>`).join('')
+          : '<tr><td colspan="3" class="empty">Sin resultados</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+  `);
+  const el = $id('cl-q');
+  if (el) { el.focus(); el.setSelectionRange(q.length, q.length); }
+}
+
+// ── Cliente detail ─────────────────────────────────────────────────────────────
+async function showCliente(codigo) {
+  setMain('<div class="loading">Cargando cliente...</div>');
+  let d;
+  try { d = await api('/api/analytics/clientes/' + codigo); }
+  catch(e) { setMain('<div class="loading">Error: ' + e.message + '</div>'); return; }
+
+  S.clienteData = d.piezas;
+  const { cliente, total_entregadas, total_devueltas, tasa_total, n_piezas, anual, piezas } = d;
+  const tasaCls = tasa_total > 10 ? 'c-red' : tasa_total > 5 ? 'c-yellow' : 'c-green';
+
+  setMain(`
+    <div class="breadcrumb">
+      <span class="bc-link" onclick="go('clientes')">Clientes</span>
+      <span class="bc-sep">&#8250;</span>
+      <span class="bc-cur">${cliente.fantasia || cliente.nombre}</span>
+    </div>
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-label">Piezas distintas</div>
+        <div class="kpi-value c-blue">${n_piezas}</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Total entregadas</div>
+        <div class="kpi-value c-blue">${fmt(total_entregadas)}</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Total devueltas</div>
+        <div class="kpi-value c-red">${fmt(total_devueltas)}</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Tasa devoluci&#243;n</div>
+        <div class="kpi-value ${tasaCls}">${tasa_total}%</div>
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-title">Entregas vs. Devoluciones por a&#241;o</div>
+        <div class="chart-box"><canvas id="chart-cl"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Tabla anual</div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>A&#241;o</th><th style="text-align:right">Entregadas</th><th style="text-align:right">Devueltas</th><th style="text-align:right">Tasa</th></tr></thead>
+            <tbody>${anual.map(r => `
+              <tr>
+                <td>${r.año}</td>
+                <td style="text-align:right">${fmt(r.entregadas)}</td>
+                <td style="text-align:right;color:var(--red)">${r.devueltas || '—'}</td>
+                <td style="text-align:right"><span class="tag ${tagClass(r.tasa)}">${r.tasa}%</span></td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="sec-title">Piezas <span style="font-size:13px;color:var(--muted);font-weight:400">(${piezas.length})</span></div>
+    <div class="row-gap">
+      <input class="inp inp-grow" id="pz-q" placeholder="Buscar pieza..."
+        oninput="filterPiezas(this.value)">
+    </div>
+    <div id="pz-tbl">${makePiezasTable(piezas)}</div>
+  `);
+
+  S.charts.cl = new Chart($id('chart-cl'), {
+    type: 'bar',
+    data: {
+      labels: anual.map(r => r.año),
+      datasets: [
+        { label: 'Entregadas', data: anual.map(r=>r.entregadas), backgroundColor: '#4fc3f7bb', borderRadius: 4 },
+        { label: 'Devueltas',  data: anual.map(r=>r.devueltas),  backgroundColor: '#ef5350bb', borderRadius: 4 },
+      ],
+    },
+    options: chartDefaults(),
+  });
+}
+
+function makePiezasTable(piezas) {
+  if (!piezas.length) return '<div class="empty">Sin piezas con movimiento</div>';
+  return `<div class="tbl-wrap"><table>
+    <thead><tr><th>C&#243;digo</th><th>Nombre</th><th style="text-align:right">Entregadas</th><th style="text-align:right">Devueltas</th><th style="text-align:right">Tasa</th></tr></thead>
+    <tbody>${piezas.map(p => `
+      <tr class="tr-link" onclick="go('pieza',${p.pieza_id})">
+        <td><code style="font-size:11px;color:var(--muted)">${p.codigo_pieza || '—'}</code></td>
+        <td>${p.nombre}</td>
+        <td style="text-align:right">${fmt(p.entregadas)}</td>
+        <td style="text-align:right;color:var(--red)">${p.devueltas || '—'}</td>
+        <td style="text-align:right"><span class="tag ${tagClass(p.tasa_devolucion)}">${p.tasa_devolucion}%</span></td>
+      </tr>`).join('')}
+    </tbody>
+  </table></div>`;
+}
+
+function filterPiezas(q) {
+  if (!S.clienteData) return;
+  const fl = S.clienteData.filter(p => !q
+    || p.nombre.toLowerCase().includes(q.toLowerCase())
+    || (p.codigo_pieza || '').toLowerCase().includes(q.toLowerCase())
+  );
+  $id('pz-tbl').innerHTML = makePiezasTable(fl);
+}
+
+// ── Pieza detail ───────────────────────────────────────────────────────────────
+async function showPieza(piezaId) {
+  setMain('<div class="loading">Cargando pieza...</div>');
+  let d;
+  try { d = await api('/api/analytics/piezas/' + piezaId); }
+  catch(e) { setMain('<div class="loading">Error: ' + e.message + '</div>'); return; }
+
+  const { pieza, anual, defectos } = d;
+  const tot_ent = anual.reduce((s,r)=>s+r.entregadas, 0);
+  const tot_dev = anual.reduce((s,r)=>s+r.devueltas, 0);
+  const tot_rech = anual.reduce((s,r)=>s+r.rechazadas, 0);
+  const maxDef = defectos.length ? defectos[0].total : 1;
+
+  setMain(`
+    <div class="breadcrumb">
+      <span class="bc-link" onclick="go('clientes')">Clientes</span>
+      <span class="bc-sep">&#8250;</span>
+      <span class="bc-link" onclick="go('cliente','${pieza.codigo_cliente}')">Cliente ${pieza.codigo_cliente}</span>
+      <span class="bc-sep">&#8250;</span>
+      <span class="bc-cur">${pieza.nombre}</span>
+    </div>
+
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-label">C&#243;digo</div>
+        <div class="kpi-value" style="font-size:20px;color:var(--muted)">${pieza.codigo_pieza || '—'}</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Total entregadas</div>
+        <div class="kpi-value c-blue">${fmt(tot_ent)}</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Total devueltas</div>
+        <div class="kpi-value c-red">${fmt(tot_dev)}</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Total rechazadas</div>
+        <div class="kpi-value c-yellow">${fmt(tot_rech)}</div>
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-title">Hist&#243;rico por a&#241;o</div>
+        <div class="chart-box"><canvas id="chart-pz"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Distribuci&#243;n de defectos</div>
+        ${defectos.length
+          ? defectos.map(df => `
+            <div class="def-row">
+              <div class="def-lbl">${df.label}</div>
+              <div class="def-bg"><div class="def-fill" style="width:${Math.round(df.total/maxDef*100)}%"></div></div>
+              <div class="def-cnt">${fmt(df.total)}</div>
+            </div>`).join('')
+          : '<div class="empty">Sin defectos registrados</div>'}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Detalle por a&#241;o</div>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr>
+            <th>A&#241;o</th>
+            <th style="text-align:right">Entregadas</th>
+            <th style="text-align:right">Aprobadas</th>
+            <th style="text-align:right">Rechazadas</th>
+            <th style="text-align:right">Devueltas</th>
+            <th style="text-align:right">Tasa dev.</th>
+          </tr></thead>
+          <tbody>${anual.map(r => `
+            <tr>
+              <td>${r.año}</td>
+              <td style="text-align:right">${fmt(r.entregadas)}</td>
+              <td style="text-align:right;color:var(--green)">${fmt(r.aprobadas)}</td>
+              <td style="text-align:right;color:var(--yellow)">${r.rechazadas || '—'}</td>
+              <td style="text-align:right;color:var(--red)">${r.devueltas || '—'}</td>
+              <td style="text-align:right"><span class="tag ${tagClass(r.tasa)}">${r.tasa}%</span></td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `);
+
+  S.charts.pz = new Chart($id('chart-pz'), {
+    type: 'bar',
+    data: {
+      labels: anual.map(r => r.año),
+      datasets: [
+        { label: 'Entregadas', data: anual.map(r=>r.entregadas), backgroundColor: '#4fc3f7bb', borderRadius: 4 },
+        { label: 'Devueltas',  data: anual.map(r=>r.devueltas),  backgroundColor: '#ef5350bb', borderRadius: 4 },
+        { label: 'Rechazadas', data: anual.map(r=>r.rechazadas), backgroundColor: '#ffa726bb', borderRadius: 4 },
+      ],
+    },
+    options: chartDefaults(),
+  });
+}
+
+// ── Análisis ───────────────────────────────────────────────────────────────────
+let _analClientes = [];
+async function showAnalisis() {
+  setMain('<div class="loading">Cargando an&#225;lisis...</div>');
+  try { _analClientes = await api('/api/analytics/clientes'); } catch(e){}
+
+  const clOpts = ['<option value="">Todos los clientes</option>',
+    ..._analClientes.map(c => `<option value="${c.codigo}">${c.fantasia||c.nombre} (${c.codigo})</option>`)
+  ].join('');
+  const yrOpts = ['<option value="">Todos los a&#241;os</option>',
+    ...[2026,2025,2024,2023,2022,2021,2020,2019,2018,2017].map(y=>
+      `<option value="${y}">${y}</option>`)
+  ].join('');
+
+  setMain(`
+    <div class="sec-title">An&#225;lisis de defectos</div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="row-gap">
+        <select class="inp" id="f-cl" onchange="loadAnalisis()">${clOpts}</select>
+        <select class="inp" id="f-yr" onchange="loadAnalisis()">${yrOpts}</select>
+      </div>
+    </div>
+    <div class="grid-2" id="anal-content">
+      <div class="card"><div class="empty">Seleccion&#225; filtros para ver datos</div></div>
+      <div class="card"><div class="empty">Seleccion&#225; filtros para ver datos</div></div>
+    </div>
+  `);
+  loadAnalisis();
+}
+
+async function loadAnalisis() {
+  const cl = ($id('f-cl') || {}).value || '';
+  const yr = ($id('f-yr') || {}).value || '';
+  const qs = [cl && 'cliente='+cl, yr && 'año='+yr].filter(Boolean).join('&');
+  try {
+    const d = await api('/api/analytics/defectos' + (qs ? '?'+qs : ''));
+    const { defectos, top_piezas } = d;
+    const maxD = defectos.length ? defectos[0].total : 1;
+    const maxP = top_piezas.length ? top_piezas[0].devueltas : 1;
+    const el = $id('anal-content');
+    if (!el) return;
+    el.innerHTML = `
+      <div class="card">
+        <div class="card-title">Defectos por tipo</div>
+        ${defectos.length
+          ? defectos.map(df => `
+            <div class="def-row">
+              <div class="def-lbl">${df.label}</div>
+              <div class="def-bg"><div class="def-fill" style="width:${Math.round(df.total/maxD*100)}%"></div></div>
+              <div class="def-cnt">${fmt(df.total)}</div>
+            </div>`).join('')
+          : '<div class="empty">Sin defectos en este filtro</div>'}
+      </div>
+      <div class="card">
+        <div class="card-title">Top piezas con devoluciones</div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>Pieza</th><th style="text-align:right">Devueltas</th><th></th></tr></thead>
+          <tbody>${top_piezas.map(p => `
+            <tr class="tr-link" onclick="go('pieza',${p.pieza_id})">
+              <td>${p.nombre}</td>
+              <td style="text-align:right;color:var(--red)">${fmt(p.devueltas)}</td>
+              <td style="width:100px"><div class="def-bg"><div class="def-fill" style="width:${Math.round(p.devueltas/maxP*100)}%"></div></div></td>
+            </tr>`).join('')}
+          </tbody>
+        </table></div>
+      </div>
+    `;
+  } catch(e) {}
+}
+
+// ── DB Explorer ────────────────────────────────────────────────────────────────
+async function showExplorer() {
+  setMain(`
+    <div class="breadcrumb">
+      <span class="bc-link" onclick="go('dashboard')">Dashboard</span>
+      <span class="bc-sep">&#8250;</span>
+      <span class="bc-cur">Base de datos</span>
+    </div>
+    <div id="exp-wrap">
+      <div id="exp-list">
+        <div class="exp-search"><input class="inp" style="width:100%" id="exp-tq" placeholder="Buscar tabla..." oninput="filterExpTables(this.value)"></div>
+        <div id="exp-items"><div class="loading">Cargando...</div></div>
+      </div>
+      <div id="exp-panel"><div class="empty" style="margin-top:80px">Seleccion&#225; una tabla de la lista</div></div>
+    </div>
+  `);
+
+  try {
+    S.explorer.tables = await api('/api/tables');
+    renderExpList('');
+  } catch(e) {}
+}
+
+function renderExpList(q) {
+  const fl = S.explorer.tables.filter(t =>
+    !q || t.display_name.toLowerCase().includes(q) || t.name.toLowerCase().includes(q)
+  );
+  $id('exp-items').innerHTML = fl.map(t => `
+    <div class="exp-tbl-item ${S.explorer.active === t.name ? 'active' : ''}" onclick="loadExpTable('${t.name}')">
+      <div>${t.display_name}</div>
+      <div class="exp-tbl-cnt">${fmt(t.row_count)} filas</div>
+    </div>`).join('') || '<div class="loading">Sin resultados</div>';
+}
+
+function filterExpTables(q) { renderExpList(q.toLowerCase()); }
+
+async function loadExpTable(name) {
+  S.explorer.active = name;
+  S.explorer.page = 1;
+  S.explorer.search = '';
+  S.explorer.sort = null;
+  renderExpList(($id('exp-tq') || {}).value || '');
+  await fetchExpData();
+}
+
+async function fetchExpData() {
+  const p = S.explorer;
+  const panel = $id('exp-panel');
+  if (!panel) return;
+  panel.innerHTML = '<div class="loading">Cargando...</div>';
+
+  const qs = new URLSearchParams({ page: p.page, page_size: 50 });
+  if (p.search) qs.set('search', p.search);
+  if (p.sort)   { qs.set('sort', p.sort); qs.set('dir', p.dir); }
+
+  try {
+    const d = await api('/api/tables/' + encodeURIComponent(p.active) + '?' + qs);
+    panel.innerHTML = `
+      <div class="exp-tbl-name">${d.display_name}</div>
+      <div class="exp-toolbar">
+        <input class="inp" id="exp-sq" placeholder="Buscar en tabla..." value="${p.search}"
+          onkeydown="if(event.key==='Enter'){S.explorer.search=this.value;S.explorer.page=1;fetchExpData()}">
+        <button class="exp-btn" onclick="S.explorer.search=$id('exp-sq').value;S.explorer.page=1;fetchExpData()">Buscar</button>
+        <button class="exp-btn" onclick="expExportCsv('${p.active}','${d.display_name}')">&#8595; CSV</button>
+        <span style="color:var(--muted);font-size:12px;margin-left:auto">${fmt(d.total)} filas</span>
+      </div>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr>${d.columns.map(c => `
+            <th class="sort" onclick="expSort('${c.key}')">${c.label}${p.sort===c.key ? (p.dir==='asc'?' &#9650;':' &#9660;') : ''}</th>`).join('')}
+          </tr></thead>
+          <tbody>${d.rows.map(row =>
+            `<tr>${d.columns.map(c=>`<td>${row[c.key] ?? ''}</td>`).join('')}</tr>`
+          ).join('')}</tbody>
+        </table>
+      </div>
+      <div class="page-bar">
+        <button class="page-btn" ${d.page<=1?'disabled':''} onclick="S.explorer.page--;fetchExpData()">&#8249; Ant</button>
+        <span class="page-info">P&#225;g ${d.page} / ${d.pages} &nbsp;&middot;&nbsp; ${fmt(d.total)} filas</span>
+        <button class="page-btn" ${d.page>=d.pages?'disabled':''} onclick="S.explorer.page++;fetchExpData()">Sig &#8250;</button>
+      </div>
+    `;
+  } catch(e) { if(panel) panel.innerHTML = '<div class="loading">Error: ' + e.message + '</div>'; }
+}
+
+function expSort(col) {
+  S.explorer.dir = S.explorer.sort === col && S.explorer.dir === 'asc' ? 'desc' : 'asc';
+  S.explorer.sort = col;
+  S.explorer.page = 1;
+  fetchExpData();
+}
+
+function expExportCsv(name, display) {
+  const a = document.createElement('a');
+  a.href = '/api/tables/' + encodeURIComponent(name) + '/export';
+  a.download = display + '.csv';
+  a.click();
+}
+
+// ── Boot ───────────────────────────────────────────────────────────────────────
+pollSync();
+go('dashboard');
+</script>
+</body>
+</html>

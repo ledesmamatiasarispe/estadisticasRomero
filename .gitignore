@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Data — DB y exports no van al repo (son grandes y locales)
+data/gnc.db
+data/exports/
+
+# Logs
+*.log
+
+# VS Code
+.vscode/
+
+# Windows
+Thumbs.db
+desktop.ini
