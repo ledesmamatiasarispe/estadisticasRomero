@@ -1631,7 +1631,7 @@ async function loadTrabajos() {
         <tbody>${d.rows.length
           ? d.rows.map(r => `
             <tr>
-              <td style="white-space:nowrap;color:var(--muted);font-size:12px">${r.fechacargaot ? r.fechacargaot.slice(0,10) : '—'}</td>
+              <td style="white-space:nowrap;color:var(--muted);font-size:12px">${r.fecha ? r.fecha.slice(0,10) : '—'}</td>
               <td><code style="font-size:11px;color:var(--muted)">${r.fundicion || '—'}</code></td>
               <td>
                 <div style="font-size:12px">${r.cliente_nombre || r.codigo_cliente || '—'}</div>

@@ -347,13 +347,15 @@ def analytics_overview():
     try:
         año_actual = datetime.now().year
 
-        # 5-year delivery trend (Trabajos grouped by year)
+        # 5-year delivery trend via Pedidos.fechapedido (fechacargaot is NULL on ~85% of rows)
         trend_rows = conn.execute("""
-            SELECT strftime('%Y', fechacargaot) as año,
-                   COALESCE(SUM(cantidadentregada), 0) as entregadas,
-                   COALESCE(SUM(cantidadrechazada), 0) as rechazadas
-            FROM Trabajos
-            WHERE fechacargaot >= ? AND fechacargaot IS NOT NULL
+            SELECT strftime('%Y', p.fechapedido) as año,
+                   COALESCE(SUM(t.cantidadentregada), 0) as entregadas,
+                   COALESCE(SUM(t.cantidadrechazada), 0) as rechazadas
+            FROM Trabajos t
+            JOIN ItemDetallePedido idp ON t.iditempedido = idp.iditempedido
+            JOIN Pedidos p ON idp.idpedido = p.idpedido
+            WHERE p.fechapedido >= ? AND t.cantidadentregada > 0
             GROUP BY año ORDER BY año
         """, (f"{año_actual - 4}-01-01",)).fetchall()
 
@@ -391,7 +393,7 @@ def analytics_overview():
             JOIN ItemDetallePedido idp ON t.iditempedido = idp.iditempedido
             JOIN Pedidos p ON idp.idpedido = p.idpedido
             JOIN Clientes c ON p.códigocliente = c.códigocliente
-            WHERE t.fechacargaot >= ? AND t.cantidadentregada > 0
+            WHERE p.fechapedido >= ? AND t.cantidadentregada > 0
             GROUP BY p.códigocliente
             ORDER BY entregadas DESC
             LIMIT 10
@@ -463,15 +465,17 @@ def analytics_cliente_detail(codigo: str):
             raise HTTPException(404, f"Cliente '{codigo}' no encontrado")
 
         # Annual deliveries via ItemDetallePedido → Pedidos
+        # Use p.fechapedido as year source — fechacargaot is NULL on ~85% of rows
         ent_rows = conn.execute("""
-            SELECT strftime('%Y', t.fechacargaot) as año,
+            SELECT strftime('%Y', p.fechapedido) as año,
                    COALESCE(SUM(t.cantidadentregada), 0) as entregadas,
                    COALESCE(SUM(t.cantidadrechazada), 0) as rechazadas,
                    COALESCE(SUM(t.cantidadaprobada), 0) as aprobadas
             FROM Trabajos t
             JOIN ItemDetallePedido idp ON t.iditempedido = idp.iditempedido
             JOIN Pedidos p ON idp.idpedido = p.idpedido
-            WHERE p.códigocliente = ? AND t.fechacargaot IS NOT NULL
+            WHERE p.códigocliente = ? AND t.cantidadentregada > 0
+              AND p.fechapedido IS NOT NULL
             GROUP BY año ORDER BY año
         """, (codigo,)).fetchall()
 
@@ -573,15 +577,18 @@ def analytics_pieza_detail(pieza_id: int):
         if not pieza:
             raise HTTPException(404, f"Pieza {pieza_id} no encontrada")
 
-        # Annual delivery from Trabajos via ItemDetallePedido
+        # Annual delivery from Trabajos via ItemDetallePedido → Pedidos
+        # Use p.fechapedido — fechacargaot is NULL on ~85% of rows
         ent_rows = conn.execute("""
-            SELECT strftime('%Y', t.fechacargaot) as año,
+            SELECT strftime('%Y', p.fechapedido) as año,
                    COALESCE(SUM(t.cantidadentregada), 0) as entregadas,
                    COALESCE(SUM(t.cantidadrechazada), 0) as rechazadas,
                    COALESCE(SUM(t.cantidadaprobada), 0) as aprobadas
             FROM Trabajos t
             JOIN ItemDetallePedido idp ON t.iditempedido = idp.iditempedido
-            WHERE idp.idpieza = ? AND t.fechacargaot IS NOT NULL
+            JOIN Pedidos p ON idp.idpedido = p.idpedido
+            WHERE idp.idpieza = ? AND t.cantidadentregada > 0
+              AND p.fechapedido IS NOT NULL
             GROUP BY año ORDER BY año
         """, (pieza_id,)).fetchall()
 
@@ -1213,8 +1220,11 @@ def get_trabajos_meta():
     try:
         años = [
             r["año"] for r in conn.execute("""
-                SELECT DISTINCT strftime('%Y', fechacargaot) as año
-                FROM Trabajos WHERE fechacargaot IS NOT NULL ORDER BY año DESC
+                SELECT DISTINCT strftime('%Y', p.fechapedido) as año
+                FROM Trabajos t
+                JOIN ItemDetallePedido idp ON t.iditempedido = idp.iditempedido
+                JOIN Pedidos p ON idp.idpedido = p.idpedido
+                WHERE p.fechapedido IS NOT NULL ORDER BY año DESC
             """).fetchall()
             if r["año"]
         ]
@@ -1252,7 +1262,7 @@ def get_trabajos(
         params: list = []
 
         if año:
-            where_parts.append("strftime('%Y', t.fechacargaot) = ?")
+            where_parts.append("strftime('%Y', p.fechapedido) = ?")
             params.append(str(año))
         if cliente:
             where_parts.append("p.códigocliente = ?")
@@ -1293,7 +1303,7 @@ def get_trabajos(
         offset = (page - 1) * page_size
 
         rows = conn.execute(
-            f"""SELECT t.iditemtrabajo, t.fechacargaot, t.fechaprevista,
+            f"""SELECT t.iditemtrabajo, p.fechapedido as fecha, t.fechaprevista,
                 t.códfundición as fundicion, t.estadotrabajo,
                 p.códigocliente as codigo_cliente,
                 COALESCE(c.nombrefantasía, c.nombrecliente) as cliente_nombre,
@@ -1301,7 +1311,7 @@ def get_trabajos(
                 t.cantidadproducir, t.cantidadproducida, t.cantidadrechazada,
                 t.cantidadaprobada, t.cantidadentregada, t.obsot
             {base_from} {where}
-            ORDER BY t.fechacargaot DESC
+            ORDER BY p.fechapedido DESC
             LIMIT ? OFFSET ?""",
             params + [page_size, offset],
         ).fetchall()
