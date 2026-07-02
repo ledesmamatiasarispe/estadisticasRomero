@@ -124,10 +124,14 @@ tr:last-child td { border-bottom: none; }
 #exp-list { width: 220px; border-right: 1px solid var(--border); overflow-y: auto; flex-shrink: 0; }
 .exp-search { padding: 8px; border-bottom: 1px solid var(--border); }
 .exp-search input { width: 100%; }
-.exp-tbl-item { padding: 8px 14px; cursor: pointer; font-size: 12px; color: var(--muted); border-left: 3px solid transparent; }
+.exp-tbl-item { padding: 6px 14px 6px 14px; cursor: pointer; font-size: 12px; color: var(--muted); border-left: 3px solid transparent; }
 .exp-tbl-item:hover { background: var(--surface2); color: var(--text); }
 .exp-tbl-item.active { border-left-color: var(--accent); background: var(--accent-dim); color: var(--accent); }
+.exp-tbl-item.i1 { padding-left: 26px; }
+.exp-tbl-item.i2 { padding-left: 40px; }
 .exp-tbl-cnt { font-size: 11px; color: var(--muted); }
+.exp-grp-hdr { padding: 10px 14px 4px; font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--accent); border-top: 1px solid var(--border); margin-top: 2px; }
+.exp-grp-hdr:first-child { border-top: none; margin-top: 0; }
 #exp-panel { flex: 1; overflow-y: auto; padding: 16px; }
 .exp-tbl-name { font-size: 16px; font-weight: 600; margin-bottom: 10px; }
 .exp-toolbar { display: flex; gap: 8px; margin-bottom: 10px; align-items: center; }
@@ -811,15 +815,161 @@ async function showExplorer() {
   } catch(e) {}
 }
 
+// Hierarchy definition: display_names from Access.
+// Node = string (leaf) | { n: string, ch: Node[] } (parent with children)
+const EXP_TREE = [
+  { grp: 'Clientes', nodes: [
+    { n: 'Clientes', ch: [
+      'Domicilios', 'TarjetasEnviadasClientes', 'TarjetasEnviadasOtros',
+      'TipoCondicionPago',
+    ]},
+    { n: 'NombreDePiezas', ch: [
+      'PesosDePiezas', 'GruposDePiezas', 'PartesPorPieza',
+      'Precios', 'PreciosHistóricos', 'InfTécnicaPieza',
+    ]},
+  ]},
+  { grp: 'Pedidos', nodes: [
+    { n: 'Pedidos', ch: [
+      { n: 'ItemDetallePedido', ch: [
+        { n: 'Trabajos', ch: [
+          'ComentariosOT', 'TrabajosNoyería',
+          'ModificacionesStock', 'MovimientosDeStock', 'TemporalMovimientoStock',
+        ]},
+      ]},
+      'ReferenciaPedidoReposición', 'ReferenciasNotasDeCrédito',
+    ]},
+    { n: 'ItemDevolución', ch: [
+      'RechDevol', 'SoluciónDevolución', 'SoluciónRechazoInterno', 'ReparacionInterna', 'SoluciónReparacionInterna',
+      'AumentosHistoricos',
+    ]},
+  ]},
+  { grp: 'Remitos', nodes: [
+    { n: 'Remitos', ch: [
+      'ItemDetalle', 'RemitosHistoricos', 'NotasDeEnvio', 'DestinosNO-Clientes',
+    ]},
+  ]},
+  { grp: 'Modelos', nodes: [
+    { n: 'Modelos', ch: [
+      'PiezasPorModelo',
+      { n: 'PartesDeModelo', ch: ['PartesPorModelo'] },
+      'MovimientoModelos', 'FotosDeModelos', 'PesosDeMoldes',
+      'FichasCáscara', 'FichasNoyos',
+    ]},
+  ]},
+  { grp: 'Fundiciones', nodes: [
+    { n: 'Fundiciones', ch: [
+      { n: 'ItemProducción', ch: [
+        'InformesMateriales', 'InformesMaterialesQuimicos2',
+        'ComposiciónQuímica', 'InformesEspesores',
+        'InfTécnicaColada', 'InfTécnicaMoldeo', 'InfTécnicaNoyería',
+        'InfTécnicaRebaba', 'InfTécnicaCalidad',
+        'InformesAgrupadoPorPieza', 'InformesAgrupadoPorTrabajo', 'InformesAgrupados',
+      ]},
+      'FundiciónPorFecha', 'FechasFundición', 'Fundiciones2',
+      'Campañas', 'HorasPorFecha', 'RendimientoMetal', 'EstadisticaMoldeo',
+      'AnalisisMatLiqInduccion',
+    ]},
+  ]},
+  { grp: 'Documentos / Calidad', nodes: [
+    { n: 'Documentos', ch: [
+      { n: 'ItemReclamo', ch: [
+        'CausasPorReclamo', 'ProblemasPorReclamo', 'SolucionesPorReclamo',
+        'DocumentoReclamo',
+      ]},
+      'CambiosFechaCierre', 'CambiosFechaVerificación',
+      'InfTécnicaCalidad', 'tblInformesControlCalidad',
+    ]},
+  ]},
+  { grp: 'Empleados / Estructura', nodes: [
+    'Empleados', 'Responsables', 'Sectores', 'Permisos', 'Áreas',
+    'Objetos', 'CategoríasObjetos', 'Acciones', 'RelaciónCampos',
+    'CamposForm', 'CamposRpt', 'CamposTabla',
+  ]},
+  { grp: 'Configuración (lookups)', nodes: [
+    'Estados', 'TiposModelo', 'TiposDeModelos', 'TiposDocumento', 'TiposDocumentoExterno',
+    'TiposDomicilio', 'TiposDeMatriz', 'TiposDeMoldeo', 'TiposDeCarga',
+    'TiposMaterial', 'TiposFacturación', 'TiposMorfologíaGrafito',
+    'MorfologíasGrafito', 'TamañosGrafito', 'Materiales',
+    'EspesoresPorMaterial', 'Espesores', 'ParámetroEspesores', 'ParámetrosMateriales',
+    'Bases', 'Localidades', 'Provincias', 'Proveedores', 'ControlAleatorioProbabilidad',
+    'DefectosInternos', 'Causas', 'Problemas', 'Soluciones',
+    'Años', 'Años2', 'FechasViejo', 'Impresiones', 'CantidadesPorParte',
+    'TiposParteDeModelo', 'GruposDePiezas',
+  ]},
+];
+
+function _expTblMap() {
+  const m = {};
+  S.explorer.tables.forEach(t => { m[t.display_name] = t; });
+  return m;
+}
+
+function _expItemHtml(tbl, indent) {
+  if (!tbl) return '';
+  const ic = indent === 1 ? ' i1' : indent >= 2 ? ' i2' : '';
+  const active = S.explorer.active === tbl.name ? ' active' : '';
+  const connector = indent > 0 ? '<span style="color:var(--border);margin-right:4px">└</span>' : '';
+  return `<div class="exp-tbl-item${ic}${active}" onclick="loadExpTable('${tbl.name}')">
+    <div>${connector}${tbl.display_name}</div>
+    <div class="exp-tbl-cnt">${fmt(tbl.row_count)} filas</div>
+  </div>`;
+}
+
+function _renderNodes(nodes, tblMap, indent, html, seen) {
+  for (const node of nodes) {
+    if (typeof node === 'string') {
+      const t = tblMap[node];
+      if (t) { html.push(_expItemHtml(t, indent)); seen.add(t.name); }
+    } else {
+      const t = tblMap[node.n];
+      if (t) { html.push(_expItemHtml(t, indent)); seen.add(t.name); }
+      if (node.ch) _renderNodes(node.ch, tblMap, Math.min(indent + 1, 2), html, seen);
+    }
+  }
+}
+
 function renderExpList(q) {
-  const fl = S.explorer.tables.filter(t =>
-    !q || t.display_name.toLowerCase().includes(q) || t.name.toLowerCase().includes(q)
-  );
-  $id('exp-items').innerHTML = fl.map(t => `
-    <div class="exp-tbl-item ${S.explorer.active === t.name ? 'active' : ''}" onclick="loadExpTable('${t.name}')">
-      <div>${t.display_name}</div>
-      <div class="exp-tbl-cnt">${fmt(t.row_count)} filas</div>
-    </div>`).join('') || '<div class="loading">Sin resultados</div>';
+  const tblMap = _expTblMap();
+  const el = $id('exp-items');
+  if (!el) return;
+
+  if (q) {
+    // Flat search mode
+    const fl = S.explorer.tables.filter(t =>
+      t.display_name.toLowerCase().includes(q) || t.name.toLowerCase().includes(q)
+    );
+    el.innerHTML = fl.map(t => _expItemHtml(t, 0)).join('') || '<div class="loading">Sin resultados</div>';
+    return;
+  }
+
+  const seen = new Set();
+  const html = [];
+
+  for (const grp of EXP_TREE) {
+    const grpNodes = grp.nodes || [];
+    // Check if any table in this group exists
+    const hasTables = _grpHasTables(grpNodes, tblMap);
+    if (!hasTables) continue;
+    html.push(`<div class="exp-grp-hdr">${grp.grp}</div>`);
+    _renderNodes(grpNodes, tblMap, 0, html, seen);
+  }
+
+  // Remaining tables not in any group
+  const unseen = S.explorer.tables.filter(t => !seen.has(t.name));
+  if (unseen.length) {
+    html.push('<div class="exp-grp-hdr">Otros</div>');
+    unseen.forEach(t => html.push(_expItemHtml(t, 0)));
+  }
+
+  el.innerHTML = html.join('') || '<div class="loading">Sin tablas</div>';
+}
+
+function _grpHasTables(nodes, tblMap) {
+  for (const node of nodes) {
+    if (typeof node === 'string') { if (tblMap[node]) return true; }
+    else { if (tblMap[node.n] || _grpHasTables(node.ch || [], tblMap)) return true; }
+  }
+  return false;
 }
 
 function filterExpTables(q) { renderExpList(q.toLowerCase()); }
