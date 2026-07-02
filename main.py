@@ -652,6 +652,12 @@ def analytics_defectos(
 
 # ── Frontend ──────────────────────────────────────────────────────────────────
 
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    from fastapi.responses import Response
+    return Response(status_code=204)
+
+
 @app.get("/")
 def serve_index():
     index = FRONTEND / "index.html"
@@ -666,7 +672,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=50510,
+        port=50504,
         reload=False,
         log_level="info",
     )

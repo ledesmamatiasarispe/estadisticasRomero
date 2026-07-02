@@ -12,7 +12,7 @@ ROOT     = Path(sys.executable).parent if getattr(sys, "frozen", False) else Pat
 VENV_PY  = ROOT / ".venv" / "Scripts" / "python.exe"
 SHA_FILE = ROOT / "_version.txt"
 
-GITHUB_REPO   = "ledesmamatiasarispe/gnc-api"
+GITHUB_REPO   = "ledesmamatiasarispe/estadisticasRomero"
 GITHUB_BRANCH = "master"
 
 SKIP_UPDATE = {".venv", "iniciar.exe", "iniciar.bat", "_version.txt", "data"}
@@ -178,7 +178,7 @@ def main():
         subprocess.run([str(VENV_PY), "-m", "pip", "install", "-r",
                         str(ROOT / "requirements.txt"), "-q"])
 
-    print("Iniciando GNC API en http://localhost:50510 ...")
+    print("Iniciando GNC API en http://localhost:50504 ...")
     print()
     r = subprocess.run([str(VENV_PY), str(ROOT / "main.py")])
     if r.returncode != 0:

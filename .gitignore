@@ -10,6 +10,11 @@ env/
 data/gnc.db
 data/exports/
 
+# PyInstaller build artifacts
+.build/
+*.spec
+GNC API.exe
+
 # Logs
 *.log
 
