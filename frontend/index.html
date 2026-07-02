@@ -92,6 +92,8 @@ tr:last-child td { border-bottom: none; }
 .tag-g { background: #1b3a1f; color: var(--green); }
 .tag-r { background: #3a1b1b; color: var(--red); }
 .tag-y { background: #3a2e1b; color: var(--yellow); }
+.tag-b { background: var(--accent-dim); color: var(--accent); }
+.tag-m { background: var(--surface2); color: var(--muted); }
 
 /* Inputs */
 .row-gap { display: flex; gap: 10px; margin-bottom: 14px; align-items: center; }
@@ -194,6 +196,9 @@ tr:last-child td { border-bottom: none; }
     <div class="nav-item" data-sec="analisis" onclick="go('analisis')">
       <span class="nav-icon">&#128269;</span> An&#225;lisis
     </div>
+    <div class="nav-item" data-sec="trabajos" onclick="go('trabajos')">
+      <span class="nav-icon">&#128295;</span> Trabajos
+    </div>
   </nav>
   <main id="main">
     <div class="loading">Iniciando...</div>
@@ -206,7 +211,8 @@ const S = {
   sec: 'dashboard',
   charts: {},
   explorer: { tables: [], active: null, page: 1, search: '', sort: null, dir: 'asc' },
-  clienteData: null,   // cache for current client piezas
+  clienteData: null,
+  trabajos: { page: 1, año: '', cliente: '', estado: '', search: '' },
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -247,7 +253,7 @@ function go(sec, data) {
   );
   destroyCharts();
   const fn = { dashboard: showDashboard, clientes: showClientes, cliente: ()=>showCliente(data),
-                pieza: ()=>showPieza(data), analisis: showAnalisis, db: showExplorer }[sec];
+                pieza: ()=>showPieza(data), analisis: showAnalisis, trabajos: showTrabajos, db: showExplorer }[sec];
   if (fn) fn();
 }
 
@@ -840,6 +846,162 @@ function expExportCsv(name, display) {
   a.href = '/api/tables/' + encodeURIComponent(name) + '/export';
   a.download = display + '.csv';
   a.click();
+}
+
+// ── Trabajos ───────────────────────────────────────────────────────────────────
+let _trabajosMeta = null;
+
+function estadoTag(codigo, label) {
+  const up = (codigo || '').toUpperCase();
+  const cls = ['K','D'].includes(up) ? 'tag-g'
+    : ['A','B'].includes(up) ? 'tag-r'
+    : ['R','Y'].includes(up) ? 'tag-y'
+    : up === 'L' ? 'tag-b'
+    : 'tag-m';
+  return `<span class="tag ${cls}">${label || codigo || '—'}</span>`;
+}
+
+async function showTrabajos() {
+  setMain('<div class="loading">Cargando...</div>');
+
+  if (!_trabajosMeta) {
+    try { _trabajosMeta = await api('/api/trabajos/meta'); } catch(e) {}
+  }
+  const meta = _trabajosMeta || { años: [], estados: [] };
+
+  if (!S.trabajos.año) S.trabajos.año = String(new Date().getFullYear());
+
+  let clientes = _allClientes;
+  if (!clientes.length) {
+    try { clientes = await api('/api/analytics/clientes'); _allClientes = clientes; } catch(e) {}
+  }
+
+  const añoOpts = ['<option value="">Todos los a&#241;os</option>',
+    ...meta.años.map(y => `<option value="${y}"${S.trabajos.año===y?' selected':''}>${y}</option>`)
+  ].join('');
+  const estOpts = ['<option value="">Todos los estados</option>',
+    ...meta.estados.map(e => `<option value="${e.codigo}"${S.trabajos.estado===e.codigo?' selected':''}>${e.label} (${fmt(e.count)})</option>`)
+  ].join('');
+  const clOpts = ['<option value="">Todos los clientes</option>',
+    ...clientes.map(c => `<option value="${c.codigo}"${S.trabajos.cliente===c.codigo?' selected':''}>${c.fantasia||c.nombre} (${c.codigo})</option>`)
+  ].join('');
+
+  setMain(`
+    <div class="sec-title">Trabajos &mdash; &#211;rdenes de trabajo</div>
+    <div class="card" style="margin-bottom:14px">
+      <div class="row-gap" style="flex-wrap:wrap">
+        <select class="inp" id="tr-año" onchange="trFilter()">${añoOpts}</select>
+        <select class="inp" id="tr-cl"  onchange="trFilter()">${clOpts}</select>
+        <select class="inp" id="tr-est" onchange="trFilter()">${estOpts}</select>
+        <input class="inp inp-grow" id="tr-q" placeholder="Buscar pieza, cliente, obs..."
+          value="${S.trabajos.search}"
+          onkeydown="if(event.key==='Enter')trFilter()">
+        <button class="page-btn" onclick="trFilter()">Buscar</button>
+      </div>
+    </div>
+    <div id="tr-kpis"></div>
+    <div id="tr-content"><div class="loading">Cargando...</div></div>
+  `);
+
+  await loadTrabajos();
+}
+
+function trFilter() {
+  S.trabajos.año     = ($id('tr-año') || {}).value || '';
+  S.trabajos.cliente = ($id('tr-cl')  || {}).value || '';
+  S.trabajos.estado  = ($id('tr-est') || {}).value || '';
+  S.trabajos.search  = ($id('tr-q')   || {}).value || '';
+  S.trabajos.page    = 1;
+  loadTrabajos();
+}
+
+async function loadTrabajos() {
+  const t = S.trabajos;
+  const kpisEl    = $id('tr-kpis');
+  const contentEl = $id('tr-content');
+  if (!contentEl) return;
+  contentEl.innerHTML = '<div class="loading">Cargando...</div>';
+
+  const qs = new URLSearchParams({ page: t.page, page_size: 50 });
+  if (t.año)     qs.set('año',     t.año);
+  if (t.cliente) qs.set('cliente', t.cliente);
+  if (t.estado)  qs.set('estado',  t.estado);
+  if (t.search)  qs.set('search',  t.search);
+
+  let d;
+  try { d = await api('/api/trabajos?' + qs); }
+  catch(e) { contentEl.innerHTML = '<div class="loading">Error: ' + e.message + '</div>'; return; }
+
+  const { summary } = d;
+  if (kpisEl) kpisEl.innerHTML = `
+    <div class="kpi-grid" style="margin-bottom:14px">
+      <div class="kpi-card">
+        <div class="kpi-label">&#211;rdenes</div>
+        <div class="kpi-value c-blue">${fmt(d.total)}</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Producidas</div>
+        <div class="kpi-value c-blue">${fmt(summary.producidas)}</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Rechazadas</div>
+        <div class="kpi-value c-yellow">${fmt(summary.rechazadas)}</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Aprobadas</div>
+        <div class="kpi-value c-green">${fmt(summary.aprobadas)}</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Entregadas</div>
+        <div class="kpi-value c-green">${fmt(summary.entregadas)}</div>
+      </div>
+    </div>
+  `;
+
+  contentEl.innerHTML = `
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Fecha OT</th>
+          <th>Fund.</th>
+          <th>Cliente</th>
+          <th>Pieza</th>
+          <th>Estado</th>
+          <th style="text-align:right">Producidas</th>
+          <th style="text-align:right">Rechazadas</th>
+          <th style="text-align:right">Entregadas</th>
+          <th>Obs</th>
+        </tr></thead>
+        <tbody>${d.rows.length
+          ? d.rows.map(r => `
+            <tr>
+              <td style="white-space:nowrap;color:var(--muted);font-size:12px">${r.fechacargaot ? r.fechacargaot.slice(0,10) : '—'}</td>
+              <td><code style="font-size:11px;color:var(--muted)">${r.fundicion || '—'}</code></td>
+              <td>
+                <div style="font-size:12px">${r.cliente_nombre || r.codigo_cliente || '—'}</div>
+                <div style="font-size:11px;color:var(--muted)">${r.codigo_cliente || ''}</div>
+              </td>
+              <td>
+                <div style="font-size:12px">${r.nombrepieza || '—'}</div>
+                ${r.codigo_pieza ? `<div style="font-size:11px;color:var(--muted)">${r.codigo_pieza}</div>` : ''}
+              </td>
+              <td>${estadoTag(r.estadotrabajo, r.estado_label)}</td>
+              <td style="text-align:right">${r.cantidadproducida ?? '—'}</td>
+              <td style="text-align:right;color:${(r.cantidadrechazada||0)>0?'var(--yellow)':'inherit'}">${r.cantidadrechazada || '—'}</td>
+              <td style="text-align:right;color:var(--green)">${r.cantidadentregada ?? '—'}</td>
+              <td style="font-size:11px;color:var(--muted);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                  title="${(r.obsot||'').replace(/"/g,'&quot;')}">${r.obsot || ''}</td>
+            </tr>`).join('')
+          : '<tr><td colspan="9" class="empty">Sin resultados</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+    <div class="page-bar">
+      <button class="page-btn" ${d.page<=1?'disabled':''} onclick="S.trabajos.page--;loadTrabajos()">&#8249; Ant</button>
+      <span class="page-info">P&#225;g ${d.page} / ${d.pages} &nbsp;&middot;&nbsp; ${fmt(d.total)} OTs</span>
+      <button class="page-btn" ${d.page>=d.pages?'disabled':''} onclick="S.trabajos.page++;loadTrabajos()">Sig &#8250;</button>
+    </div>
+  `;
 }
 
 // ── Boot ───────────────────────────────────────────────────────────────────────

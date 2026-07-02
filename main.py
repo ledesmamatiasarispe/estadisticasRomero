@@ -678,6 +678,141 @@ def analytics_defectos(
         conn.close()
 
 
+# ── Trabajos ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/trabajos/meta")
+def get_trabajos_meta():
+    """Años y estados disponibles para los filtros de la pestaña Trabajos."""
+    conn = get_db()
+    try:
+        años = [
+            r["año"] for r in conn.execute("""
+                SELECT DISTINCT strftime('%Y', fechacargaot) as año
+                FROM Trabajos WHERE fechacargaot IS NOT NULL ORDER BY año DESC
+            """).fetchall()
+            if r["año"]
+        ]
+
+        est_desc = {
+            r["códigoestado"]: r["leyendaestado"]
+            for r in conn.execute(
+                "SELECT códigoestado, leyendaestado FROM Estados GROUP BY códigoestado"
+            ).fetchall()
+        }
+        estados_usados = conn.execute("""
+            SELECT estadotrabajo as codigo, COUNT(*) as n
+            FROM Trabajos WHERE estadotrabajo IS NOT NULL
+            GROUP BY estadotrabajo ORDER BY n DESC
+        """).fetchall()
+        estados = [
+            {"codigo": r["codigo"], "label": est_desc.get(r["codigo"], r["codigo"]), "count": r["n"]}
+            for r in estados_usados
+        ]
+
+        return {"años": años, "estados": estados}
+    finally:
+        conn.close()
+
+
+@app.get("/api/trabajos")
+def get_trabajos(
+    año: Optional[int] = Query(None),
+    cliente: Optional[str] = Query(None),
+    estado: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+):
+    conn = get_db()
+    try:
+        est_desc = {
+            r["códigoestado"]: r["leyendaestado"]
+            for r in conn.execute(
+                "SELECT códigoestado, leyendaestado FROM Estados GROUP BY códigoestado"
+            ).fetchall()
+        }
+
+        where_parts: list[str] = []
+        params: list = []
+
+        if año:
+            where_parts.append("strftime('%Y', t.fechacargaot) = ?")
+            params.append(str(año))
+        if cliente:
+            where_parts.append("p.códigocliente = ?")
+            params.append(cliente)
+        if estado:
+            where_parts.append("t.estadotrabajo = ?")
+            params.append(estado)
+        if search:
+            s = f"%{search.strip()}%"
+            where_parts.append(
+                "(COALESCE(c.nombrefantasía, c.nombrecliente) LIKE ?"
+                " OR np.nombrepieza LIKE ?"
+                " OR CAST(t.obsot AS TEXT) LIKE ?)"
+            )
+            params.extend([s, s, s])
+
+        where = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+
+        base_from = """
+            FROM Trabajos t
+            JOIN ItemDetallePedido idp ON t.iditempedido = idp.iditempedido
+            JOIN Pedidos p ON idp.idpedido = p.idpedido
+            JOIN Clientes c ON p.códigocliente = c.códigocliente
+            JOIN NombreDePiezas np ON idp.idpieza = np.id
+        """
+
+        summary = conn.execute(
+            f"""SELECT COUNT(*) as total_ots,
+                COALESCE(SUM(t.cantidadproducida), 0) as producidas,
+                COALESCE(SUM(t.cantidadrechazada), 0) as rechazadas,
+                COALESCE(SUM(t.cantidadaprobada), 0) as aprobadas,
+                COALESCE(SUM(t.cantidadentregada), 0) as entregadas
+            {base_from} {where}""",
+            params,
+        ).fetchone()
+
+        total = summary["total_ots"]
+        offset = (page - 1) * page_size
+
+        rows = conn.execute(
+            f"""SELECT t.iditemtrabajo, t.fechacargaot, t.fechaprevista,
+                t.códfundición as fundicion, t.estadotrabajo,
+                p.códigocliente as codigo_cliente,
+                COALESCE(c.nombrefantasía, c.nombrecliente) as cliente_nombre,
+                np.nombrepieza, np.códigopiezapuestoporcliente as codigo_pieza,
+                t.cantidadproducir, t.cantidadproducida, t.cantidadrechazada,
+                t.cantidadaprobada, t.cantidadentregada, t.obsot
+            {base_from} {where}
+            ORDER BY t.fechacargaot DESC
+            LIMIT ? OFFSET ?""",
+            params + [page_size, offset],
+        ).fetchall()
+
+        result_rows = []
+        for r in rows:
+            d = dict(r)
+            d["estado_label"] = est_desc.get(d["estadotrabajo"] or "", d["estadotrabajo"] or "")
+            result_rows.append(d)
+
+        return {
+            "rows": result_rows,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "pages": max(1, (total + page_size - 1) // page_size),
+            "summary": {
+                "producidas": summary["producidas"],
+                "rechazadas": summary["rechazadas"],
+                "aprobadas": summary["aprobadas"],
+                "entregadas": summary["entregadas"],
+            },
+        }
+    finally:
+        conn.close()
+
+
 # ── Frontend ──────────────────────────────────────────────────────────────────
 
 @app.get("/favicon.ico", include_in_schema=False)
