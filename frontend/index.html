@@ -199,6 +199,24 @@ tr:last-child td { border-bottom: none; }
     <div class="nav-item" data-sec="trabajos" onclick="go('trabajos')">
       <span class="nav-icon">&#128295;</span> Trabajos
     </div>
+    <div class="nav-item" data-sec="pedidos" onclick="go('pedidos')">
+      <span class="nav-icon">&#128203;</span> Pedidos
+    </div>
+    <div class="nav-item" data-sec="remitos" onclick="go('remitos')">
+      <span class="nav-icon">&#128230;</span> Remitos
+    </div>
+    <div class="nav-item" data-sec="piezas" onclick="go('piezas')">
+      <span class="nav-icon">&#9881;</span> Piezas
+    </div>
+    <div class="nav-item" data-sec="modelos" onclick="go('modelos')">
+      <span class="nav-icon">&#9651;</span> Modelos
+    </div>
+    <div class="nav-item" data-sec="fundiciones" onclick="go('fundiciones')">
+      <span class="nav-icon">&#128293;</span> Fundiciones
+    </div>
+    <div class="nav-item" data-sec="documentos" onclick="go('documentos')">
+      <span class="nav-icon">&#128196;</span> Documentos
+    </div>
   </nav>
   <main id="main">
     <div class="loading">Iniciando...</div>
@@ -212,7 +230,13 @@ const S = {
   charts: {},
   explorer: { tables: [], active: null, page: 1, search: '', sort: null, dir: 'asc' },
   clienteData: null,
-  trabajos: { page: 1, año: '', cliente: '', estado: '', search: '' },
+  trabajos:    { page: 1, año: '', cliente: '', estado: '', search: '' },
+  pedidos:     { page: 1, año: '', cliente: '', estado: '', search: '' },
+  remitos:     { page: 1, año: '', cliente: '', search: '' },
+  piezas:      { page: 1, cliente: '', search: '', habilitado: '' },
+  modelos:     { page: 1, cliente: '', search: '', habilitado: '' },
+  fundiciones: { page: 1, año: '', cerrada: '', search: '' },
+  documentos:  { page: 1, año: '', cliente: '', tipo: '', search: '' },
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -247,13 +271,28 @@ function chartDefaults() {
 // ── Navigation ─────────────────────────────────────────────────────────────────
 function go(sec, data) {
   S.sec = sec;
-  const base = { cliente: 'clientes', pieza: 'clientes', db: 'dashboard' }[sec] || sec;
+  const base = {
+    cliente: 'clientes', pieza: 'clientes',
+    pedido: 'pedidos', remito: 'remitos',
+    modelo: 'modelos', fundicion: 'fundiciones', documento: 'documentos',
+    db: 'dashboard'
+  }[sec] || sec;
   document.querySelectorAll('.nav-item').forEach(el =>
     el.classList.toggle('active', el.dataset.sec === base)
   );
   destroyCharts();
-  const fn = { dashboard: showDashboard, clientes: showClientes, cliente: ()=>showCliente(data),
-                pieza: ()=>showPieza(data), analisis: showAnalisis, trabajos: showTrabajos, db: showExplorer }[sec];
+  const fn = {
+    dashboard: showDashboard, clientes: showClientes,
+    cliente: ()=>showCliente(data), pieza: ()=>showPieza(data),
+    analisis: showAnalisis, trabajos: showTrabajos,
+    pedidos: showPedidos, pedido: ()=>showPedidoDetail(data),
+    remitos: showRemitos, remito: ()=>showRemitoDetail(data),
+    piezas: showPiezasCat,
+    modelos: showModelos, modelo: ()=>showModeloDetail(data),
+    fundiciones: showFundiciones, fundicion: ()=>showFundicionDetail(data),
+    documentos: showDocumentos, documento: ()=>showDocumentoDetail(data),
+    db: showExplorer
+  }[sec];
   if (fn) fn();
 }
 
@@ -846,6 +885,623 @@ function expExportCsv(name, display) {
   a.href = '/api/tables/' + encodeURIComponent(name) + '/export';
   a.download = display + '.csv';
   a.click();
+}
+
+// ── Pedidos ────────────────────────────────────────────────────────────────────
+async function showPedidos() {
+  setMain('<div class="loading">Cargando pedidos...</div>');
+  if (!_allClientes.length) { try { _allClientes = await api('/api/analytics/clientes'); } catch(e){} }
+  const añoOpts = _yearOpts(S.pedidos.año);
+  const estOpts = _estOpts(S.pedidos.estado);
+  const clOpts  = _clOpts(S.pedidos.cliente);
+  setMain(`
+    <div class="sec-title">Pedidos</div>
+    <div class="card" style="margin-bottom:14px">
+      <div class="row-gap" style="flex-wrap:wrap">
+        <select class="inp" id="pe-año" onchange="peFilter()">${añoOpts}</select>
+        <select class="inp" id="pe-cl"  onchange="peFilter()">${clOpts}</select>
+        <select class="inp" id="pe-est" onchange="peFilter()">${estOpts}</select>
+        <input class="inp inp-grow" id="pe-q" placeholder="Buscar nro, cliente, obs..."
+          value="${S.pedidos.search}" onkeydown="if(event.key==='Enter')peFilter()">
+        <button class="page-btn" onclick="peFilter()">Buscar</button>
+      </div>
+    </div>
+    <div id="pe-content"><div class="loading">Cargando...</div></div>
+  `);
+  await loadPedidos();
+}
+function peFilter() {
+  S.pedidos.año    = ($id('pe-año')||{}).value||'';
+  S.pedidos.cliente= ($id('pe-cl') ||{}).value||'';
+  S.pedidos.estado = ($id('pe-est')||{}).value||'';
+  S.pedidos.search = ($id('pe-q')  ||{}).value||'';
+  S.pedidos.page = 1; loadPedidos();
+}
+async function loadPedidos() {
+  const st = S.pedidos; const el = $id('pe-content'); if (!el) return;
+  el.innerHTML = '<div class="loading">Cargando...</div>';
+  const qs = new URLSearchParams({page: st.page, page_size: 50});
+  if (st.año) qs.set('año', st.año);
+  if (st.cliente) qs.set('cliente', st.cliente);
+  if (st.estado) qs.set('estado', st.estado);
+  if (st.search) qs.set('search', st.search);
+  let d; try { d = await api('/api/pedidos?'+qs); } catch(e) { el.innerHTML='<div class="loading">Error: '+e.message+'</div>'; return; }
+  el.innerHTML = `
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Nro Pedido</th><th>Fecha</th><th>Cliente</th><th>Estado</th><th style="text-align:right">&#205;tems</th><th>Obs</th></tr></thead>
+      <tbody>${d.rows.length
+        ? d.rows.map(r=>`
+          <tr class="tr-link" onclick="go('pedido',${r.idpedido})">
+            <td><code style="color:var(--accent)">${r.nropedido||r.idpedido}</code></td>
+            <td style="white-space:nowrap;color:var(--muted);font-size:12px">${(r.fechapedido||'').slice(0,10)}</td>
+            <td><div style="font-size:12px">${r.cliente_nombre||r.códigocliente}</div><div style="font-size:11px;color:var(--muted)">${r.códigocliente}</div></td>
+            <td>${estadoTag(r.estadopedido, r.estado_label)}</td>
+            <td style="text-align:right;color:var(--muted)">${r.n_items}</td>
+            <td style="font-size:11px;color:var(--muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(r.observaciones||'').replace(/"/g,'&quot;')}">${r.observaciones||''}</td>
+          </tr>`).join('')
+        : '<tr><td colspan="6" class="empty">Sin resultados</td></tr>'}
+      </tbody></table></div>
+    <div class="page-bar">
+      <button class="page-btn" ${d.page<=1?'disabled':''} onclick="S.pedidos.page--;loadPedidos()">&#8249; Ant</button>
+      <span class="page-info">P&#225;g ${d.page}/${d.pages} &middot; ${fmt(d.total)} pedidos</span>
+      <button class="page-btn" ${d.page>=d.pages?'disabled':''} onclick="S.pedidos.page++;loadPedidos()">Sig &#8250;</button>
+    </div>`;
+}
+async function showPedidoDetail(id) {
+  setMain('<div class="loading">Cargando pedido...</div>');
+  let d; try { d = await api('/api/pedidos/'+id); } catch(e) { setMain('<div class="loading">Error: '+e.message+'</div>'); return; }
+  const {pedido: p, items} = d;
+  const totPed = items.reduce((s,r)=>s+r.cantidadpedida,0);
+  const totEnt = items.reduce((s,r)=>s+r.entregadas,0);
+  const totRech = items.reduce((s,r)=>s+r.rechazadas,0);
+  setMain(`
+    <div class="breadcrumb">
+      <span class="bc-link" onclick="go('pedidos')">Pedidos</span>
+      <span class="bc-sep">&#8250;</span>
+      <span class="bc-cur">Pedido ${p.nropedido||p.idpedido}</span>
+    </div>
+    <div class="card" style="margin-bottom:14px">
+      <div class="card-title">Datos del pedido</div>
+      <div class="ficha-grid">
+        ${fld('N&#250;mero',`<code style="color:var(--accent)">${p.nropedido||p.idpedido}</code>`)}
+        ${fld('Fecha', (p.fechapedido||'').slice(0,10))}
+        ${fld('Cliente', p.cliente_nombre+' <span style="color:var(--muted);font-size:11px">('+p.códigocliente+')</span>')}
+        ${fld('Estado', estadoTag(p.estadopedido, p.estado_label))}
+        ${fld('Para stock', p.parastock ? 'S&#237;' : null)}
+        ${fld('Pago anticipado', p.pagoanticipado ? 'S&#237;' : null)}
+      </div>
+      ${p.observaciones ? `<div class="ficha-sep">Obs: ${p.observaciones}</div>` : ''}
+    </div>
+    <div class="kpi-grid" style="margin-bottom:14px">
+      <div class="kpi-card"><div class="kpi-label">&#205;tems</div><div class="kpi-value c-blue">${items.length}</div></div>
+      <div class="kpi-card"><div class="kpi-label">Total pedidas</div><div class="kpi-value c-blue">${fmt(totPed)}</div></div>
+      <div class="kpi-card"><div class="kpi-label">Entregadas</div><div class="kpi-value c-green">${fmt(totEnt)}</div></div>
+      <div class="kpi-card"><div class="kpi-label">Rechazadas</div><div class="kpi-value c-yellow">${fmt(totRech)}</div></div>
+    </div>
+    <div class="sec-title" style="font-size:14px;margin-bottom:10px">&#205;tems del pedido</div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>C&#243;d.</th><th>Pieza</th><th>Estado</th><th style="text-align:right">Pedidas</th><th style="text-align:right">Producidas</th><th style="text-align:right">Rechazadas</th><th style="text-align:right">Entregadas</th><th>F. entrega</th></tr></thead>
+      <tbody>${items.map(r=>`
+        <tr class="tr-link" onclick="go('pieza',${r.pieza_id})">
+          <td><code style="font-size:11px;color:var(--muted)">${r.codigo_pieza||'—'}</code></td>
+          <td>${r.nombrepieza}</td>
+          <td>${estadoTag(r.estadoitem, r.estado_label)}</td>
+          <td style="text-align:right">${fmt(r.cantidadpedida)}</td>
+          <td style="text-align:right">${r.producidas||'—'}</td>
+          <td style="text-align:right;color:${r.rechazadas>0?'var(--yellow)':'inherit'}">${r.rechazadas||'—'}</td>
+          <td style="text-align:right;color:var(--green)">${r.entregadas||'—'}</td>
+          <td style="color:var(--muted);font-size:12px;white-space:nowrap">${(r.fechadeentrega||'').slice(0,10)||'—'}</td>
+        </tr>`).join('')}
+      </tbody></table></div>
+  `);
+}
+
+// ── Remitos ────────────────────────────────────────────────────────────────────
+async function showRemitos() {
+  setMain('<div class="loading">Cargando remitos...</div>');
+  if (!_allClientes.length) { try { _allClientes = await api('/api/analytics/clientes'); } catch(e){} }
+  setMain(`
+    <div class="sec-title">Remitos</div>
+    <div class="card" style="margin-bottom:14px">
+      <div class="row-gap" style="flex-wrap:wrap">
+        <select class="inp" id="re-año" onchange="reFilter()">${_yearOpts(S.remitos.año)}</select>
+        <select class="inp" id="re-cl"  onchange="reFilter()">${_clOpts(S.remitos.cliente)}</select>
+        <input class="inp inp-grow" id="re-q" placeholder="Buscar nro, cliente, obs..."
+          value="${S.remitos.search}" onkeydown="if(event.key==='Enter')reFilter()">
+        <button class="page-btn" onclick="reFilter()">Buscar</button>
+      </div>
+    </div>
+    <div id="re-content"><div class="loading">Cargando...</div></div>
+  `);
+  await loadRemitos();
+}
+function reFilter() {
+  S.remitos.año    = ($id('re-año')||{}).value||'';
+  S.remitos.cliente= ($id('re-cl') ||{}).value||'';
+  S.remitos.search = ($id('re-q')  ||{}).value||'';
+  S.remitos.page = 1; loadRemitos();
+}
+async function loadRemitos() {
+  const st = S.remitos; const el = $id('re-content'); if (!el) return;
+  el.innerHTML = '<div class="loading">Cargando...</div>';
+  const qs = new URLSearchParams({page: st.page, page_size: 50});
+  if (st.año) qs.set('año', st.año);
+  if (st.cliente) qs.set('cliente', st.cliente);
+  if (st.search) qs.set('search', st.search);
+  let d; try { d = await api('/api/remitos?'+qs); } catch(e) { el.innerHTML='<div class="loading">Error: '+e.message+'</div>'; return; }
+  el.innerHTML = `
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>N&#176; Remito</th><th>Fecha</th><th>Cliente</th><th style="text-align:right">&#205;tems</th><th style="text-align:right">Piezas</th><th>Controlado</th></tr></thead>
+      <tbody>${d.rows.length
+        ? d.rows.map(r=>`
+          <tr class="tr-link" onclick="go('remito',${r.idnroremito})">
+            <td><code style="color:var(--accent)">${r.idnroremito}</code></td>
+            <td style="white-space:nowrap;color:var(--muted);font-size:12px">${(r.fecharemito||'').slice(0,10)}</td>
+            <td><div style="font-size:12px">${r.cliente_nombre||r.códigocliente}</div><div style="font-size:11px;color:var(--muted)">${r.códigocliente}</div></td>
+            <td style="text-align:right;color:var(--muted)">${r.n_items}</td>
+            <td style="text-align:right;font-weight:600">${fmt(r.total_piezas)}</td>
+            <td>${r.marcacontrolado==='True'||r.marcacontrolado===1?'<span class="tag tag-g">&#10003;</span>':'<span class="tag tag-m">Pendiente</span>'}</td>
+          </tr>`).join('')
+        : '<tr><td colspan="6" class="empty">Sin resultados</td></tr>'}
+      </tbody></table></div>
+    <div class="page-bar">
+      <button class="page-btn" ${d.page<=1?'disabled':''} onclick="S.remitos.page--;loadRemitos()">&#8249; Ant</button>
+      <span class="page-info">P&#225;g ${d.page}/${d.pages} &middot; ${fmt(d.total)} remitos</span>
+      <button class="page-btn" ${d.page>=d.pages?'disabled':''} onclick="S.remitos.page++;loadRemitos()">Sig &#8250;</button>
+    </div>`;
+}
+async function showRemitoDetail(id) {
+  setMain('<div class="loading">Cargando remito...</div>');
+  let d; try { d = await api('/api/remitos/'+id); } catch(e) { setMain('<div class="loading">Error: '+e.message+'</div>'); return; }
+  const {remito: r, items} = d;
+  const totalPzas = items.reduce((s,i)=>s+(i.cantidad||0),0);
+  setMain(`
+    <div class="breadcrumb">
+      <span class="bc-link" onclick="go('remitos')">Remitos</span>
+      <span class="bc-sep">&#8250;</span>
+      <span class="bc-cur">Remito ${r.idnroremito}</span>
+    </div>
+    <div class="card" style="margin-bottom:14px">
+      <div class="card-title">Datos del remito</div>
+      <div class="ficha-grid">
+        ${fld('N&#250;mero',`<code style="color:var(--accent)">${r.idnroremito}</code>`)}
+        ${fld('Fecha', (r.fecharemito||'').slice(0,10))}
+        ${fld('Cliente', r.cliente_nombre+' <span style="color:var(--muted);font-size:11px">('+r.códigocliente+')</span>')}
+        ${fld('Controlado', r.marcacontrolado==='True'||r.marcacontrolado===1 ? '&#10003; S&#237;' : 'Pendiente')}
+      </div>
+      ${r.observaciones ? `<div class="ficha-sep">Obs: ${r.observaciones}</div>` : ''}
+    </div>
+    <div class="kpi-grid" style="margin-bottom:14px">
+      <div class="kpi-card"><div class="kpi-label">&#205;tems distintos</div><div class="kpi-value c-blue">${items.length}</div></div>
+      <div class="kpi-card"><div class="kpi-label">Total piezas</div><div class="kpi-value c-green">${fmt(totalPzas)}</div></div>
+    </div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>C&#243;d.</th><th>Pieza</th><th style="text-align:right">Cantidad</th></tr></thead>
+      <tbody>${items.map(i=>`
+        <tr class="tr-link" onclick="go('pieza',${i.pieza_id})">
+          <td><code style="font-size:11px;color:var(--muted)">${i.codigo_pieza||'—'}</code></td>
+          <td>${i.nombrepieza}</td>
+          <td style="text-align:right;font-weight:600">${fmt(i.cantidad)}</td>
+        </tr>`).join('')}
+      </tbody></table></div>
+  `);
+}
+
+// ── Piezas (catálogo) ──────────────────────────────────────────────────────────
+async function showPiezasCat() {
+  setMain('<div class="loading">Cargando piezas...</div>');
+  if (!_allClientes.length) { try { _allClientes = await api('/api/analytics/clientes'); } catch(e){} }
+  setMain(`
+    <div class="sec-title">Piezas <span style="font-size:12px;color:var(--muted);font-weight:400">Cat&#225;logo</span></div>
+    <div class="card" style="margin-bottom:14px">
+      <div class="row-gap" style="flex-wrap:wrap">
+        <select class="inp" id="pz-cl" onchange="pzFilter()">${_clOpts(S.piezas.cliente)}</select>
+        <select class="inp" id="pz-hab" onchange="pzFilter()">
+          <option value="">Todas</option>
+          <option value="1" ${S.piezas.habilitado==='1'?'selected':''}>Habilitadas</option>
+          <option value="0" ${S.piezas.habilitado==='0'?'selected':''}>Deshabilitadas</option>
+        </select>
+        <input class="inp inp-grow" id="pz-q" placeholder="Buscar nombre o c&#243;digo..."
+          value="${S.piezas.search}" onkeydown="if(event.key==='Enter')pzFilter()">
+        <button class="page-btn" onclick="pzFilter()">Buscar</button>
+      </div>
+    </div>
+    <div id="pz-cat-content"><div class="loading">Cargando...</div></div>
+  `);
+  await loadPiezasCat();
+}
+function pzFilter() {
+  S.piezas.cliente   = ($id('pz-cl') ||{}).value||'';
+  S.piezas.habilitado= ($id('pz-hab')||{}).value||'';
+  S.piezas.search    = ($id('pz-q')  ||{}).value||'';
+  S.piezas.page = 1; loadPiezasCat();
+}
+async function loadPiezasCat() {
+  const st = S.piezas; const el = $id('pz-cat-content'); if (!el) return;
+  el.innerHTML = '<div class="loading">Cargando...</div>';
+  const qs = new URLSearchParams({page: st.page, page_size: 50});
+  if (st.cliente) qs.set('cliente', st.cliente);
+  if (st.search)  qs.set('search',  st.search);
+  if (st.habilitado !== '') qs.set('habilitado', st.habilitado);
+  let d; try { d = await api('/api/piezas?'+qs); } catch(e) { el.innerHTML='<div class="loading">Error: '+e.message+'</div>'; return; }
+  el.innerHTML = `
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>C&#243;d.</th><th>Nombre</th><th>Cliente</th><th style="text-align:right">Peso (kg)</th><th>Estado</th></tr></thead>
+      <tbody>${d.rows.length
+        ? d.rows.map(r=>`
+          <tr class="tr-link" onclick="go('pieza',${r.id})">
+            <td><code style="font-size:11px;color:var(--muted)">${r.codigo_pieza||'—'}</code></td>
+            <td>${r.nombrepieza}</td>
+            <td style="font-size:12px;color:var(--muted)">${r.cliente_nombre||r.códcliente||'—'}</td>
+            <td style="text-align:right;color:var(--muted)">${r.pesoestablecido||'—'}</td>
+            <td>${r.habilitado?'<span class="tag tag-g">Activa</span>':'<span class="tag tag-m">Inactiva</span>'}</td>
+          </tr>`).join('')
+        : '<tr><td colspan="5" class="empty">Sin resultados</td></tr>'}
+      </tbody></table></div>
+    <div class="page-bar">
+      <button class="page-btn" ${d.page<=1?'disabled':''} onclick="S.piezas.page--;loadPiezasCat()">&#8249; Ant</button>
+      <span class="page-info">P&#225;g ${d.page}/${d.pages} &middot; ${fmt(d.total)} piezas</span>
+      <button class="page-btn" ${d.page>=d.pages?'disabled':''} onclick="S.piezas.page++;loadPiezasCat()">Sig &#8250;</button>
+    </div>`;
+}
+
+// ── Modelos ────────────────────────────────────────────────────────────────────
+async function showModelos() {
+  setMain('<div class="loading">Cargando modelos...</div>');
+  if (!_allClientes.length) { try { _allClientes = await api('/api/analytics/clientes'); } catch(e){} }
+  setMain(`
+    <div class="sec-title">Modelos</div>
+    <div class="card" style="margin-bottom:14px">
+      <div class="row-gap" style="flex-wrap:wrap">
+        <select class="inp" id="mo-cl" onchange="moFilter()">${_clOpts(S.modelos.cliente)}</select>
+        <select class="inp" id="mo-hab" onchange="moFilter()">
+          <option value="">Todos</option>
+          <option value="1" ${S.modelos.habilitado==='1'?'selected':''}>Habilitados</option>
+          <option value="0" ${S.modelos.habilitado==='0'?'selected':''}>Deshabilitados</option>
+        </select>
+        <input class="inp inp-grow" id="mo-q" placeholder="Buscar nombre, descripci&#243;n, c&#243;digo..."
+          value="${S.modelos.search}" onkeydown="if(event.key==='Enter')moFilter()">
+        <button class="page-btn" onclick="moFilter()">Buscar</button>
+      </div>
+    </div>
+    <div id="mo-content"><div class="loading">Cargando...</div></div>
+  `);
+  await loadModelos();
+}
+function moFilter() {
+  S.modelos.cliente   = ($id('mo-cl') ||{}).value||'';
+  S.modelos.habilitado= ($id('mo-hab')||{}).value||'';
+  S.modelos.search    = ($id('mo-q')  ||{}).value||'';
+  S.modelos.page = 1; loadModelos();
+}
+async function loadModelos() {
+  const st = S.modelos; const el = $id('mo-content'); if (!el) return;
+  el.innerHTML = '<div class="loading">Cargando...</div>';
+  const qs = new URLSearchParams({page: st.page, page_size: 50});
+  if (st.cliente) qs.set('cliente', st.cliente);
+  if (st.search)  qs.set('search',  st.search);
+  if (st.habilitado !== '') qs.set('habilitado', st.habilitado);
+  let d; try { d = await api('/api/modelos?'+qs); } catch(e) { el.innerHTML='<div class="loading">Error: '+e.message+'</div>'; return; }
+  el.innerHTML = `
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>C&#243;d.</th><th>Nombre / Descripci&#243;n</th><th>Due&#241;o</th><th>Tipo</th><th style="text-align:right">Existencia</th><th>Estado</th></tr></thead>
+      <tbody>${d.rows.length
+        ? d.rows.map(r=>`
+          <tr class="tr-link" onclick="go('modelo',${r.códigomodelo})">
+            <td><code style="color:var(--accent)">${r.códigomodelo}</code><div style="font-size:10px;color:var(--muted)">${r.codigo_cliente||''}</div></td>
+            <td><div style="font-size:12px">${r.nombremodelo||'—'}</div><div style="font-size:11px;color:var(--muted)">${r.descripciónmodelo||''}</div></td>
+            <td style="font-size:12px;color:var(--muted)">${r.cliente_nombre||r.códigodueño||'—'}</td>
+            <td style="font-size:11px;color:var(--muted)">${r.tipo_label||'—'}</td>
+            <td style="text-align:right;font-weight:600;color:${(r.existencia||0)>0?'var(--green)':'var(--muted)'}">${r.existencia||0}</td>
+            <td>${r.habilitado?'<span class="tag tag-g">Activo</span>':'<span class="tag tag-m">Inactivo</span>'}</td>
+          </tr>`).join('')
+        : '<tr><td colspan="6" class="empty">Sin resultados</td></tr>'}
+      </tbody></table></div>
+    <div class="page-bar">
+      <button class="page-btn" ${d.page<=1?'disabled':''} onclick="S.modelos.page--;loadModelos()">&#8249; Ant</button>
+      <span class="page-info">P&#225;g ${d.page}/${d.pages} &middot; ${fmt(d.total)} modelos</span>
+      <button class="page-btn" ${d.page>=d.pages?'disabled':''} onclick="S.modelos.page++;loadModelos()">Sig &#8250;</button>
+    </div>`;
+}
+async function showModeloDetail(id) {
+  setMain('<div class="loading">Cargando modelo...</div>');
+  let d; try { d = await api('/api/modelos/'+id); } catch(e) { setMain('<div class="loading">Error: '+e.message+'</div>'); return; }
+  const {modelo: m, piezas, movimientos, fotos_count} = d;
+  const noyer = [m.noyeríapasta&&'Pasta', m.noyeríashell&&'Shell', m.noyeríafenólica&&'Fen&#243;lica'].filter(Boolean).join(', ');
+  setMain(`
+    <div class="breadcrumb">
+      <span class="bc-link" onclick="go('modelos')">Modelos</span>
+      <span class="bc-sep">&#8250;</span>
+      <span class="bc-cur">${m.códigomodelo} &mdash; ${m.nombremodelo||''}</span>
+    </div>
+    <div class="card" style="margin-bottom:14px">
+      <div class="card-title">Ficha del modelo</div>
+      <div class="ficha-grid">
+        ${fld('C&#243;digo',`<code style="color:var(--accent)">${m.códigomodelo}</code>`)}
+        ${fld('C&#243;d. cliente', m.codigo_cliente)}
+        ${fld('Nombre', m.nombremodelo)}
+        ${fld('Descripci&#243;n', m.descripciónmodelo)}
+        ${fld('Tipo', m.tipo_label)}
+        ${fld('Due&#241;o', m.cliente_nombre||m.códigodueño)}
+        ${fld('Existencia',`<strong style="color:${(m.existencia||0)>0?'var(--green)':'var(--muted)'}">${m.existencia||0}</strong>`)}
+        ${fld('Estado', m.habilitado?'<span class="tag tag-g">Activo</span>':'<span class="tag tag-m">Inactivo</span>')}
+        ${fld('Noyer&#237;a', noyer||null)}
+        ${fld('Fotos', fotos_count>0?fotos_count+' foto(s)':null)}
+        ${fld('&#218;lt. movimiento', (m.fechaultimomovimiento||'').slice(0,10)||null)}
+      </div>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-title">Piezas que usa este modelo (${piezas.length})</div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>C&#243;d.</th><th>Nombre</th><th>Estado</th></tr></thead>
+          <tbody>${piezas.length
+            ? piezas.map(p=>`<tr class="tr-link" onclick="go('pieza',${p.pieza_id})">
+                <td><code style="font-size:11px;color:var(--muted)">${p.codigo_pieza||'—'}</code></td>
+                <td style="font-size:12px">${p.nombrepieza}</td>
+                <td>${p.habilitado?'<span class="tag tag-g" style="font-size:10px">&#10003;</span>':'<span class="tag tag-m" style="font-size:10px">&#10007;</span>'}</td>
+              </tr>`).join('')
+            : '<tr><td colspan="3" class="empty">Sin piezas</td></tr>'}
+          </tbody></table></div>
+      </div>
+      <div class="card">
+        <div class="card-title">&#218;ltimos movimientos</div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>Fecha</th><th>Operaci&#243;n</th><th>Obs</th></tr></thead>
+          <tbody>${movimientos.length
+            ? movimientos.map(mv=>`<tr>
+                <td style="color:var(--muted);font-size:12px;white-space:nowrap">${(mv.fechaoperación||'').slice(0,10)}</td>
+                <td style="font-size:12px">${mv.operación||'—'}</td>
+                <td style="font-size:11px;color:var(--muted)">${mv.observaciones||''}</td>
+              </tr>`).join('')
+            : '<tr><td colspan="3" class="empty">Sin movimientos</td></tr>'}
+          </tbody></table></div>
+      </div>
+    </div>
+  `);
+}
+
+// ── Fundiciones ────────────────────────────────────────────────────────────────
+async function showFundiciones() {
+  setMain(`
+    <div class="sec-title">Fundiciones</div>
+    <div class="card" style="margin-bottom:14px">
+      <div class="row-gap" style="flex-wrap:wrap">
+        <select class="inp" id="fu-año" onchange="fuFilter()">${_yearOpts(S.fundiciones.año)}</select>
+        <select class="inp" id="fu-cerr" onchange="fuFilter()">
+          <option value="">Todas</option>
+          <option value="true" ${S.fundiciones.cerrada==='true'?'selected':''}>Cerradas</option>
+          <option value="false" ${S.fundiciones.cerrada==='false'?'selected':''}>Abiertas</option>
+        </select>
+        <input class="inp inp-grow" id="fu-q" placeholder="Buscar n&#250;mero..."
+          value="${S.fundiciones.search}" onkeydown="if(event.key==='Enter')fuFilter()">
+        <button class="page-btn" onclick="fuFilter()">Buscar</button>
+      </div>
+    </div>
+    <div id="fu-content"><div class="loading">Cargando...</div></div>
+  `);
+  await loadFundiciones();
+}
+function fuFilter() {
+  S.fundiciones.año    = ($id('fu-año') ||{}).value||'';
+  S.fundiciones.cerrada= ($id('fu-cerr')||{}).value||'';
+  S.fundiciones.search = ($id('fu-q')   ||{}).value||'';
+  S.fundiciones.page = 1; loadFundiciones();
+}
+async function loadFundiciones() {
+  const st = S.fundiciones; const el = $id('fu-content'); if (!el) return;
+  el.innerHTML = '<div class="loading">Cargando...</div>';
+  const qs = new URLSearchParams({page: st.page, page_size: 50});
+  if (st.año)    qs.set('año', st.año);
+  if (st.cerrada) qs.set('cerrada', st.cerrada);
+  if (st.search)  qs.set('search',  st.search);
+  let d; try { d = await api('/api/fundiciones?'+qs); } catch(e) { el.innerHTML='<div class="loading">Error: '+e.message+'</div>'; return; }
+  el.innerHTML = `
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>N&#176;</th><th>Fecha</th><th style="text-align:right">Hs. efectivas</th><th style="text-align:right">Kg devol.</th><th style="text-align:right">&#205;tems</th><th style="text-align:right">Moldeadas</th><th>Estado</th></tr></thead>
+      <tbody>${d.rows.length
+        ? d.rows.map(r=>`
+          <tr class="tr-link" onclick="go('fundicion',${r.códfundición})">
+            <td><code style="color:var(--accent)">${r.códfundición}</code></td>
+            <td style="white-space:nowrap;color:var(--muted);font-size:12px">${(r.fecha||'').slice(0,10)||'—'}</td>
+            <td style="text-align:right">${r.horastallerefectivos||'—'}</td>
+            <td style="text-align:right;color:${(r.kgdevol||0)>0?'var(--yellow)':'inherit'}">${r.kgdevol||'—'}</td>
+            <td style="text-align:right;color:var(--muted)">${r.n_items}</td>
+            <td style="text-align:right;font-weight:600">${fmt(r.total_moldeadas)}</td>
+            <td>${r.planillacerrada==='True'||r.planillacerrada===1?'<span class="tag tag-g">Cerrada</span>':'<span class="tag tag-y">Abierta</span>'}</td>
+          </tr>`).join('')
+        : '<tr><td colspan="7" class="empty">Sin resultados</td></tr>'}
+      </tbody></table></div>
+    <div class="page-bar">
+      <button class="page-btn" ${d.page<=1?'disabled':''} onclick="S.fundiciones.page--;loadFundiciones()">&#8249; Ant</button>
+      <span class="page-info">P&#225;g ${d.page}/${d.pages} &middot; ${fmt(d.total)} fundiciones</span>
+      <button class="page-btn" ${d.page>=d.pages?'disabled':''} onclick="S.fundiciones.page++;loadFundiciones()">Sig &#8250;</button>
+    </div>`;
+}
+async function showFundicionDetail(id) {
+  setMain('<div class="loading">Cargando fundici&#243;n...</div>');
+  let d; try { d = await api('/api/fundiciones/'+id); } catch(e) { setMain('<div class="loading">Error: '+e.message+'</div>'); return; }
+  const {fundicion: f, items, material: mat} = d;
+  const totMold = items.reduce((s,r)=>s+(r.cantidadmoldeada||0),0);
+  const totApro = items.reduce((s,r)=>s+(r.cantidadaprobada||0),0);
+  setMain(`
+    <div class="breadcrumb">
+      <span class="bc-link" onclick="go('fundiciones')">Fundiciones</span>
+      <span class="bc-sep">&#8250;</span>
+      <span class="bc-cur">Fundici&#243;n #${f.códfundición}</span>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-title">Datos de la fundici&#243;n</div>
+        <div class="ficha-grid">
+          ${fld('N&#250;mero',`<code style="color:var(--accent)">${f.códfundición}</code>`)}
+          ${fld('Fecha', (f.fecha||'').slice(0,10))}
+          ${fld('Hs. efectivas taller', f.horastallerefectivos)}
+          ${fld('Hs. agencia', f.horastalleragencia)}
+          ${fld('Hs. no productivas', f.horasnoproductivas)}
+          ${fld('Kg devol.', f.kgdevol)}
+          ${fld('Kg arena scrap', f.kgarenascrap)}
+          ${fld('N&#186; crisol', f.nrocrisol)}
+          ${fld('Campa&#241;a', f.nrocampaña)}
+          ${fld('Planilla', f.planillacerrada==='True'?'<span class="tag tag-g">Cerrada</span>':'<span class="tag tag-y">Abierta</span>')}
+        </div>
+      </div>
+      ${mat ? `<div class="card">
+        <div class="card-title">Informe de material</div>
+        <div class="ficha-grid">
+          ${fld('Material', mat.material_nombre)}
+          ${fld('Grafito', mat.morfologíagrafito)}
+          ${fld('Matriz', mat.matriz)}
+          ${fld('Resistencia', mat.valorresistencia)}
+          ${fld('Alargamiento', mat.valoralargamiento)}
+          ${fld('C', mat.carbono)} ${fld('Si', mat.silicio)}
+          ${fld('Mn', mat.manganeso)} ${fld('P', mat.fósforo)} ${fld('S', mat.azufre)}
+          ${fld('Aprobado', (mat.fechaaprobación||'').slice(0,10)||null)}
+        </div>
+      </div>` : '<div class="card"><div class="empty">Sin informe de material</div></div>'}
+    </div>
+    <div class="kpi-grid" style="margin:14px 0">
+      <div class="kpi-card"><div class="kpi-label">&#205;tems distintos</div><div class="kpi-value c-blue">${items.length}</div></div>
+      <div class="kpi-card"><div class="kpi-label">Total moldeadas</div><div class="kpi-value c-blue">${fmt(totMold)}</div></div>
+      <div class="kpi-card"><div class="kpi-label">Total aprobadas</div><div class="kpi-value c-green">${fmt(totApro)}</div></div>
+    </div>
+    <div class="sec-title" style="font-size:14px;margin-bottom:10px">Producci&#243;n</div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>C&#243;d.</th><th>Pieza</th><th style="text-align:right">Moldeadas</th><th style="text-align:right">Aprobadas</th></tr></thead>
+      <tbody>${items.map(r=>`
+        <tr class="tr-link" onclick="go('pieza',${r.pieza_id})">
+          <td><code style="font-size:11px;color:var(--muted)">${r.codigo_pieza||'—'}</code></td>
+          <td style="font-size:12px">${r.nombrepieza}</td>
+          <td style="text-align:right">${r.cantidadmoldeada||'—'}</td>
+          <td style="text-align:right;color:var(--green)">${r.cantidadaprobada||'—'}</td>
+        </tr>`).join('')}
+      </tbody></table></div>
+  `);
+}
+
+// ── Documentos ────────────────────────────────────────────────────────────────
+const _DOC_TIPOS = [{v:'',l:'Todos los tipos'},{v:'1',l:'RAC — Acc. Correctivas'},{v:'2',l:'RAP — Acc. Preventivas'},{v:'3',l:'RMC — Mejora Continua'},{v:'4',l:'IRC — Reclamo Cliente'}];
+async function showDocumentos() {
+  setMain('<div class="loading">Cargando documentos...</div>');
+  if (!_allClientes.length) { try { _allClientes = await api('/api/analytics/clientes'); } catch(e){} }
+  const tipoOpts = _DOC_TIPOS.map(t=>`<option value="${t.v}" ${S.documentos.tipo===t.v?'selected':''}>${t.l}</option>`).join('');
+  setMain(`
+    <div class="sec-title">Documentos de calidad</div>
+    <div class="card" style="margin-bottom:14px">
+      <div class="row-gap" style="flex-wrap:wrap">
+        <select class="inp" id="do-año" onchange="doFilter()">${_yearOpts(S.documentos.año)}</select>
+        <select class="inp" id="do-cl"  onchange="doFilter()">${_clOpts(S.documentos.cliente)}</select>
+        <select class="inp" id="do-tp"  onchange="doFilter()">${tipoOpts}</select>
+        <input class="inp inp-grow" id="do-q" placeholder="Buscar n&#250;mero, cliente, descripci&#243;n..."
+          value="${S.documentos.search}" onkeydown="if(event.key==='Enter')doFilter()">
+        <button class="page-btn" onclick="doFilter()">Buscar</button>
+      </div>
+    </div>
+    <div id="do-content"><div class="loading">Cargando...</div></div>
+  `);
+  await loadDocumentos();
+}
+function doFilter() {
+  S.documentos.año    = ($id('do-año')||{}).value||'';
+  S.documentos.cliente= ($id('do-cl') ||{}).value||'';
+  S.documentos.tipo   = ($id('do-tp') ||{}).value||'';
+  S.documentos.search = ($id('do-q')  ||{}).value||'';
+  S.documentos.page = 1; loadDocumentos();
+}
+async function loadDocumentos() {
+  const st = S.documentos; const el = $id('do-content'); if (!el) return;
+  el.innerHTML = '<div class="loading">Cargando...</div>';
+  const qs = new URLSearchParams({page: st.page, page_size: 50});
+  if (st.año)    qs.set('año',    st.año);
+  if (st.cliente) qs.set('cliente', st.cliente);
+  if (st.tipo)   qs.set('tipo',   st.tipo);
+  if (st.search)  qs.set('search',  st.search);
+  let d; try { d = await api('/api/documentos?'+qs); } catch(e) { el.innerHTML='<div class="loading">Error: '+e.message+'</div>'; return; }
+  el.innerHTML = `
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>N&#186;</th><th>Tipo</th><th>Fecha</th><th>Cliente</th><th>Descripci&#243;n</th><th>Cierre</th><th>&#10003;</th></tr></thead>
+      <tbody>${d.rows.length
+        ? d.rows.map(r=>`
+          <tr class="tr-link" onclick="go('documento',${r.iddoc})">
+            <td><code style="color:var(--accent)">${r.nrodoc||r.iddoc}</code></td>
+            <td><span class="tag tag-b">${r.tipo_abrev||'—'}</span></td>
+            <td style="white-space:nowrap;color:var(--muted);font-size:12px">${(r.fechaemisión||'').slice(0,10)}</td>
+            <td style="font-size:12px;color:var(--muted)">${r.cliente_nombre||r.códigocliente||'—'}</td>
+            <td style="font-size:12px;max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(r.descripción||'').replace(/"/g,'&quot;')}">${r.descripción||''}</td>
+            <td style="color:var(--muted);font-size:12px;white-space:nowrap">${(r.fechacierre||'').slice(0,10)||'—'}</td>
+            <td>${r.ok?'<span class="tag tag-g">&#10003;</span>':''}</td>
+          </tr>`).join('')
+        : '<tr><td colspan="7" class="empty">Sin resultados</td></tr>'}
+      </tbody></table></div>
+    <div class="page-bar">
+      <button class="page-btn" ${d.page<=1?'disabled':''} onclick="S.documentos.page--;loadDocumentos()">&#8249; Ant</button>
+      <span class="page-info">P&#225;g ${d.page}/${d.pages} &middot; ${fmt(d.total)} documentos</span>
+      <button class="page-btn" ${d.page>=d.pages?'disabled':''} onclick="S.documentos.page++;loadDocumentos()">Sig &#8250;</button>
+    </div>`;
+}
+async function showDocumentoDetail(id) {
+  setMain('<div class="loading">Cargando documento...</div>');
+  let d; try { d = await api('/api/documentos/'+id); } catch(e) { setMain('<div class="loading">Error: '+e.message+'</div>'); return; }
+  const {documento: doc, items_reclamo} = d;
+  setMain(`
+    <div class="breadcrumb">
+      <span class="bc-link" onclick="go('documentos')">Documentos</span>
+      <span class="bc-sep">&#8250;</span>
+      <span class="bc-cur"><span class="tag tag-b">${doc.tipo_abrev||'—'}</span> ${doc.nrodoc||doc.iddoc}</span>
+    </div>
+    <div class="card" style="margin-bottom:14px">
+      <div class="card-title">${doc.tipo_label||'Documento'}</div>
+      <div class="ficha-grid">
+        ${fld('N&#250;mero',`<code style="color:var(--accent)">${doc.nrodoc||doc.iddoc}</code>`)}
+        ${fld('Tipo',`<span class="tag tag-b">${doc.tipo_abrev}</span> ${doc.tipo_label||''}`)}
+        ${fld('Fecha emisi&#243;n', (doc.fechaemisión||'').slice(0,10))}
+        ${fld('Creaci&#243;n', (doc.creación||'').slice(0,10))}
+        ${fld('Cliente', doc.cliente_nombre ? doc.cliente_nombre+' ('+doc.códigocliente+')' : doc.códigocliente)}
+        ${fld('Estado', doc.ok ? '<span class="tag tag-g">Cerrado &#10003;</span>' : '<span class="tag tag-y">Abierto</span>')}
+        ${fld('F. cierre prevista', (doc.fprevcierre||'').slice(0,10))}
+        ${fld('F. cierre real', (doc.fechacierre||'').slice(0,10))}
+      </div>
+      ${doc.descripción ? `<div class="ficha-sep"><strong>Descripci&#243;n:</strong> ${doc.descripción}</div>` : ''}
+      ${doc.causas      ? `<div class="ficha-sep" style="margin-top:8px"><strong>Causas:</strong> ${doc.causas}</div>` : ''}
+      ${doc.acctomadas  ? `<div class="ficha-sep" style="margin-top:8px"><strong>Acciones tomadas:</strong> ${doc.acctomadas}</div>` : ''}
+      ${doc.accioneseficaces ? `<div class="ficha-sep" style="margin-top:8px"><strong>Acciones eficaces:</strong> ${doc.accioneseficaces}</div>` : ''}
+      ${doc.observaciones ? `<div class="ficha-sep" style="margin-top:8px;color:var(--muted)">Obs: ${doc.observaciones}</div>` : ''}
+    </div>
+    ${items_reclamo.length ? `
+      <div class="sec-title" style="font-size:14px;margin-bottom:10px">Piezas reclamadas (${items_reclamo.length})</div>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>C&#243;d.</th><th>Pieza</th><th style="text-align:right">Cantidad</th><th>Cerrado</th><th>Verificado</th></tr></thead>
+        <tbody>${items_reclamo.map(r=>`
+          <tr class="tr-link" onclick="go('pieza',${r.pieza_id||0})">
+            <td><code style="font-size:11px;color:var(--muted)">${r.codigo_pieza||'—'}</code></td>
+            <td style="font-size:12px">${r.nombrepieza||'—'}</td>
+            <td style="text-align:right;font-weight:600">${fmt(r.cantidadreclamo)}</td>
+            <td>${r.cerrado?'<span class="tag tag-g">&#10003;</span>':''}</td>
+            <td>${r.verificado?'<span class="tag tag-g">&#10003;</span>':''}</td>
+          </tr>`).join('')}
+        </tbody></table></div>` : ''}
+  `);
+}
+
+// ── Filter helpers ─────────────────────────────────────────────────────────────
+function _yearOpts(sel) {
+  const years = [2026,2025,2024,2023,2022,2021,2020,2019,2018,2017,2016,2015,2014,2013,2012,2011,2010,2009,2008];
+  return '<option value="">Todos los a&#241;os</option>'
+    + years.map(y=>`<option value="${y}"${String(sel)===String(y)?' selected':''}>${y}</option>`).join('');
+}
+function _clOpts(sel) {
+  return '<option value="">Todos los clientes</option>'
+    + _allClientes.map(c=>`<option value="${c.codigo}"${sel===c.codigo?' selected':''}>${c.fantasia||c.nombre} (${c.codigo})</option>`).join('');
+}
+function _estOpts(sel) {
+  const codes = [
+    {v:'K',l:'Cumplido Automático'},{v:'D',l:'Cumplido Manual'},{v:'R',l:'Remito s/Controlar'},
+    {v:'L',l:'Listo p/Entregar'},{v:'P',l:'Programado'},{v:'I',l:'Inicial'},
+    {v:'F',l:'Fundido'},{v:'O',l:'Impreso'},{v:'A',l:'Anulado c/Impresión'},
+    {v:'B',l:'Anulado s/Impresión'},{v:'C',l:'Confirmado'},
+  ];
+  return '<option value="">Todos los estados</option>'
+    + codes.map(c=>`<option value="${c.v}"${sel===c.v?' selected':''}>${c.v} — ${c.l}</option>`).join('');
 }
 
 // ── Trabajos ───────────────────────────────────────────────────────────────────

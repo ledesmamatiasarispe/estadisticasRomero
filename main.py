@@ -678,6 +678,532 @@ def analytics_defectos(
         conn.close()
 
 
+# ── Shared query helper ───────────────────────────────────────────────────────
+
+def _est_map(conn: sqlite3.Connection) -> dict:
+    """Estado codes → labels."""
+    return {
+        r["códigoestado"]: r["leyendaestado"]
+        for r in conn.execute(
+            "SELECT códigoestado, leyendaestado FROM Estados GROUP BY códigoestado"
+        ).fetchall()
+    }
+
+
+# ── Pedidos ───────────────────────────────────────────────────────────────────
+
+@app.get("/api/pedidos")
+def get_pedidos(
+    año: Optional[int] = Query(None),
+    cliente: Optional[str] = Query(None),
+    estado: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+):
+    conn = get_db()
+    try:
+        est = _est_map(conn)
+        wp, pa = [], []
+        if año:
+            wp.append("strftime('%Y', p.fechapedido) = ?"); pa.append(str(año))
+        if cliente:
+            wp.append("p.códigocliente = ?"); pa.append(cliente)
+        if estado:
+            wp.append("p.estadopedido = ?"); pa.append(estado)
+        if search:
+            s = f"%{search.strip()}%"
+            wp.append("(COALESCE(c.nombrefantasía, c.nombrecliente) LIKE ? OR CAST(p.nropedido AS TEXT) LIKE ? OR p.observaciones LIKE ?)")
+            pa.extend([s, s, s])
+        where = ("WHERE " + " AND ".join(wp)) if wp else ""
+        base = "FROM Pedidos p JOIN Clientes c ON p.códigocliente = c.códigocliente"
+
+        total = conn.execute(f"SELECT COUNT(*) {base} {where}", pa).fetchone()[0]
+        offset = (page - 1) * page_size
+        rows = conn.execute(f"""
+            SELECT p.idpedido, p.nropedido, p.códigocliente,
+                   COALESCE(c.nombrefantasía, c.nombrecliente) as cliente_nombre,
+                   p.fechapedido, p.estadopedido, p.observaciones
+            {base} {where} ORDER BY p.fechapedido DESC LIMIT ? OFFSET ?
+        """, pa + [page_size, offset]).fetchall()
+
+        ids = tuple(r["idpedido"] for r in rows)
+        cnt_map: dict = {}
+        if ids:
+            ph = ",".join("?" * len(ids))
+            for r in conn.execute(
+                f"SELECT idpedido, COUNT(*) as n FROM ItemDetallePedido WHERE idpedido IN ({ph}) GROUP BY idpedido", ids
+            ).fetchall():
+                cnt_map[r["idpedido"]] = r["n"]
+
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["estado_label"] = est.get(d["estadopedido"] or "", d["estadopedido"] or "")
+            d["n_items"] = cnt_map.get(d["idpedido"], 0)
+            result.append(d)
+
+        return {"rows": result, "total": total, "page": page, "page_size": page_size,
+                "pages": max(1, (total + page_size - 1) // page_size)}
+    finally:
+        conn.close()
+
+
+@app.get("/api/pedidos/{pedido_id}")
+def get_pedido_detail(pedido_id: int):
+    conn = get_db()
+    try:
+        est = _est_map(conn)
+        p = conn.execute("""
+            SELECT p.idpedido, p.nropedido, p.códigocliente,
+                   COALESCE(c.nombrefantasía, c.nombrecliente) as cliente_nombre,
+                   p.fechapedido, p.estadopedido, p.observaciones,
+                   p.parastock, p.pagoanticipado, p.confirmarpedido
+            FROM Pedidos p JOIN Clientes c ON p.códigocliente = c.códigocliente
+            WHERE p.idpedido = ?
+        """, (pedido_id,)).fetchone()
+        if not p:
+            raise HTTPException(404, f"Pedido {pedido_id} no encontrado")
+
+        items = conn.execute("""
+            SELECT idp.iditempedido, idp.cantidadpedida, idp.fechadeentrega,
+                   idp.estadoitem, idp.fechasolicitadaentrega,
+                   np.id as pieza_id, np.nombrepieza,
+                   np.códigopiezapuestoporcliente as codigo_pieza,
+                   COALESCE(SUM(t.cantidadentregada), 0) as entregadas,
+                   COALESCE(SUM(t.cantidadrechazada), 0) as rechazadas,
+                   COALESCE(SUM(t.cantidadproducida), 0) as producidas
+            FROM ItemDetallePedido idp
+            JOIN NombreDePiezas np ON idp.idpieza = np.id
+            LEFT JOIN Trabajos t ON idp.iditempedido = t.iditempedido
+            WHERE idp.idpedido = ?
+            GROUP BY idp.iditempedido
+            ORDER BY np.nombrepieza
+        """, (pedido_id,)).fetchall()
+
+        pd_dict = dict(p)
+        pd_dict["estado_label"] = est.get(pd_dict["estadopedido"] or "", pd_dict["estadopedido"] or "")
+        result_items = []
+        for r in items:
+            d = dict(r)
+            d["estado_label"] = est.get(d["estadoitem"] or "", d["estadoitem"] or "")
+            result_items.append(d)
+        return {"pedido": pd_dict, "items": result_items}
+    finally:
+        conn.close()
+
+
+# ── Remitos ───────────────────────────────────────────────────────────────────
+
+@app.get("/api/remitos")
+def get_remitos(
+    año: Optional[int] = Query(None),
+    cliente: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+):
+    conn = get_db()
+    try:
+        wp, pa = [], []
+        if año:
+            wp.append("strftime('%Y', r.fecharemito) = ?"); pa.append(str(año))
+        if cliente:
+            wp.append("r.códigocliente = ?"); pa.append(cliente)
+        if search:
+            s = f"%{search.strip()}%"
+            wp.append("(COALESCE(c.nombrefantasía, c.nombrecliente) LIKE ? OR CAST(r.idnroremito AS TEXT) LIKE ? OR r.observaciones LIKE ?)")
+            pa.extend([s, s, s])
+        where = ("WHERE " + " AND ".join(wp)) if wp else ""
+        base = "FROM Remitos r JOIN Clientes c ON r.códigocliente = c.códigocliente"
+
+        total = conn.execute(f"SELECT COUNT(*) {base} {where}", pa).fetchone()[0]
+        offset = (page - 1) * page_size
+        rows = conn.execute(f"""
+            SELECT r.idnroremito, r.códigocliente,
+                   COALESCE(c.nombrefantasía, c.nombrecliente) as cliente_nombre,
+                   r.fecharemito, r.marcacontrolado, r.observaciones
+            {base} {where} ORDER BY r.fecharemito DESC LIMIT ? OFFSET ?
+        """, pa + [page_size, offset]).fetchall()
+
+        ids = tuple(r["idnroremito"] for r in rows)
+        cnt_map2: dict = {}
+        if ids:
+            ph = ",".join("?" * len(ids))
+            for r in conn.execute(
+                f"SELECT idnroremito, COUNT(*) as n, COALESCE(SUM(cantidad),0) as total_pzas FROM ItemDetalle WHERE idnroremito IN ({ph}) GROUP BY idnroremito", ids
+            ).fetchall():
+                cnt_map2[r["idnroremito"]] = (r["n"], r["total_pzas"])
+
+        result = []
+        for r in rows:
+            d = dict(r)
+            ic = cnt_map2.get(d["idnroremito"], (0, 0))
+            d["n_items"] = ic[0]; d["total_piezas"] = ic[1]
+            result.append(d)
+        return {"rows": result, "total": total, "page": page, "page_size": page_size,
+                "pages": max(1, (total + page_size - 1) // page_size)}
+    finally:
+        conn.close()
+
+
+@app.get("/api/remitos/{remito_id}")
+def get_remito_detail(remito_id: int):
+    conn = get_db()
+    try:
+        r = conn.execute("""
+            SELECT r.idnroremito, r.códigocliente,
+                   COALESCE(c.nombrefantasía, c.nombrecliente) as cliente_nombre,
+                   r.fecharemito, r.marcacontrolado, r.observaciones
+            FROM Remitos r JOIN Clientes c ON r.códigocliente = c.códigocliente
+            WHERE r.idnroremito = ?
+        """, (remito_id,)).fetchone()
+        if not r:
+            raise HTTPException(404, f"Remito {remito_id} no encontrado")
+
+        items = conn.execute("""
+            SELECT d.iditemdetalle, d.cantidad, d.iditemtrabajo,
+                   np.id as pieza_id, np.nombrepieza,
+                   np.códigopiezapuestoporcliente as codigo_pieza
+            FROM ItemDetalle d
+            JOIN PesosDePiezas pp ON d.códpieza = pp.códpieza
+            JOIN NombreDePiezas np ON pp.nombredepiezasid_ = np.id
+            WHERE d.idnroremito = ?
+            GROUP BY d.iditemdetalle
+            ORDER BY np.nombrepieza
+        """, (remito_id,)).fetchall()
+
+        return {"remito": dict(r), "items": [dict(i) for i in items]}
+    finally:
+        conn.close()
+
+
+# ── Piezas ────────────────────────────────────────────────────────────────────
+
+@app.get("/api/piezas")
+def get_piezas(
+    cliente: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    habilitado: Optional[bool] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+):
+    conn = get_db()
+    try:
+        wp, pa = [], []
+        if cliente:
+            wp.append("np.códcliente = ?"); pa.append(cliente)
+        if search:
+            s = f"%{search.strip()}%"
+            wp.append("(np.nombrepieza LIKE ? OR np.códigopiezapuestoporcliente LIKE ?)")
+            pa.extend([s, s])
+        if habilitado is not None:
+            wp.append("np.habilitado = ?"); pa.append(1 if habilitado else 0)
+        where = ("WHERE " + " AND ".join(wp)) if wp else ""
+        base = "FROM NombreDePiezas np LEFT JOIN Clientes c ON np.códcliente = c.códigocliente"
+
+        total = conn.execute(f"SELECT COUNT(*) {base} {where}", pa).fetchone()[0]
+        offset = (page - 1) * page_size
+        rows = conn.execute(f"""
+            SELECT np.id, np.códcliente,
+                   COALESCE(c.nombrefantasía, c.nombrecliente) as cliente_nombre,
+                   np.códigopiezapuestoporcliente as codigo_pieza,
+                   np.nombrepieza, np.tipofacturación, np.habilitado,
+                   np.pesoestablecido, np.especificacionmaterial
+            {base} {where} ORDER BY np.nombrepieza LIMIT ? OFFSET ?
+        """, pa + [page_size, offset]).fetchall()
+
+        return {"rows": [dict(r) for r in rows], "total": total, "page": page, "page_size": page_size,
+                "pages": max(1, (total + page_size - 1) // page_size)}
+    finally:
+        conn.close()
+
+
+# ── Modelos ───────────────────────────────────────────────────────────────────
+
+@app.get("/api/modelos")
+def get_modelos(
+    cliente: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    habilitado: Optional[bool] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+):
+    conn = get_db()
+    try:
+        wp, pa = [], []
+        if cliente:
+            wp.append("m.códigodueño = ?"); pa.append(cliente)
+        if search:
+            s = f"%{search.strip()}%"
+            wp.append("(m.nombremodelo LIKE ? OR m.descripciónmodelo LIKE ? OR CAST(m.códigomodelo AS TEXT) LIKE ? OR m.códigomodelopuestoporcliente LIKE ?)")
+            pa.extend([s, s, s, s])
+        if habilitado is not None:
+            wp.append("m.habilitado = ?"); pa.append(1 if habilitado else 0)
+        where = ("WHERE " + " AND ".join(wp)) if wp else ""
+        base = """FROM Modelos m
+            LEFT JOIN Clientes c ON m.códigodueño = c.códigocliente
+            LEFT JOIN TiposModelo tm ON m.tipomodelo = tm.tipomodelo"""
+
+        total = conn.execute(f"SELECT COUNT(*) {base} {where}", pa).fetchone()[0]
+        offset = (page - 1) * page_size
+        rows = conn.execute(f"""
+            SELECT m.códigomodelo, m.códigodueño,
+                   COALESCE(c.nombrefantasía, c.nombrecliente) as cliente_nombre,
+                   m.códigomodelopuestoporcliente as codigo_cliente,
+                   m.nombremodelo, m.descripciónmodelo,
+                   tm.nombretipomodelo as tipo_label,
+                   m.existencia, m.habilitado, m.fechaultimomovimiento
+            {base} {where}
+            ORDER BY m.existencia DESC, m.nombremodelo LIMIT ? OFFSET ?
+        """, pa + [page_size, offset]).fetchall()
+
+        return {"rows": [dict(r) for r in rows], "total": total, "page": page, "page_size": page_size,
+                "pages": max(1, (total + page_size - 1) // page_size)}
+    finally:
+        conn.close()
+
+
+@app.get("/api/modelos/{modelo_id}")
+def get_modelo_detail(modelo_id: int):
+    conn = get_db()
+    try:
+        m = conn.execute("""
+            SELECT m.códigomodelo, m.códigodueño,
+                   COALESCE(c.nombrefantasía, c.nombrecliente) as cliente_nombre,
+                   m.códigomodelopuestoporcliente as codigo_cliente,
+                   m.nombremodelo, m.descripciónmodelo,
+                   tm.nombretipomodelo as tipo_label,
+                   m.existencia, m.habilitado, m.cantidadmodelos,
+                   m.noyeríapasta, m.noyeríashell, m.noyeríafenólica,
+                   m.fechaultimomovimiento, m.ultimomovimientomodelo,
+                   m.documentoultimomovimiento
+            FROM Modelos m
+            LEFT JOIN Clientes c ON m.códigodueño = c.códigocliente
+            LEFT JOIN TiposModelo tm ON m.tipomodelo = tm.tipomodelo
+            WHERE m.códigomodelo = ?
+        """, (modelo_id,)).fetchone()
+        if not m:
+            raise HTTPException(404, f"Modelo {modelo_id} no encontrado")
+
+        piezas = conn.execute("""
+            SELECT np.id as pieza_id, np.nombrepieza,
+                   np.códigopiezapuestoporcliente as codigo_pieza, np.habilitado
+            FROM PiezasPorModelo pm
+            JOIN NombreDePiezas np ON pm.códpieza = np.id
+            WHERE pm.códmodelo = ?
+            ORDER BY np.nombrepieza
+        """, (modelo_id,)).fetchall()
+
+        movimientos = conn.execute("""
+            SELECT fechaoperación, operación, observaciones
+            FROM MovimientoModelos WHERE códigomodelo = ?
+            ORDER BY fechaoperación DESC LIMIT 30
+        """, (modelo_id,)).fetchall()
+
+        fotos_count = conn.execute(
+            "SELECT COUNT(*) FROM FotosDeModelos WHERE códigomodelo = ? AND habilitada = 1",
+            (modelo_id,)
+        ).fetchone()[0]
+
+        return {
+            "modelo": dict(m),
+            "piezas": [dict(r) for r in piezas],
+            "movimientos": [dict(r) for r in movimientos],
+            "fotos_count": fotos_count,
+        }
+    finally:
+        conn.close()
+
+
+# ── Fundiciones ───────────────────────────────────────────────────────────────
+
+@app.get("/api/fundiciones")
+def get_fundiciones(
+    año: Optional[int] = Query(None),
+    cerrada: Optional[bool] = Query(None),
+    search: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+):
+    conn = get_db()
+    try:
+        wp, pa = [], []
+        if año:
+            wp.append("strftime('%Y', fpf.fecha) = ?"); pa.append(str(año))
+        if cerrada is not None:
+            wp.append("f.planillacerrada = ?"); pa.append("True" if cerrada else "False")
+        if search:
+            wp.append("CAST(f.códfundición AS TEXT) LIKE ?"); pa.append(f"%{search.strip()}%")
+        where = ("WHERE " + " AND ".join(wp)) if wp else ""
+        base = """FROM Fundiciones f
+            LEFT JOIN (SELECT códfundición, MIN(fecha) as fecha FROM FundiciónPorFecha GROUP BY códfundición) fpf
+              ON f.códfundición = fpf.códfundición"""
+
+        total = conn.execute(f"SELECT COUNT(*) {base} {where}", pa).fetchone()[0]
+        offset = (page - 1) * page_size
+        rows = conn.execute(f"""
+            SELECT f.códfundición, fpf.fecha, f.horastallerefectivos,
+                   f.planillacerrada, f.kgdevol
+            {base} {where} ORDER BY fpf.fecha DESC LIMIT ? OFFSET ?
+        """, pa + [page_size, offset]).fetchall()
+
+        fids = tuple(r["códfundición"] for r in rows)
+        item_cnt: dict = {}
+        if fids:
+            ph = ",".join("?" * len(fids))
+            for r in conn.execute(
+                f'SELECT códfundición, COUNT(*) as n, COALESCE(SUM(cantidadmoldeada),0) as total '
+                f'FROM "ItemProducción" WHERE códfundición IN ({ph}) GROUP BY códfundición', fids
+            ).fetchall():
+                item_cnt[r["códfundición"]] = (r["n"], r["total"])
+
+        result = []
+        for r in rows:
+            d = dict(r)
+            ic = item_cnt.get(d["códfundición"], (0, 0))
+            d["n_items"] = ic[0]; d["total_moldeadas"] = ic[1]
+            result.append(d)
+
+        return {"rows": result, "total": total, "page": page, "page_size": page_size,
+                "pages": max(1, (total + page_size - 1) // page_size)}
+    finally:
+        conn.close()
+
+
+@app.get("/api/fundiciones/{fund_id}")
+def get_fundicion_detail(fund_id: int):
+    conn = get_db()
+    try:
+        f = conn.execute("""
+            SELECT f.códfundición, fpf.fecha, f.horastallerefectivos,
+                   f.horastalleragencia, f.horasnoproductivas,
+                   f.planillacerrada, f.planillaimpresa,
+                   f.kgdevol, f.kgarenascrap, f.nrocrisol, f.nrocampaña
+            FROM Fundiciones f
+            LEFT JOIN (SELECT códfundición, MIN(fecha) as fecha FROM FundiciónPorFecha GROUP BY códfundición) fpf
+              ON f.códfundición = fpf.códfundición
+            WHERE f.códfundición = ?
+        """, (fund_id,)).fetchone()
+        if not f:
+            raise HTTPException(404, f"Fundición {fund_id} no encontrada")
+
+        items = conn.execute("""
+            SELECT ip.iditemproducción, ip.cantidadmoldeada, ip.cantidadaprobada,
+                   np.id as pieza_id, np.nombrepieza,
+                   np.códigopiezapuestoporcliente as codigo_pieza
+            FROM "ItemProducción" ip
+            JOIN PesosDePiezas pp ON ip.códpieza = pp.códpieza
+            JOIN NombreDePiezas np ON pp.nombredepiezasid_ = np.id
+            WHERE ip.códfundición = ?
+            GROUP BY ip.iditemproducción
+            ORDER BY np.nombrepieza
+        """, (fund_id,)).fetchall()
+
+        mat = conn.execute("""
+            SELECT m.norma as material_nombre,
+                   im.morfologíagrafito, im.matriz,
+                   im.carbono, im.silicio, im.manganeso, im.fósforo, im.azufre,
+                   im.valorresistencia, im.valoralargamiento, im.fechaaprobación
+            FROM InformesMateriales im
+            LEFT JOIN Materiales m ON im.códmaterial = m.especificaciónmaterial
+            WHERE im.códfundición = ?
+        """, (fund_id,)).fetchone()
+
+        return {
+            "fundicion": dict(f),
+            "items": [dict(r) for r in items],
+            "material": dict(mat) if mat else None,
+        }
+    finally:
+        conn.close()
+
+
+# ── Documentos ────────────────────────────────────────────────────────────────
+
+@app.get("/api/documentos")
+def get_documentos(
+    año: Optional[int] = Query(None),
+    cliente: Optional[str] = Query(None),
+    tipo: Optional[int] = Query(None),
+    search: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+):
+    conn = get_db()
+    try:
+        wp, pa = [], []
+        if año:
+            wp.append("strftime('%Y', d.fechaemisión) = ?"); pa.append(str(año))
+        if cliente:
+            wp.append("d.códigocliente = ?"); pa.append(cliente)
+        if tipo:
+            wp.append("d.idtipodoc = ?"); pa.append(tipo)
+        if search:
+            s = f"%{search.strip()}%"
+            wp.append("(d.descripción LIKE ? OR d.nrodoc LIKE ? OR COALESCE(c.nombrefantasía, c.nombrecliente) LIKE ?)")
+            pa.extend([s, s, s])
+        where = ("WHERE " + " AND ".join(wp)) if wp else ""
+        base = """FROM Documentos d
+            LEFT JOIN Clientes c ON d.códigocliente = c.códigocliente
+            LEFT JOIN TiposDocumento td ON d.idtipodoc = td.idtipodoc"""
+
+        total = conn.execute(f"SELECT COUNT(*) {base} {where}", pa).fetchone()[0]
+        offset = (page - 1) * page_size
+        rows = conn.execute(f"""
+            SELECT d.iddoc, d.nrodoc, d.fechaemisión,
+                   td.inictipodoc as tipo_abrev, td.nomtipodoc as tipo_label,
+                   d.códigocliente,
+                   COALESCE(c.nombrefantasía, c.nombrecliente) as cliente_nombre,
+                   d.descripción, d.fechacierre, d.ok
+            {base} {where} ORDER BY d.fechaemisión DESC LIMIT ? OFFSET ?
+        """, pa + [page_size, offset]).fetchall()
+
+        return {"rows": [dict(r) for r in rows], "total": total, "page": page, "page_size": page_size,
+                "pages": max(1, (total + page_size - 1) // page_size)}
+    finally:
+        conn.close()
+
+
+@app.get("/api/documentos/{doc_id}")
+def get_documento_detail(doc_id: int):
+    conn = get_db()
+    try:
+        d = conn.execute("""
+            SELECT d.iddoc, d.nrodoc, d.fechaemisión, d.creación,
+                   td.inictipodoc as tipo_abrev, td.nomtipodoc as tipo_label,
+                   d.códigocliente,
+                   COALESCE(c.nombrefantasía, c.nombrecliente) as cliente_nombre,
+                   d.descripción, d.causas, d.acctomadas, d.observaciones,
+                   d.fechacierre, d.fprevcierre, d.ok,
+                   d.fechaverif, d.fprevverif, d.accioneseficaces,
+                   d.devolución, d.mejora, d.refirc, d.piezas
+            FROM Documentos d
+            LEFT JOIN Clientes c ON d.códigocliente = c.códigocliente
+            LEFT JOIN TiposDocumento td ON d.idtipodoc = td.idtipodoc
+            WHERE d.iddoc = ?
+        """, (doc_id,)).fetchone()
+        if not d:
+            raise HTTPException(404, f"Documento {doc_id} no encontrado")
+
+        dd = dict(d)
+        items_reclamo = []
+        if dd.get("refirc"):
+            items_reclamo = conn.execute("""
+                SELECT ir.iditemreclamo, ir.cantidadreclamo, ir.cerrado, ir.verificado,
+                       np.id as pieza_id, np.nombrepieza,
+                       np.códigopiezapuestoporcliente as codigo_pieza
+                FROM ItemReclamo ir
+                LEFT JOIN NombreDePiezas np ON ir.refpieza = np.id
+                WHERE ir.refdocreclamo = ?
+                ORDER BY np.nombrepieza
+            """, (dd["refirc"],)).fetchall()
+
+        return {"documento": dd, "items_reclamo": [dict(r) for r in items_reclamo]}
+    finally:
+        conn.close()
+
+
 # ── Trabajos ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/trabajos/meta")
@@ -693,12 +1219,7 @@ def get_trabajos_meta():
             if r["año"]
         ]
 
-        est_desc = {
-            r["códigoestado"]: r["leyendaestado"]
-            for r in conn.execute(
-                "SELECT códigoestado, leyendaestado FROM Estados GROUP BY códigoestado"
-            ).fetchall()
-        }
+        est_desc = _est_map(conn)
         estados_usados = conn.execute("""
             SELECT estadotrabajo as codigo, COUNT(*) as n
             FROM Trabajos WHERE estadotrabajo IS NOT NULL
@@ -725,12 +1246,7 @@ def get_trabajos(
 ):
     conn = get_db()
     try:
-        est_desc = {
-            r["códigoestado"]: r["leyendaestado"]
-            for r in conn.execute(
-                "SELECT códigoestado, leyendaestado FROM Estados GROUP BY códigoestado"
-            ).fetchall()
-        }
+        est_desc = _est_map(conn)
 
         where_parts: list[str] = []
         params: list = []
