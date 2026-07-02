@@ -823,10 +823,6 @@ const EXP_TREE = [
       'Domicilios', 'TarjetasEnviadasClientes', 'TarjetasEnviadasOtros',
       'TipoCondicionPago',
     ]},
-    { n: 'NombreDePiezas', ch: [
-      'PesosDePiezas', 'GruposDePiezas', 'PartesPorPieza',
-      'Precios', 'PreciosHistóricos', 'InfTécnicaPieza',
-    ]},
   ]},
   { grp: 'Pedidos', nodes: [
     { n: 'Pedidos', ch: [
@@ -848,7 +844,11 @@ const EXP_TREE = [
       'ItemDetalle', 'RemitosHistoricos', 'NotasDeEnvio', 'DestinosNO-Clientes',
     ]},
   ]},
-  { grp: 'Modelos', nodes: [
+  { grp: 'Piezas & Modelos', nodes: [
+    { n: 'NombreDePiezas', ch: [
+      'PesosDePiezas', 'GruposDePiezas', 'PartesPorPieza',
+      'Precios', 'PreciosHistóricos', 'InfTécnicaPieza',
+    ]},
     { n: 'Modelos', ch: [
       'PiezasPorModelo',
       { n: 'PartesDeModelo', ch: ['PartesPorModelo'] },
