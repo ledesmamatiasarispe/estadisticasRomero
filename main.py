@@ -332,8 +332,8 @@ def _sum_defects(conn: sqlite3.Connection, pieza_id: int) -> list[dict]:
     expr = ", ".join(f'COALESCE(SUM(id."{c}"), 0) as "{c}"' for c in cols)
     row = conn.execute(
         f'SELECT {expr} FROM "ItemDevolución" id '
-        f'JOIN "SoluciónDevolución" sd ON sd.iddevol = id.iddevol '
-        f'WHERE sd.idpza = ?',
+        f'JOIN PesosDePiezas pp ON id.códpieza = pp.códpieza '
+        f'WHERE pp.nombredepiezasid_ = ?',
         (pieza_id,),
     ).fetchone()
     result = [{"tipo": c, "label": _DEFECT_NAMES[c], "total": row[c]} for c in cols if row[c] > 0]
@@ -457,13 +457,13 @@ def analytics_cliente_detail(codigo: str):
             GROUP BY año ORDER BY año
         """, (codigo,)).fetchall()
 
-        # Annual returns via SoluciónDevolución → NombreDePiezas
+        # Annual returns: ItemDevolución → PesosDePiezas → NombreDePiezas
         dev_rows = conn.execute("""
             SELECT CAST(id.año AS TEXT) as año,
                    COALESCE(SUM(id."cantidaddevolución"), 0) as devueltas
             FROM "ItemDevolución" id
-            JOIN "SoluciónDevolución" sd ON sd.iddevol = id.iddevol
-            JOIN NombreDePiezas np ON sd.idpza = np.id
+            JOIN PesosDePiezas pp ON id.códpieza = pp.códpieza
+            JOIN NombreDePiezas np ON pp.nombredepiezasid_ = np.id
             WHERE np.códcliente = ?
             GROUP BY id.año ORDER BY id.año
         """, (codigo,)).fetchall()
@@ -501,19 +501,19 @@ def analytics_cliente_detail(codigo: str):
             ORDER BY entregadas DESC
         """, (codigo,)).fetchall()
 
-        # Returns per piece (batch query) via SoluciónDevolución
+        # Returns per piece (batch query): ItemDevolución → PesosDePiezas → NombreDePiezas
         dev_pieza: dict[int, int] = {}
         if piezas_rows:
             ids = tuple(r["pieza_id"] for r in piezas_rows)
             ph = ",".join("?" * len(ids))
             dp = conn.execute(
-                f'SELECT sd.idpza, COALESCE(SUM(id."cantidaddevolución"), 0) as devueltas '
+                f'SELECT pp.nombredepiezasid_, COALESCE(SUM(id."cantidaddevolución"), 0) as devueltas '
                 f'FROM "ItemDevolución" id '
-                f'JOIN "SoluciónDevolución" sd ON sd.iddevol = id.iddevol '
-                f'WHERE sd.idpza IN ({ph}) GROUP BY sd.idpza',
+                f'JOIN PesosDePiezas pp ON id.códpieza = pp.códpieza '
+                f'WHERE pp.nombredepiezasid_ IN ({ph}) GROUP BY pp.nombredepiezasid_',
                 ids,
             ).fetchall()
-            dev_pieza = {r["idpza"]: r["devueltas"] for r in dp}
+            dev_pieza = {r["nombredepiezasid_"]: r["devueltas"] for r in dp}
 
         piezas = []
         for r in piezas_rows:
@@ -567,13 +567,13 @@ def analytics_pieza_detail(pieza_id: int):
             GROUP BY año ORDER BY año
         """, (pieza_id,)).fetchall()
 
-        # Annual returns via SoluciónDevolución
+        # Annual returns: ItemDevolución → PesosDePiezas (filter by NombreDePiezas.id)
         dev_rows = conn.execute("""
             SELECT CAST(id.año AS TEXT) as año,
                    COALESCE(SUM(id."cantidaddevolución"), 0) as devueltas
             FROM "ItemDevolución" id
-            JOIN "SoluciónDevolución" sd ON sd.iddevol = id.iddevol
-            WHERE sd.idpza = ?
+            JOIN PesosDePiezas pp ON id.códpieza = pp.códpieza
+            WHERE pp.nombredepiezasid_ = ?
             GROUP BY id.año ORDER BY id.año
         """, (pieza_id,)).fetchall()
         dev_map = {r["año"]: r["devueltas"] for r in dev_rows}
@@ -630,8 +630,8 @@ def analytics_defectos(
             expr = ", ".join(f'COALESCE(SUM(id."{c}"), 0) as "{c}"' for c in cols)
             row = conn.execute(
                 f'SELECT {expr} FROM "ItemDevolución" id '
-                f'JOIN "SoluciónDevolución" sd ON sd.iddevol = id.iddevol '
-                f'JOIN NombreDePiezas np ON sd.idpza = np.id {where}',
+                f'JOIN PesosDePiezas pp ON id.códpieza = pp.códpieza '
+                f'JOIN NombreDePiezas np ON pp.nombredepiezasid_ = np.id {where}',
                 params,
             ).fetchone()
             defectos = [
@@ -643,12 +643,12 @@ def analytics_defectos(
             defectos = []
 
         top_piezas = conn.execute(
-            f'SELECT sd.idpza as pieza_id, np.nombrepieza as nombre, '
+            f'SELECT np.id as pieza_id, np.nombrepieza as nombre, '
             f'COALESCE(SUM(id."cantidaddevolución"), 0) as devueltas '
             f'FROM "ItemDevolución" id '
-            f'JOIN "SoluciónDevolución" sd ON sd.iddevol = id.iddevol '
-            f'JOIN NombreDePiezas np ON sd.idpza = np.id '
-            f'{where} GROUP BY sd.idpza ORDER BY devueltas DESC LIMIT 15',
+            f'JOIN PesosDePiezas pp ON id.códpieza = pp.códpieza '
+            f'JOIN NombreDePiezas np ON pp.nombredepiezasid_ = np.id '
+            f'{where} GROUP BY np.id ORDER BY devueltas DESC LIMIT 15',
             params,
         ).fetchall()
 
