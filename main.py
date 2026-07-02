@@ -421,6 +421,7 @@ def analytics_clientes():
             SELECT c.códigocliente as codigo,
                    c.nombrecliente as nombre,
                    COALESCE(c.nombrefantasía, c.nombrecliente) as fantasia,
+                   c.e_mail_para_contacto as email,
                    COUNT(np.id) as n_piezas
             FROM Clientes c
             LEFT JOIN NombreDePiezas np ON np.códcliente = c.códigocliente
@@ -437,9 +438,26 @@ def analytics_cliente_detail(codigo: str):
     conn = get_db()
     try:
         cl = conn.execute("""
-            SELECT códigocliente as codigo, nombrecliente as nombre,
-                   COALESCE(nombrefantasía, nombrecliente) as fantasia
-            FROM Clientes WHERE códigocliente = ?
+            SELECT c.códigocliente as codigo,
+                   c.nombrecliente as nombre,
+                   COALESCE(c.nombrefantasía, c.nombrecliente) as fantasia,
+                   c.cuit,
+                   c.contacto,
+                   c.e_mail_para_contacto as email,
+                   c.página_web as web,
+                   c.condpago,
+                   tcp.nombrecondiciondepago as condpago_desc,
+                   c.observaciones,
+                   c.observacionespararemitos as obs_remitos,
+                   c.fechacreación as fecha_creacion,
+                   c.porcentajefalta,
+                   c.porcentajeexceso,
+                   c.cantidadlímite as cantidad_limite,
+                   c.ivaresponsableinscripto as iva_ri,
+                   c.precioendolares as precio_usd
+            FROM Clientes c
+            LEFT JOIN TipoCondicionPago tcp ON c.condpago = tcp.idcondpago
+            WHERE c.códigocliente = ?
         """, (codigo,)).fetchone()
         if not cl:
             raise HTTPException(404, f"Cliente '{codigo}' no encontrado")

@@ -144,6 +144,13 @@ tr:last-child td { border-bottom: none; }
 .loading { color: var(--muted); padding: 40px; text-align: center; }
 .empty { color: var(--muted); padding: 20px; text-align: center; font-style: italic; font-size: 13px; }
 
+/* Ficha de cliente */
+.ficha-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px 20px; }
+.ficha-fld { display: flex; flex-direction: column; gap: 2px; }
+.ficha-lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+.ficha-val { font-size: 13px; color: var(--text); word-break: break-all; }
+.ficha-sep { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); }
+
 /* Progress bar */
 #sync-progress { position: fixed; bottom: 0; left: 0; right: 0; background: var(--surface); border-top: 1px solid var(--border); padding: 6px 16px 7px; display: none; z-index: 100; }
 #sync-progress.visible { display: block; }
@@ -396,16 +403,17 @@ function renderClientesList(q) {
     || c.nombre.toLowerCase().includes(q)
     || c.codigo.toLowerCase().includes(q)
     || (c.fantasia || '').toLowerCase().includes(q)
+    || (c.email || '').toLowerCase().includes(q)
   );
   setMain(`
     <div class="sec-title">Clientes <span style="font-size:13px;color:var(--muted);font-weight:400">(${fl.length})</span></div>
     <div class="row-gap">
-      <input class="inp inp-grow" id="cl-q" placeholder="Buscar por nombre o c&#243;digo..."
+      <input class="inp inp-grow" id="cl-q" placeholder="Buscar por nombre, c&#243;digo o email..."
         oninput="renderClientesList(this.value.toLowerCase())" value="${q}">
     </div>
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th>C&#243;digo</th><th>Nombre</th><th style="text-align:right">Piezas</th></tr></thead>
+        <thead><tr><th>C&#243;digo</th><th>Nombre</th><th>Email</th><th style="text-align:right">Piezas</th></tr></thead>
         <tbody>${fl.length
           ? fl.map(c => `
             <tr class="tr-link" onclick="go('cliente','${c.codigo}')">
@@ -415,9 +423,10 @@ function renderClientesList(q) {
                 ${c.fantasia && c.fantasia !== c.nombre
                   ? `<div style="font-size:11px;color:var(--muted)">${c.nombre}</div>` : ''}
               </td>
+              <td style="font-size:12px;color:var(--muted)">${c.email || '—'}</td>
               <td style="text-align:right;color:var(--muted)">${c.n_piezas}</td>
             </tr>`).join('')
-          : '<tr><td colspan="3" class="empty">Sin resultados</td></tr>'}
+          : '<tr><td colspan="4" class="empty">Sin resultados</td></tr>'}
         </tbody>
       </table>
     </div>
@@ -427,6 +436,11 @@ function renderClientesList(q) {
 }
 
 // ── Cliente detail ─────────────────────────────────────────────────────────────
+function fld(label, val) {
+  if (val == null || val === '' || val === 0) return '';
+  return `<div class="ficha-fld"><span class="ficha-lbl">${label}</span><span class="ficha-val">${val}</span></div>`;
+}
+
 async function showCliente(codigo) {
   setMain('<div class="loading">Cargando cliente...</div>');
   let d;
@@ -437,12 +451,40 @@ async function showCliente(codigo) {
   const { cliente, total_entregadas, total_devueltas, tasa_total, n_piezas, anual, piezas } = d;
   const tasaCls = tasa_total > 10 ? 'c-red' : tasa_total > 5 ? 'c-yellow' : 'c-green';
 
+  const emailLink = cliente.email
+    ? `<a href="mailto:${cliente.email}" style="color:var(--accent)">${cliente.email}</a>` : null;
+  const webLink = cliente.web
+    ? `<a href="${cliente.web}" target="_blank" style="color:var(--accent)">${cliente.web}</a>` : null;
+  const boolFmt = v => v == null ? null : (v ? 'Sí' : 'No');
+
   setMain(`
     <div class="breadcrumb">
       <span class="bc-link" onclick="go('clientes')">Clientes</span>
       <span class="bc-sep">&#8250;</span>
       <span class="bc-cur">${cliente.fantasia || cliente.nombre}</span>
     </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-title">Ficha del cliente</div>
+      <div class="ficha-grid">
+        ${fld('C&#243;digo', `<code style="color:var(--accent)">${cliente.codigo}</code>`)}
+        ${fld('CUIT', cliente.cuit)}
+        ${fld('Contacto', cliente.contacto)}
+        ${fld('Email', emailLink)}
+        ${fld('Web', webLink)}
+        ${fld('Cond. de pago', cliente.condpago_desc || cliente.condpago)}
+        ${fld('IVA R.I.', boolFmt(cliente.iva_ri))}
+        ${fld('Precio USD', boolFmt(cliente.precio_usd))}
+        ${fld('Alta', cliente.fecha_creacion ? cliente.fecha_creacion.slice(0,10) : null)}
+      </div>
+      ${(cliente.porcentajefalta || cliente.porcentajeexceso || cliente.cantidad_limite)
+        ? `<div class="ficha-sep">Tolerancias &mdash; Falta: ${cliente.porcentajefalta || 0}% &nbsp;·&nbsp; Exceso: ${cliente.porcentajeexceso || 0}% &nbsp;·&nbsp; L&iacute;mite: ${cliente.cantidad_limite || 0}</div>` : ''}
+      ${cliente.observaciones
+        ? `<div class="ficha-sep">Obs: ${cliente.observaciones}</div>` : ''}
+      ${cliente.obs_remitos
+        ? `<div style="font-size:12px;color:var(--muted);margin-top:4px">Obs. remitos: ${cliente.obs_remitos}</div>` : ''}
+    </div>
+
     <div class="kpi-grid">
       <div class="kpi-card">
         <div class="kpi-label">Piezas distintas</div>
