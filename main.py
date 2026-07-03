@@ -634,6 +634,7 @@ def analytics_pieza_detail(pieza_id: int):
             return d
 
         inftecnica = {
+            "pieza":    _inf("InfTécnicaPieza"),
             "calidad":  _inf("InfTécnicaCalidad"),
             "rebaba":   _inf("InfTécnicaRebaba"),
             "noyeria":  _inf("InfTécnicaNoyería"),

@@ -627,23 +627,27 @@ function filterPiezas(q) {
 // ── Pieza detail ───────────────────────────────────────────────────────────────
 function _infTecnicaCards(inf) {
   const defs = [
-    { key: 'moldeo',   label: 'Moldeo',   extras: [
+    { key: 'pieza',   label: 'Pieza',   extras: [
+      { key: 'apilado',       label: 'Apilado' },
+      { key: 'hojadeproceso', label: 'Hoja de proceso' },
+    ]},
+    { key: 'moldeo',  label: 'Moldeo',  extras: [
       { key: 'pintar_molde', label: 'Pintar molde' },
       { key: 'pintar_mota',  label: 'Pintar mota'  },
     ]},
-    { key: 'colada',   label: 'Colada',   extras: [] },
-    { key: 'noyeria',  label: 'Noyer\xeda', extras: [
+    { key: 'colada',  label: 'Colada',  extras: [] },
+    { key: 'noyeria', label: 'Noyer\xeda', extras: [
       { key: 'pintar_noyo', label: 'Pintar noyo' },
     ]},
-    { key: 'calidad',  label: 'Calidad',  extras: [] },
-    { key: 'rebaba',   label: 'Rebaba',   extras: [] },
+    { key: 'calidad', label: 'Calidad', extras: [] },
+    { key: 'rebaba',  label: 'Rebaba',  extras: [] },
   ];
   const cards = defs
-    .filter(d => inf[d.key])
+    .filter(d => inf && inf[d.key])
     .map(d => {
       const r = inf[d.key];
       const extraHtml = d.extras
-        .filter(e => r[e.key] != null && r[e.key] !== 'False' && r[e.key] !== false)
+        .filter(e => r[e.key] != null && r[e.key] !== 'False' && r[e.key] !== false && r[e.key] !== 0)
         .map(e => `<span class="tag tag-b" style="font-size:11px">${e.label}</span>`)
         .join(' ');
       return `
@@ -651,12 +655,13 @@ function _infTecnicaCards(inf) {
           <div class="card-title">Inf. T\xe9cnica &mdash; ${d.label} ${extraHtml}</div>
           ${r.resumen ? `<div style="font-size:13px;font-weight:600;margin-bottom:6px">${r.resumen}</div>` : ''}
           ${r.detalle  ? `<div style="font-size:12px;color:var(--muted);white-space:pre-wrap">${r.detalle}</div>` : ''}
-          ${!r.resumen && !r.detalle ? '<div class="empty">Sin contenido</div>' : ''}
+          ${!r.resumen && !r.detalle ? '<div class="empty" style="font-size:12px">Sin texto cargado</div>' : ''}
         </div>`;
     });
-  if (!cards.length) return '';
   return `<div class="sec-title" style="font-size:14px;margin:18px 0 10px">Informes t\xe9cnicos</div>
-    <div class="grid-inf">${cards.join('')}</div>`;
+    ${cards.length
+      ? `<div class="grid-inf">${cards.join('')}</div>`
+      : '<div class="card"><div class="empty">Sin informes t\xe9cnicos para esta pieza</div></div>'}`;
 }
 
 async function showPieza(piezaId) {
