@@ -73,6 +73,7 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 /* Grid 2 cols */
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
 @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
+.grid-inf { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; margin-bottom: 20px; }
 
 /* Card */
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
@@ -623,13 +624,47 @@ function filterPiezas(q) {
 }
 
 // ── Pieza detail ───────────────────────────────────────────────────────────────
+function _infTecnicaCards(inf) {
+  const defs = [
+    { key: 'moldeo',   label: 'Moldeo',   extras: [
+      { key: 'pintar_molde', label: 'Pintar molde' },
+      { key: 'pintar_mota',  label: 'Pintar mota'  },
+    ]},
+    { key: 'colada',   label: 'Colada',   extras: [] },
+    { key: 'noyeria',  label: 'Noyer\xeda', extras: [
+      { key: 'pintar_noyo', label: 'Pintar noyo' },
+    ]},
+    { key: 'calidad',  label: 'Calidad',  extras: [] },
+    { key: 'rebaba',   label: 'Rebaba',   extras: [] },
+  ];
+  const cards = defs
+    .filter(d => inf[d.key])
+    .map(d => {
+      const r = inf[d.key];
+      const extraHtml = d.extras
+        .filter(e => r[e.key] != null && r[e.key] !== 'False' && r[e.key] !== false)
+        .map(e => `<span class="tag tag-b" style="font-size:11px">${e.label}</span>`)
+        .join(' ');
+      return `
+        <div class="card">
+          <div class="card-title">Inf. T\xe9cnica &mdash; ${d.label} ${extraHtml}</div>
+          ${r.resumen ? `<div style="font-size:13px;font-weight:600;margin-bottom:6px">${r.resumen}</div>` : ''}
+          ${r.detalle  ? `<div style="font-size:12px;color:var(--muted);white-space:pre-wrap">${r.detalle}</div>` : ''}
+          ${!r.resumen && !r.detalle ? '<div class="empty">Sin contenido</div>' : ''}
+        </div>`;
+    });
+  if (!cards.length) return '';
+  return `<div class="sec-title" style="font-size:14px;margin:18px 0 10px">Informes t\xe9cnicos</div>
+    <div class="grid-inf">${cards.join('')}</div>`;
+}
+
 async function showPieza(piezaId) {
   setMain('<div class="loading">Cargando pieza...</div>');
   let d;
   try { d = await api('/api/analytics/piezas/' + piezaId); }
   catch(e) { setMain('<div class="loading">Error: ' + e.message + '</div>'); return; }
 
-  const { pieza, anual, defectos } = d;
+  const { pieza, anual, defectos, inftecnica } = d;
   const tot_ent = anual.reduce((s,r)=>s+r.entregadas, 0);
   const tot_dev = anual.reduce((s,r)=>s+r.devueltas, 0);
   const tot_rech = anual.reduce((s,r)=>s+r.rechazadas, 0);
@@ -706,6 +741,7 @@ async function showPieza(piezaId) {
         </table>
       </div>
     </div>
+    ${_infTecnicaCards(inftecnica)}
   `);
 
   S.charts.pz = new Chart($id('chart-pz'), {
@@ -847,7 +883,9 @@ const EXP_TREE = [
   { grp: 'Piezas & Modelos', nodes: [
     { n: 'NombreDePiezas', ch: [
       'PesosDePiezas', 'GruposDePiezas', 'PartesPorPieza',
-      'Precios', 'PreciosHistóricos', 'InfTécnicaPieza',
+      'Precios', 'PreciosHistóricos',
+      'InfTécnicaPieza', 'InfTécnicaMoldeo', 'InfTécnicaColada',
+      'InfTécnicaNoyería', 'InfTécnicaCalidad', 'InfTécnicaRebaba',
     ]},
     { n: 'Modelos', ch: [
       'PiezasPorModelo',
@@ -861,8 +899,6 @@ const EXP_TREE = [
       { n: 'ItemProducción', ch: [
         'InformesMateriales', 'InformesMaterialesQuimicos2',
         'ComposiciónQuímica', 'InformesEspesores',
-        'InfTécnicaColada', 'InfTécnicaMoldeo', 'InfTécnicaNoyería',
-        'InfTécnicaRebaba', 'InfTécnicaCalidad',
         'InformesAgrupadoPorPieza', 'InformesAgrupadoPorTrabajo', 'InformesAgrupados',
       ]},
       'FundiciónPorFecha', 'FechasFundición', 'Fundiciones2',

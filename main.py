@@ -622,10 +622,30 @@ def analytics_pieza_detail(pieza_id: int):
 
         defectos = _sum_defects(conn, pieza_id)
 
+        # InfTécnica* tables — each has (idpieza, resumen, detalle, [extras])
+        def _inf(table, extras=None):
+            row = conn.execute(
+                f'SELECT * FROM "{table}" WHERE idpieza = ?', (pieza_id,)
+            ).fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            d.pop("idpieza", None)
+            return d
+
+        inftecnica = {
+            "calidad":  _inf("InfTécnicaCalidad"),
+            "rebaba":   _inf("InfTécnicaRebaba"),
+            "noyeria":  _inf("InfTécnicaNoyería"),
+            "moldeo":   _inf("InfTécnicaMoldeo"),
+            "colada":   _inf("InfTécnicaColada"),
+        }
+
         return {
             "pieza": dict(pieza),
             "anual": anual,
             "defectos": defectos,
+            "inftecnica": inftecnica,
         }
     finally:
         conn.close()
