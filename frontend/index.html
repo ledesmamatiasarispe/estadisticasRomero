@@ -928,7 +928,7 @@ const EXP_TREE = [
     'CamposForm', 'CamposRpt', 'CamposTabla',
   ]},
   { grp: 'Configuración (lookups)', nodes: [
-    'Estados', 'TiposModelo', 'TiposDeModelos', 'TiposDocumento', 'TiposDocumentoExterno',
+    'Estados', 'TiposModelo', 'TiposDeModelos', 'TiposOperacionModelo', 'TiposDocumento', 'TiposDocumentoExterno',
     'TiposDomicilio', 'TiposDeMatriz', 'TiposDeMoldeo', 'TiposDeCarga',
     'TiposMaterial', 'TiposFacturación', 'TiposMorfologíaGrafito',
     'MorfologíasGrafito', 'TamañosGrafito', 'Materiales',
@@ -1443,7 +1443,7 @@ async function showModeloDetail(id) {
           <tbody>${movimientos.length
             ? movimientos.map(mv=>`<tr>
                 <td style="color:var(--muted);font-size:12px;white-space:nowrap">${(mv.fechaoperación||'').slice(0,10)}</td>
-                <td style="font-size:12px">${mv.operación||'—'}</td>
+                <td style="font-size:12px">${mv.operacion_desc||mv.operación||'—'}</td>
                 <td style="font-size:11px;color:var(--muted)">${mv.observaciones||''}</td>
               </tr>`).join('')
             : '<tr><td colspan="3" class="empty">Sin movimientos</td></tr>'}

@@ -143,10 +143,38 @@ def list_user_tables(conn: sqlite3.Connection) -> list[str]:
     return [r["name"] for r in rows]
 
 
+# ── Lookup tables (manually maintained, survive sync) ─────────────────────────
+
+def _seed_lookups():
+    """Crea y semilla tablas de lookup que no existen en Access."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS TiposOperacionModelo (
+            codigo      TEXT PRIMARY KEY,
+            descripcion TEXT NOT NULL
+        )
+    """)
+    ops = [
+        ("E", "Entrada"),
+        ("S", "Salida"),
+        ("X", "Baja"),
+        ("D", "Devolución"),
+        ("C", "Creación"),
+        ("R", "Reparación"),
+        ("M", "Modificación"),
+    ]
+    conn.executemany(
+        "INSERT OR IGNORE INTO TiposOperacionModelo (codigo, descripcion) VALUES (?, ?)", ops
+    )
+    conn.commit()
+    conn.close()
+
+
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _seed_lookups()
     if _should_auto_sync():
         log.info("Auto-sync: iniciando (última sync hace ≥10 horas o primera vez)")
         asyncio.create_task(run_sync())
@@ -1024,9 +1052,13 @@ def get_modelo_detail(modelo_id: int):
         """, (modelo_id,)).fetchall()
 
         movimientos = conn.execute("""
-            SELECT fechaoperación, operación, observaciones
-            FROM MovimientoModelos WHERE códigomodelo = ?
-            ORDER BY fechaoperación DESC LIMIT 30
+            SELECT m.fechaoperación, UPPER(m.operación) as operación,
+                   COALESCE(t.descripcion, UPPER(m.operación)) as operacion_desc,
+                   m.observaciones
+            FROM MovimientoModelos m
+            LEFT JOIN TiposOperacionModelo t ON UPPER(m.operación) = t.codigo
+            WHERE m.códigomodelo = ?
+            ORDER BY m.fechaoperación DESC LIMIT 30
         """, (modelo_id,)).fetchall()
 
         fotos_count = conn.execute(
