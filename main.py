@@ -1310,7 +1310,9 @@ def analytics_evolucion_mensual(meses: int = Query(default=24, ge=3, le=60)):
             LIMIT ?
         """, (meses,)).fetchall()
 
-        # Kg-based monthly aggregation — applies AD/TR suffix multiplier and coefcompl
+        # Kg-based monthly aggregation — two formulas:
+        #   metal: peso × coefcompl × AD/TR → total metal consumed (incl. losses/sprues)
+        #   pieza: peso alone              → finished piece weight (matches Excel "PesoAprobado")
         kg_rows = conn.execute("""
             SELECT strftime('%Y-%m', fpf.fecha) as mes,
                    ROUND(SUM(t.cantidadaprobada *
@@ -1328,7 +1330,11 @@ def analytics_evolucion_mensual(meses: int = Query(default=24, ge=3, le=60)):
                    ROUND(SUM(t.cantidadproducida *
                        CASE WHEN np.nombrepieza LIKE '%(AD)' THEN pp.pesopieza * 2
                             WHEN np.nombrepieza LIKE '%(TR)' THEN pp.pesopieza * 3
-                            ELSE pp.pesopieza END * COALESCE(np.coefcompl, 1)), 2) as kg_producidos
+                            ELSE pp.pesopieza END * COALESCE(np.coefcompl, 1)), 2) as kg_producidos,
+                   ROUND(SUM(t.cantidadaprobada  * pp.pesopieza), 2) as kg_aprobados_pieza,
+                   ROUND(SUM(t.cantidadrechazada * pp.pesopieza), 2) as kg_rechazados_pieza,
+                   ROUND(SUM(t.cantidadreparada  * pp.pesopieza), 2) as kg_reparados_pieza,
+                   ROUND(SUM(t.cantidadproducida * pp.pesopieza), 2) as kg_producidos_pieza
             FROM Trabajos t
             JOIN "FundiciónPorFecha" fpf ON fpf.códfundición = t.códfundición
             JOIN PesosDePiezas pp ON pp.códpieza = t.idpesopieza
@@ -1402,10 +1408,14 @@ def analytics_evolucion_mensual(meses: int = Query(default=24, ge=3, le=60)):
             ent  = r["entregadas"]
             devueltas    = dv["devueltas"]
             kg_devueltos = round(dv["kg_devueltos"], 2)
-            kg_a  = kg["kg_aprobados"]  if kg else None
-            kg_r  = kg["kg_rechazados"] if kg else None
-            kg_rp = kg["kg_reparados"]  if kg else None
-            kg_p  = kg["kg_producidos"] if kg else None
+            kg_a   = kg["kg_aprobados"]        if kg else None
+            kg_r   = kg["kg_rechazados"]       if kg else None
+            kg_rp  = kg["kg_reparados"]        if kg else None
+            kg_p   = kg["kg_producidos"]       if kg else None
+            kg_a_pz  = kg["kg_aprobados_pieza"]  if kg else None
+            kg_r_pz  = kg["kg_rechazados_pieza"] if kg else None
+            kg_rp_pz = kg["kg_reparados_pieza"]  if kg else None
+            kg_p_pz  = kg["kg_producidos_pieza"] if kg else None
             meses_data.append({
                 "mes":            mes,
                 "producidas":     prod,
@@ -1418,6 +1428,7 @@ def analytics_evolucion_mensual(meses: int = Query(default=24, ge=3, le=60)):
                 "pct_scrap":      round(rech / prod * 100, 2) if prod else 0,
                 "pct_reparacion": round(rep  / apro * 100, 2) if apro else 0,
                 "pct_devolucion": round(devueltas / ent * 100, 2) if ent else 0,
+                # metal = peso × coefcompl × AD/TR (total metal consumed including losses)
                 "kg_aprobados":   kg_a,
                 "kg_rechazados":  kg_r,
                 "kg_reparados":   kg_rp,
@@ -1429,6 +1440,15 @@ def analytics_evolucion_mensual(meses: int = Query(default=24, ge=3, le=60)):
                 "productividad":  round(kg_a / hs, 2) if (kg_a and hs and hs > 0) else None,
                 "scrap_hs":       round(kg_r  / hs, 2) if (kg_r  is not None and hs and hs > 0) else None,
                 "devol_hs":       round(kg_devueltos / hs, 2) if (kg_devueltos is not None and hs and hs > 0) else None,
+                # pieza = peso solo (sin coef) → peso físico de la pieza terminada, coincide con Excel
+                "kg_aprobados_pieza":   kg_a_pz,
+                "kg_rechazados_pieza":  kg_r_pz,
+                "kg_reparados_pieza":   kg_rp_pz,
+                "kg_producidos_pieza":  kg_p_pz,
+                "kg_devueltos_pieza":   kg_devueltos if (kg_a_pz is not None) else None,
+                "pct_scrap_kg_pieza":   round(kg_r_pz / kg_p_pz * 100, 2) if (kg_p_pz and kg_p_pz > 0) else None,
+                "pct_rep_kg_pieza":     round(kg_rp_pz / kg_a_pz * 100, 2) if (kg_a_pz and kg_a_pz > 0) else None,
+                "productividad_pieza":  round(kg_a_pz / hs, 2) if (kg_a_pz and hs and hs > 0) else None,
             })
 
         return {"meses": meses_data}

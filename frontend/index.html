@@ -2160,6 +2160,12 @@ async function showRechazos() {
             <input type="checkbox" id="evol-use-kg" checked onchange="_evolRender()"> Ver en kg
           </label>
         </span>
+        <select id="evol-kg-modo" onchange="_evolRender()"
+          style="font-size:12px;padding:4px 8px;background:var(--card);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer">
+          <option value="ambos" selected>Kg piezas + metal</option>
+          <option value="pieza">Solo kg piezas finales</option>
+          <option value="metal">Solo kg metal consumido</option>
+        </select>
       </div>
       <div id="evol-content"><div class="loading">Cargando&#8230;</div></div>
     </div>
@@ -2217,19 +2223,28 @@ function _evolRender() {
     return ['', 'Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'][+m] + ' ' + y.slice(2);
   });
 
-  const hasKg = useKg && rows.some(r => r.kg_aprobados !== null);
+  const hasKg  = useKg && rows.some(r => r.kg_aprobados !== null);
+  const kgModo = ($id('evol-kg-modo') || {}).value || 'ambos'; // 'ambos' | 'pieza' | 'metal'
+
+  // helpers: pick the right kg field based on selected mode
+  const _kgA  = r => kgModo === 'pieza' ? (r.kg_aprobados_pieza  || 0) : (r.kg_aprobados  || 0);
+  const _kgR  = r => kgModo === 'pieza' ? (r.kg_rechazados_pieza || 0) : (r.kg_rechazados || 0);
+  const _kgDv = r => r.kg_devueltos || 0;
+  const _pctS = r => kgModo === 'pieza' ? (r.pct_scrap_kg_pieza ?? r.pct_scrap) : (r.pct_scrap_kg ?? r.pct_scrap);
+  const _pctR = r => kgModo === 'pieza' ? (r.pct_rep_kg_pieza   ?? r.pct_reparacion) : (r.pct_rep_kg ?? r.pct_reparacion);
+  const _prod = r => kgModo === 'pieza' ? (r.productividad_pieza ?? null) : (r.productividad ?? null);
 
   // KPIs
-  const avgScrap = rows.reduce((s, r) => s + (hasKg && r.pct_scrap_kg !== null ? r.pct_scrap_kg : r.pct_scrap), 0) / rows.length;
-  const avgRep   = rows.reduce((s, r) => s + (hasKg && r.pct_rep_kg !== null ? r.pct_rep_kg : r.pct_reparacion), 0) / rows.length;
+  const avgScrap = rows.reduce((s, r) => s + (hasKg ? _pctS(r) : r.pct_scrap), 0) / rows.length;
+  const avgRep   = rows.reduce((s, r) => s + (hasKg ? _pctR(r) : r.pct_reparacion), 0) / rows.length;
   const totalProd = hasKg
-    ? rows.reduce((s, r) => s + (r.kg_producidos || 0), 0)
+    ? rows.reduce((s, r) => s + _kgA(r), 0)
     : rows.reduce((s, r) => s + r.producidas, 0);
   const totalRech = hasKg
-    ? rows.reduce((s, r) => s + (r.kg_rechazados || 0), 0)
+    ? rows.reduce((s, r) => s + _kgR(r), 0)
     : rows.reduce((s, r) => s + r.rechazadas, 0);
   const totalDev = hasKg
-    ? rows.reduce((s, r) => s + (r.kg_devueltos || 0), 0)
+    ? rows.reduce((s, r) => s + _kgDv(r), 0)
     : rows.reduce((s, r) => s + (r.devueltas || 0), 0);
   const avgDev = rows.reduce((s, r) => s + (hasKg && r.pct_devol_kg !== null ? r.pct_devol_kg : (r.pct_devolucion || 0)), 0) / rows.length;
 
@@ -2263,10 +2278,11 @@ function _evolRender() {
         <div class="kpi-value" style="font-size:20px;color:#a78bfa">${avgDev.toFixed(2)}%</div>
       </div>
       ${hasKg ? (()=>{
-        const prodVals = rows.map(r => r.productividad).filter(v => v !== null && v !== undefined);
+        const prodVals = rows.map(r => _prod(r)).filter(v => v !== null && v !== undefined);
         const avgProd = prodVals.length ? prodVals.reduce((s,v) => s+v, 0) / prodVals.length : null;
+        const prodLabel = kgModo === 'pieza' ? 'Productividad (piezas)' : 'Productividad (metal)';
         return avgProd !== null ? `<div class="kpi-card" style="min-width:130px;padding:12px 16px">
-          <div class="kpi-label">Productividad promedio</div>
+          <div class="kpi-label">${prodLabel}</div>
           <div class="kpi-value c-blue" style="font-size:20px">${avgProd.toFixed(1)} <span style="font-size:13px;font-weight:400">kg/hs</span></div>
         </div>` : '';
       })() : ''}
@@ -2277,25 +2293,38 @@ function _evolRender() {
       <div class="card"><div class="card-title">&#205;ndices de Rechazo Interno, Reparaci&#xf3;n y Devoluci&#xf3;n (%)</div>
         <div class="chart-box"><canvas id="evol-chart-pct"></canvas></div></div>
     </div>
-    ${hasKg ? `<div class="card" style="margin-bottom:14px"><div class="card-title">Productividad mensual (kg / hs trabajadas)</div>
+    ${hasKg ? `<div class="card" style="margin-bottom:14px"><div class="card-title">Productividad mensual (kg / hs trabajadas) &mdash; ${kgModo === 'ambos' ? 'piezas vs metal' : kgModo === 'pieza' ? 'piezas finales' : 'metal consumido'}</div>
       <div class="chart-box"><canvas id="evol-chart-prod"></canvas></div></div>` : ''}
     `;
 
   // Bar chart: approved vs rejected vs returned
-  const barApro = hasKg ? rows.map(r => r.kg_aprobados || 0) : rows.map(r => r.aprobadas);
-  const barRech = hasKg ? rows.map(r => r.kg_rechazados || 0) : rows.map(r => r.rechazadas);
-  const barDev  = hasKg ? rows.map(r => r.kg_devueltos  || 0) : rows.map(r => r.devueltas  || 0);
+  // In 'ambos' mode: two stacked groups — 'pieza' (finished piece weight) and 'metal' (total metal incl. losses)
+  let barDatasets;
+  if (!hasKg) {
+    barDatasets = [
+      { label: 'Aprobado',  data: rows.map(r => r.aprobadas),     backgroundColor: '#66bb6abb', borderRadius: 3, stack: 'a' },
+      { label: 'Rechazado', data: rows.map(r => r.rechazadas),     backgroundColor: '#ef5350bb', borderRadius: 3, stack: 'a' },
+      { label: 'Devuelto',  data: rows.map(r => r.devueltas || 0), backgroundColor: '#a78bfabb', borderRadius: 3, stack: 'a' },
+    ];
+  } else if (kgModo === 'ambos') {
+    barDatasets = [
+      { label: 'Aprobado (piezas)',  data: rows.map(r => r.kg_aprobados_pieza  || 0), backgroundColor: '#66bb6a99', borderRadius: 3, stack: 'pieza' },
+      { label: 'Rechazado (piezas)', data: rows.map(r => r.kg_rechazados_pieza || 0), backgroundColor: '#ef535099', borderRadius: 3, stack: 'pieza' },
+      { label: 'Devuelto',           data: rows.map(r => r.kg_devueltos        || 0), backgroundColor: '#a78bfa99', borderRadius: 3, stack: 'pieza' },
+      { label: 'Aprobado (metal)',   data: rows.map(r => r.kg_aprobados        || 0), backgroundColor: '#66bb6a44', borderRadius: 3, stack: 'metal', borderColor: '#66bb6a', borderWidth: 1 },
+      { label: 'Rechazado (metal)',  data: rows.map(r => r.kg_rechazados       || 0), backgroundColor: '#ef535044', borderRadius: 3, stack: 'metal', borderColor: '#ef5350', borderWidth: 1 },
+    ];
+  } else {
+    barDatasets = [
+      { label: 'Aprobado',  data: rows.map(r => _kgA(r)),  backgroundColor: '#66bb6abb', borderRadius: 3, stack: 'a' },
+      { label: 'Rechazado', data: rows.map(r => _kgR(r)),  backgroundColor: '#ef5350bb', borderRadius: 3, stack: 'a' },
+      { label: 'Devuelto',  data: rows.map(r => _kgDv(r)), backgroundColor: '#a78bfabb', borderRadius: 3, stack: 'a' },
+    ];
+  }
 
   _evolCharts.push(new Chart($id('evol-chart-bar'), {
     type: 'bar',
-    data: {
-      labels,
-      datasets: [
-        { label: 'Aprobado',   data: barApro, backgroundColor: '#66bb6abb', borderRadius: 3, stack: 'a' },
-        { label: 'Rechazado',  data: barRech, backgroundColor: '#ef5350bb', borderRadius: 3, stack: 'a' },
-        { label: 'Devuelto',   data: barDev,  backgroundColor: '#a78bfabb', borderRadius: 3, stack: 'a' },
-      ]
-    },
+    data: { labels, datasets: barDatasets },
     options: {
       responsive: true, maintainAspectRatio: true,
       plugins: { legend: { position: 'top', labels: { color: 'var(--fg)', font: { size: 11 } } } },
@@ -2307,8 +2336,8 @@ function _evolRender() {
   }));
 
   // Line chart: % scrap, % reparación, % devolución
-  const pctScrap = rows.map(r => hasKg && r.pct_scrap_kg !== null ? r.pct_scrap_kg : r.pct_scrap);
-  const pctRep   = rows.map(r => hasKg && r.pct_rep_kg  !== null ? r.pct_rep_kg  : r.pct_reparacion);
+  const pctScrap = rows.map(r => hasKg ? _pctS(r) : r.pct_scrap);
+  const pctRep   = rows.map(r => hasKg ? _pctR(r) : r.pct_reparacion);
   const pctDev   = rows.map(r => hasKg && r.pct_devol_kg !== null ? r.pct_devol_kg : r.pct_devolucion);
 
   _evolCharts.push(new Chart($id('evol-chart-pct'), {
@@ -2344,22 +2373,27 @@ function _evolRender() {
   // Productividad chart: only when kg mode and data available
   if (hasKg && $id('evol-chart-prod')) {
     const nullTo0 = v => (v === null || v === undefined) ? null : v;
+    const prodDs = kgModo === 'ambos' ? [
+      { label: 'kg piezas / hs',    data: rows.map(r => nullTo0(r.productividad_pieza)),
+        borderColor: '#4fc3f7', backgroundColor: '#4fc3f722',
+        tension: 0.35, fill: true,  pointRadius: 3, pointHoverRadius: 5, borderWidth: 2, spanGaps: false },
+      { label: 'kg metal / hs',     data: rows.map(r => nullTo0(r.productividad)),
+        borderColor: '#4fc3f766', backgroundColor: 'transparent',
+        tension: 0.35, fill: false, pointRadius: 3, pointHoverRadius: 5, borderWidth: 2, borderDash: [5,4], spanGaps: false },
+    ] : [
+      { label: 'kg aprobados / hs', data: rows.map(r => nullTo0(_prod(r))),
+        borderColor: '#4fc3f7', backgroundColor: '#4fc3f722',
+        tension: 0.35, fill: true,  pointRadius: 3, pointHoverRadius: 5, borderWidth: 2, spanGaps: false },
+      { label: 'kg rechazo interno / hs', data: rows.map(r => nullTo0(r.scrap_hs)),
+        borderColor: '#ef5350', backgroundColor: 'transparent',
+        tension: 0.35, fill: false, pointRadius: 3, pointHoverRadius: 5, borderWidth: 2, borderDash: [5,4], spanGaps: false },
+      { label: 'kg devuelto / hs', data: rows.map(r => nullTo0(r.devol_hs)),
+        borderColor: '#a78bfa', backgroundColor: 'transparent',
+        tension: 0.35, fill: false, pointRadius: 3, pointHoverRadius: 5, borderWidth: 2, borderDash: [2,4], spanGaps: false },
+    ];
     _evolCharts.push(new Chart($id('evol-chart-prod'), {
       type: 'line',
-      data: {
-        labels,
-        datasets: [
-          { label: 'kg aprobados / hs', data: rows.map(r => nullTo0(r.productividad)),
-            borderColor: '#4fc3f7', backgroundColor: '#4fc3f722',
-            tension: 0.35, fill: true, pointRadius: 3, pointHoverRadius: 5, borderWidth: 2, spanGaps: false },
-          { label: 'kg rechazo interno / hs', data: rows.map(r => nullTo0(r.scrap_hs)),
-            borderColor: '#ef5350', backgroundColor: 'transparent',
-            tension: 0.35, fill: false, pointRadius: 3, pointHoverRadius: 5, borderWidth: 2, borderDash: [5,4], spanGaps: false },
-          { label: 'kg devuelto / hs', data: rows.map(r => nullTo0(r.devol_hs)),
-            borderColor: '#a78bfa', backgroundColor: 'transparent',
-            tension: 0.35, fill: false, pointRadius: 3, pointHoverRadius: 5, borderWidth: 2, borderDash: [2,4], spanGaps: false },
-        ]
-      },
+      data: { labels, datasets: prodDs },
       options: {
         responsive: true, maintainAspectRatio: true,
         plugins: { legend: { position: 'top', labels: { color: 'var(--fg)', font: { size: 11 } } },
@@ -2371,6 +2405,48 @@ function _evolRender() {
         }
       }
     }));
+  }
+
+  // Tabla de datos mensual con ambos valores de kg
+  if (hasKg) {
+    const tblRows = [...rows].reverse().map(r => {
+      const pz = r.kg_aprobados_pieza, mt = r.kg_aprobados;
+      const factor = (pz && mt && pz > 0) ? (mt / pz).toFixed(2) : '—';
+      const [y, m] = r.mes.split('-');
+      const lbl = ['','Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'][+m] + ' ' + y;
+      return `<tr>
+        <td><strong>${lbl}</strong></td>
+        <td style="text-align:right">${fmt(r.aprobadas)}</td>
+        <td style="text-align:right;color:var(--red)">${fmt(r.rechazadas)}</td>
+        <td style="text-align:right;color:var(--green)">${pz != null ? fmtKg(pz) : '—'}</td>
+        <td style="text-align:right;color:var(--accent)">${mt != null ? fmtKg(mt) : '—'}</td>
+        <td style="text-align:right;color:var(--muted)">${factor}×</td>
+        <td style="text-align:right;color:${r.pct_scrap_kg_pieza > 10 ? 'var(--red)' : r.pct_scrap_kg_pieza > 5 ? 'var(--yellow)' : 'inherit'}">${r.pct_scrap_kg_pieza != null ? r.pct_scrap_kg_pieza + '%' : '—'}</td>
+        <td style="text-align:right;color:var(--muted)">${r.productividad_pieza != null ? r.productividad_pieza + ' kg/h' : '—'}</td>
+      </tr>`;
+    }).join('');
+    el.insertAdjacentHTML('beforeend', `
+      <div class="card" style="margin-top:14px">
+        <div class="card-title">Detalle mensual &mdash; Kg piezas finales vs Kg metal consumido</div>
+        <div class="tbl-wrap"><table>
+          <thead><tr>
+            <th>Mes</th>
+            <th style="text-align:right">Aprobadas</th>
+            <th style="text-align:right">Rechazadas</th>
+            <th style="text-align:right">Kg piezas</th>
+            <th style="text-align:right">Kg metal</th>
+            <th style="text-align:right">Factor</th>
+            <th style="text-align:right">% Scrap</th>
+            <th style="text-align:right">Productividad</th>
+          </tr></thead>
+          <tbody>${tblRows}</tbody>
+        </table></div>
+        <div style="font-size:11px;color:var(--muted);margin-top:8px;padding:0 4px">
+          <strong>Kg piezas</strong>: peso f&#237;sico de la pieza terminada (coincide con Excel Indicadores).
+          <strong>Kg metal</strong>: metal total consumido incl. sangr&#237;as y p&#233;rdidas (peso &times; coefCompl).
+          <strong>Factor</strong>: cu&#225;ntos kg de metal se necesitan por kg de pieza aprobada.
+        </div>
+      </div>`);
   }
 
   // ── Ranking de piezas ────────────────────────────────────────────────────────
