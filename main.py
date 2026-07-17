@@ -517,8 +517,8 @@ _PROXIMOS_SELECT = """
         GROUP BY iditempedido
     ) qty ON qty.iditempedido = idp.iditempedido
     WHERE idp.fechadeentrega IS NOT NULL
-      AND upper(p.estadopedido) NOT IN ('K','D','A','B')
-      AND upper(idp.estadoitem) NOT IN ('K','D','A','B')
+      AND upper(p.estadopedido) NOT IN ('K','D')
+      AND upper(idp.estadoitem) NOT IN ('K','D')
       AND COALESCE(qty.tot_entregada, 0) = 0
 """
 
