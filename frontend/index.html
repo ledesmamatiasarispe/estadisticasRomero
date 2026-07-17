@@ -2162,9 +2162,9 @@ async function showRechazos() {
         </span>
         <select id="evol-kg-modo" onchange="_evolRender()"
           style="font-size:12px;padding:4px 8px;background:var(--card);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer">
-          <option value="ambos" selected>Kg piezas + metal</option>
+          <option value="ambos" selected>Kg piezas + coladas</option>
           <option value="pieza">Solo kg piezas finales</option>
-          <option value="metal">Solo kg metal consumido</option>
+          <option value="metal">Solo kg total (c/coladas)</option>
         </select>
       </div>
       <div id="evol-content"><div class="loading">Cargando&#8230;</div></div>
@@ -2293,12 +2293,13 @@ function _evolRender() {
       <div class="card"><div class="card-title">&#205;ndices de Rechazo Interno, Reparaci&#xf3;n y Devoluci&#xf3;n (%)</div>
         <div class="chart-box"><canvas id="evol-chart-pct"></canvas></div></div>
     </div>
-    ${hasKg ? `<div class="card" style="margin-bottom:14px"><div class="card-title">Productividad mensual (kg / hs trabajadas) &mdash; ${kgModo === 'ambos' ? 'piezas vs metal' : kgModo === 'pieza' ? 'piezas finales' : 'metal consumido'}</div>
+    ${hasKg ? `<div class="card" style="margin-bottom:14px"><div class="card-title">Productividad mensual (kg / hs trabajadas) &mdash; ${kgModo === 'ambos' ? 'piezas vs total c/coladas' : kgModo === 'pieza' ? 'piezas finales' : 'total c/coladas'}</div>
       <div class="chart-box"><canvas id="evol-chart-prod"></canvas></div></div>` : ''}
     `;
 
   // Bar chart: approved vs rejected vs returned
-  // In 'ambos' mode: two stacked groups — 'pieza' (finished piece weight) and 'metal' (total metal incl. losses)
+  // In 'ambos' mode: single stacked bar per month where the base = kg piezas and
+  // the top slice = kg coladas (overhead: sprues, risers, losses = kg_metal - kg_pieza)
   let barDatasets;
   if (!hasKg) {
     barDatasets = [
@@ -2308,11 +2309,11 @@ function _evolRender() {
     ];
   } else if (kgModo === 'ambos') {
     barDatasets = [
-      { label: 'Aprobado (piezas)',  data: rows.map(r => r.kg_aprobados_pieza  || 0), backgroundColor: '#66bb6a99', borderRadius: 3, stack: 'pieza' },
-      { label: 'Rechazado (piezas)', data: rows.map(r => r.kg_rechazados_pieza || 0), backgroundColor: '#ef535099', borderRadius: 3, stack: 'pieza' },
-      { label: 'Devuelto',           data: rows.map(r => r.kg_devueltos        || 0), backgroundColor: '#a78bfa99', borderRadius: 3, stack: 'pieza' },
-      { label: 'Aprobado (metal)',   data: rows.map(r => r.kg_aprobados        || 0), backgroundColor: '#66bb6a44', borderRadius: 3, stack: 'metal', borderColor: '#66bb6a', borderWidth: 1 },
-      { label: 'Rechazado (metal)',  data: rows.map(r => r.kg_rechazados       || 0), backgroundColor: '#ef535044', borderRadius: 3, stack: 'metal', borderColor: '#ef5350', borderWidth: 1 },
+      { label: 'Aprobado (piezas)',  data: rows.map(r => r.kg_aprobados_pieza  || 0), backgroundColor: '#66bb6acc', borderRadius: 3, stack: 'a' },
+      { label: 'Kg coladas (apro)', data: rows.map(r => Math.max(0, (r.kg_aprobados || 0) - (r.kg_aprobados_pieza || 0))), backgroundColor: '#66bb6a44', borderRadius: 0, stack: 'a', borderColor: '#66bb6a88', borderWidth: 1 },
+      { label: 'Rechazado (piezas)', data: rows.map(r => r.kg_rechazados_pieza || 0), backgroundColor: '#ef5350cc', borderRadius: 3, stack: 'a' },
+      { label: 'Kg coladas (rech)', data: rows.map(r => Math.max(0, (r.kg_rechazados || 0) - (r.kg_rechazados_pieza || 0))), backgroundColor: '#ef535044', borderRadius: 0, stack: 'a', borderColor: '#ef535088', borderWidth: 1 },
+      { label: 'Devuelto',          data: rows.map(r => r.kg_devueltos || 0), backgroundColor: '#a78bfaaa', borderRadius: 3, stack: 'a' },
     ];
   } else {
     barDatasets = [
@@ -2377,7 +2378,7 @@ function _evolRender() {
       { label: 'kg piezas / hs',    data: rows.map(r => nullTo0(r.productividad_pieza)),
         borderColor: '#4fc3f7', backgroundColor: '#4fc3f722',
         tension: 0.35, fill: true,  pointRadius: 3, pointHoverRadius: 5, borderWidth: 2, spanGaps: false },
-      { label: 'kg metal / hs',     data: rows.map(r => nullTo0(r.productividad)),
+      { label: 'kg total (c/coladas) / hs', data: rows.map(r => nullTo0(r.productividad)),
         borderColor: '#4fc3f766', backgroundColor: 'transparent',
         tension: 0.35, fill: false, pointRadius: 3, pointHoverRadius: 5, borderWidth: 2, borderDash: [5,4], spanGaps: false },
     ] : [
@@ -2411,6 +2412,7 @@ function _evolRender() {
   if (hasKg) {
     const tblRows = [...rows].reverse().map(r => {
       const pz = r.kg_aprobados_pieza, mt = r.kg_aprobados;
+      const col = (pz != null && mt != null) ? Math.max(0, mt - pz) : null;
       const factor = (pz && mt && pz > 0) ? (mt / pz).toFixed(2) : '—';
       const [y, m] = r.mes.split('-');
       const lbl = ['','Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'][+m] + ' ' + y;
@@ -2419,6 +2421,7 @@ function _evolRender() {
         <td style="text-align:right">${fmt(r.aprobadas)}</td>
         <td style="text-align:right;color:var(--red)">${fmt(r.rechazadas)}</td>
         <td style="text-align:right;color:var(--green)">${pz != null ? fmtKg(pz) : '—'}</td>
+        <td style="text-align:right;color:var(--muted)">${col != null ? fmtKg(col) : '—'}</td>
         <td style="text-align:right;color:var(--accent)">${mt != null ? fmtKg(mt) : '—'}</td>
         <td style="text-align:right;color:var(--muted)">${factor}×</td>
         <td style="text-align:right;color:${r.pct_scrap_kg_pieza > 10 ? 'var(--red)' : r.pct_scrap_kg_pieza > 5 ? 'var(--yellow)' : 'inherit'}">${r.pct_scrap_kg_pieza != null ? r.pct_scrap_kg_pieza + '%' : '—'}</td>
@@ -2427,14 +2430,15 @@ function _evolRender() {
     }).join('');
     el.insertAdjacentHTML('beforeend', `
       <div class="card" style="margin-top:14px">
-        <div class="card-title">Detalle mensual &mdash; Kg piezas finales vs Kg metal consumido</div>
+        <div class="card-title">Detalle mensual &mdash; Kg piezas vs Kg coladas</div>
         <div class="tbl-wrap"><table>
           <thead><tr>
             <th>Mes</th>
             <th style="text-align:right">Aprobadas</th>
             <th style="text-align:right">Rechazadas</th>
             <th style="text-align:right">Kg piezas</th>
-            <th style="text-align:right">Kg metal</th>
+            <th style="text-align:right">Kg coladas</th>
+            <th style="text-align:right">Total</th>
             <th style="text-align:right">Factor</th>
             <th style="text-align:right">% Scrap</th>
             <th style="text-align:right">Productividad</th>
@@ -2442,9 +2446,10 @@ function _evolRender() {
           <tbody>${tblRows}</tbody>
         </table></div>
         <div style="font-size:11px;color:var(--muted);margin-top:8px;padding:0 4px">
-          <strong>Kg piezas</strong>: peso f&#237;sico de la pieza terminada (coincide con Excel Indicadores).
-          <strong>Kg metal</strong>: metal total consumido incl. sangr&#237;as y p&#233;rdidas (peso &times; coefCompl).
-          <strong>Factor</strong>: cu&#225;ntos kg de metal se necesitan por kg de pieza aprobada.
+          <strong>Kg piezas</strong>: peso f&#237;sico de la pieza terminada (= Excel Indicadores).
+          <strong>Kg coladas</strong>: metal extra en sangr&#237;as, bebederos y p&#233;rdidas.
+          <strong>Total</strong>: kg piezas + kg coladas = metal total consumido.
+          <strong>Factor</strong>: kg total / kg piezas.
         </div>
       </div>`);
   }
