@@ -5,6 +5,7 @@ import shutil
 import zipfile
 import tempfile
 import subprocess
+import time
 import urllib.request
 from pathlib import Path
 
@@ -180,10 +181,18 @@ def main():
 
     print("Iniciando GNC API en http://localhost:50504 ...")
     print()
-    r = subprocess.run([str(VENV_PY), str(ROOT / "main.py")])
-    if r.returncode != 0:
-        print("\n La aplicacion cerro con un error.")
-        input(" Presiona Enter para cerrar...")
+    while True:
+        r = subprocess.run([str(VENV_PY), str(ROOT / "main.py")])
+        if r.returncode == 0:
+            print("\n Servidor detenido correctamente.")
+            break
+        print(f"\n [!] Servidor cerro inesperadamente (codigo {r.returncode}).")
+        print("     Reiniciando en 5 segundos... (Ctrl+C para cancelar)\n")
+        try:
+            time.sleep(5)
+        except KeyboardInterrupt:
+            print("\n Reinicio cancelado.")
+            break
 
 
 if __name__ == "__main__":
