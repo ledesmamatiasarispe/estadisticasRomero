@@ -1304,7 +1304,7 @@ def analytics_evolucion_mensual(meses: int = Query(default=24, ge=3, le=60)):
             JOIN "FundiciónPorFecha" fpf ON fpf.códfundición = t.códfundición
             WHERE fpf.fecha IS NOT NULL
               AND t.códfundición IS NOT NULL
-              AND strftime('%Y-%m', fpf.fecha) < strftime('%Y-%m', 'now')
+              AND strftime('%Y-%m', fpf.fecha) <= strftime('%Y-%m', 'now')
             GROUP BY mes
             ORDER BY mes DESC
             LIMIT ?
@@ -1336,7 +1336,7 @@ def analytics_evolucion_mensual(meses: int = Query(default=24, ge=3, le=60)):
             WHERE fpf.fecha IS NOT NULL
               AND t.códfundición IS NOT NULL
               AND t.idpesopieza IS NOT NULL
-              AND strftime('%Y-%m', fpf.fecha) < strftime('%Y-%m', 'now')
+              AND strftime('%Y-%m', fpf.fecha) <= strftime('%Y-%m', 'now')
             GROUP BY mes
             ORDER BY mes DESC
             LIMIT ?
@@ -1350,7 +1350,7 @@ def analytics_evolucion_mensual(meses: int = Query(default=24, ge=3, le=60)):
             JOIN Responsables r ON r.códigoresponsable = hf.códigoresponsable
             WHERE hf.fecha IS NOT NULL
               AND (r.códsector < 2 OR r.códsector = 6)
-              AND strftime('%Y-%m', hf.fecha) < strftime('%Y-%m', 'now')
+              AND strftime('%Y-%m', hf.fecha) <= strftime('%Y-%m', 'now')
             GROUP BY mes
         """).fetchall()
         hs_map = {r["mes"]: (r["hs_trabajadas"] or 0) for r in hs_rows}
@@ -1458,7 +1458,7 @@ def analytics_semanal(semanas: int = Query(default=12, ge=4, le=52)):
             LEFT JOIN NombreDePiezas np ON np.id = pp.nombredepiezasid_
             WHERE fpf.fecha IS NOT NULL
               AND t.códfundición IS NOT NULL
-              AND strftime('%Y-%m', fpf.fecha) < strftime('%Y-%m', 'now')
+              AND strftime('%Y-%m', fpf.fecha) <= strftime('%Y-%m', 'now')
             GROUP BY anio, semana
             ORDER BY anio DESC, semana DESC
             LIMIT ?
@@ -1526,7 +1526,7 @@ def analytics_top_defectos(meses: int = Query(default=6, ge=3, le=12)):
             JOIN "FundiciónPorFecha" fpf ON fpf.códfundición = t.códfundición
             WHERE fpf.fecha IS NOT NULL
               AND t.códfundición IS NOT NULL
-              AND strftime('%Y-%m', fpf.fecha) < strftime('%Y-%m', 'now')
+              AND strftime('%Y-%m', fpf.fecha) <= strftime('%Y-%m', 'now')
         """).fetchall()
 
         rep_rows = conn.execute("""
@@ -1537,7 +1537,7 @@ def analytics_top_defectos(meses: int = Query(default=6, ge=3, le=12)):
             JOIN "FundiciónPorFecha" fpf ON fpf.códfundición = t.códfundición
             WHERE fpf.fecha IS NOT NULL
               AND t.códfundición IS NOT NULL
-              AND strftime('%Y-%m', fpf.fecha) < strftime('%Y-%m', 'now')
+              AND strftime('%Y-%m', fpf.fecha) <= strftime('%Y-%m', 'now')
         """).fetchall()
 
         return {
@@ -1584,7 +1584,7 @@ def analytics_top_piezas(meses: int = Query(default=6, ge=3, le=12)):
             LEFT JOIN NombreDePiezas np ON np.id = pp.nombredepiezasid_
             WHERE fpf.fecha IS NOT NULL AND t.códfundición IS NOT NULL
               AND t.cantidadrechazada > 0
-              AND strftime('%Y-%m', fpf.fecha) < strftime('%Y-%m', 'now')
+              AND strftime('%Y-%m', fpf.fecha) <= strftime('%Y-%m', 'now')
             GROUP BY mes, t.idpesopieza
         """).fetchall()
 
@@ -1616,7 +1616,7 @@ def analytics_top_piezas(meses: int = Query(default=6, ge=3, le=12)):
             LEFT JOIN NombreDePiezas np ON np.id = pp.nombredepiezasid_
             WHERE fpf.fecha IS NOT NULL AND t.códfundición IS NOT NULL
               AND t.cantidadreparada > 0
-              AND strftime('%Y-%m', fpf.fecha) < strftime('%Y-%m', 'now')
+              AND strftime('%Y-%m', fpf.fecha) <= strftime('%Y-%m', 'now')
             GROUP BY mes, t.idpesopieza
         """).fetchall()
 
@@ -1751,7 +1751,7 @@ def analytics_entregas_pieza(
             WHERE r.idnroremito > 10000 AND r.idnroremito < 90000
               AND id.cantidad > 0
               AND substr(r.fecharemito, 1, 7) >= ?
-              AND substr(r.fecharemito, 1, 7) < strftime('%Y-%m', 'now')
+              AND substr(r.fecharemito, 1, 7) <= strftime('%Y-%m', 'now')
               {extra}
             GROUP BY mes, np.id
             ORDER BY mes DESC, kg_entregado DESC
@@ -2567,7 +2567,7 @@ def get_fundiciones_mensual(meses: int = Query(default=12, ge=3, le=36)):
             FROM Fundiciones f
             JOIN "FundiciónPorFecha" fpf ON fpf.códfundición = f.códfundición
             WHERE fpf.fecha IS NOT NULL
-              AND strftime('%Y-%m', fpf.fecha) < strftime('%Y-%m', 'now')
+              AND strftime('%Y-%m', fpf.fecha) <= strftime('%Y-%m', 'now')
             GROUP BY mes
             ORDER BY mes DESC
             LIMIT ?
