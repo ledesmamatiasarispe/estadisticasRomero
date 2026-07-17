@@ -705,7 +705,6 @@ def analytics_clientes(search: Optional[str] = Query(None)):
             {where}
             GROUP BY c.códigocliente
             ORDER BY c.nombrecliente
-            LIMIT 20
         """, params).fetchall()
         return [dict(r) for r in rows]
     finally:
