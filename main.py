@@ -111,18 +111,19 @@ def _should_auto_sync() -> bool:
 
 # ── Sync ───────────────────────────────────────────────────────────────────────
 
-async def run_sync():
+async def run_sync(full_refresh: bool = False):
     import sync as sync_module
 
     sync_state["status"]   = "syncing"
     sync_state["error"]    = None
-    sync_state["progress"] = {"done": 0, "total": 0, "phase": "Exportando desde Access..."}
-    log.info("Iniciando sync Access → SQLite...")
+    mode_label = "completo" if full_refresh else "incremental"
+    sync_state["progress"] = {"done": 0, "total": 0, "phase": f"Exportando desde Access ({mode_label})..."}
+    log.info("Iniciando sync Access → SQLite (full_refresh=%s)...", full_refresh)
 
     loop = asyncio.get_event_loop()
 
-    # 0. Escribir watermarks para que el PS script use sync incremental
-    if DB_PATH.exists():
+    # 0. Escribir watermarks (omitir en full_refresh para forzar sync completo)
+    if not full_refresh and DB_PATH.exists():
         try:
             _wm_conn = sqlite3.connect(DB_PATH)
             wm = sync_module.write_watermarks(_wm_conn, EXPORTS)
@@ -130,6 +131,12 @@ async def run_sync():
             log.info("Watermarks escritos: %d tablas en modo incremental.", len(wm))
         except Exception as _e:
             log.warning("No se pudieron escribir watermarks: %s. Sync será completo.", _e)
+    elif full_refresh:
+        # Borrar watermarks para que Access exporte todo
+        wm_path = EXPORTS / "watermarks.json"
+        if wm_path.exists():
+            wm_path.unlink()
+        log.info("Full refresh: watermarks eliminados, Access exportará todas las filas.")
 
     # 1. PowerShell 32-bit: Access → CSVs
     def _run_ps():
@@ -156,7 +163,9 @@ async def run_sync():
         sync_state["progress"] = {"done": done, "total": total, "phase": "Importando tablas..."}
 
     def _run_import():
-        return sync_module.sync_all(EXPORTS, DB_PATH, on_progress=_on_progress)
+        return sync_module.sync_all(EXPORTS, DB_PATH,
+                                    on_progress=_on_progress,
+                                    full_refresh=full_refresh)
 
     try:
         summary = await loop.run_in_executor(None, _run_import)
@@ -316,6 +325,16 @@ async def trigger_sync():
         raise HTTPException(409, "Sync ya en progreso")
     asyncio.create_task(run_sync())
     return {"message": "Sync iniciado"}
+
+
+@app.post("/api/sync/full")
+async def trigger_full_sync():
+    """Re-descarga TODAS las tablas desde Access ignorando watermarks.
+    Úsalo para corregir datos incorrectos por sync incremental mal configurado."""
+    if sync_state["status"] == "syncing":
+        raise HTTPException(409, "Sync ya en progreso")
+    asyncio.create_task(run_sync(full_refresh=True))
+    return {"message": "Full sync iniciado — todas las tablas se re-descargarán desde Access"}
 
 
 @app.get("/api/tables")

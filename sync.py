@@ -240,10 +240,12 @@ def import_csv(
     return len(rows), False
 
 
-def sync_all(exports_dir: Path = EXPORTS_DIR, db_path: Path = DB_PATH, on_progress=None) -> dict:
+def sync_all(exports_dir: Path = EXPORTS_DIR, db_path: Path = DB_PATH,
+             on_progress=None, full_refresh: bool = False) -> dict:
     """
     Lee tables.json + todos los CSVs en exports_dir e importa a SQLite.
-    Si existe watermarks.json, aplica sync incremental para las tablas configuradas.
+    Si full_refresh=True ignora watermarks y hace DROP+CREATE+INSERT en todo.
+    Si existe watermarks.json, aplica sync incremental/rolling para las tablas configuradas.
     Devuelve un dict con el resultado del sync.
     """
     tables_json = exports_dir / "tables.json"
@@ -256,13 +258,15 @@ def sync_all(exports_dir: Path = EXPORTS_DIR, db_path: Path = DB_PATH, on_progre
     if isinstance(table_meta, dict):
         table_meta = [table_meta]
 
-    # Leer watermarks si están disponibles
+    # Leer watermarks si están disponibles (ignorar en full_refresh)
     watermarks: dict = {}
     wm_path = exports_dir / "watermarks.json"
-    if wm_path.exists():
+    if not full_refresh and wm_path.exists():
         with open(wm_path, encoding="utf-8") as f:
             watermarks = json.load(f)
         log.info(f"Watermarks cargados: {len(watermarks)} tablas en modo incremental.")
+    elif full_refresh:
+        log.info("Full refresh: ignorando watermarks, sync completo de todas las tablas.")
 
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -307,9 +311,11 @@ def sync_all(exports_dir: Path = EXPORTS_DIR, db_path: Path = DB_PATH, on_progre
                 on_progress(len(results), len(table_meta))
             continue
 
-        # Usar watermark si la tabla es incremental o rolling (ambas usan watermarks.json)
+        # Usar watermark si la tabla es incremental o rolling (y no es full_refresh)
         is_rolling_table = display in ROLLING_TABLES
-        wm = watermarks.get(display) if (meta.get("incremental") or is_rolling_table) else None
+        wm = (watermarks.get(display)
+              if (not full_refresh and (meta.get("incremental") or is_rolling_table))
+              else None)
 
         try:
             rows, incremental = import_csv(conn, csv_path, display, watermark=wm)
