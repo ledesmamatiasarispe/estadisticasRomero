@@ -11,13 +11,8 @@ log = logging.getLogger(__name__)
 EXPORTS_DIR = Path(__file__).parent / "data" / "exports"
 DB_PATH     = Path(__file__).parent / "data" / "gnc.db"
 
-# Tablas que soportan sync incremental.
-# Clave = nombre exacto de la tabla en Access/SQLite.
-# Valor = nombre de la columna PK (auto-increment numérico en Access).
-# Solo incluir tablas de tipo append-only (históricos); las que pueden
-# tener updates en registros viejos (Pedidos, Remitos activos) quedan fuera.
+# Tablas que soportan sync incremental (solo append-only: nunca se actualizan filas viejas).
 INCREMENTAL_TABLES: dict[str, str] = {
-    "Trabajos":           "iditemtrabajo",    # 83K filas, crece diariamente
     "ItemDetallePedido":  "iditempedido",     # 52K filas, ítems de pedido
     "ItemDetalle":        "iditemdetalle",    # 86K filas, detalles de entrega
     "ItemDevolución":     "iddevol",          # 5K filas, devoluciones externas
@@ -25,6 +20,14 @@ INCREMENTAL_TABLES: dict[str, str] = {
     "Impresiones":        "id",               # 21K filas, registros de impresión
     "Pedidos":            "idpedido",         # 21K filas, pedidos de clientes
 }
+
+# Tablas que tienen updates en registros existentes (cantidadaprobada, etc.).
+# Se re-sincronizan las últimas ROLLING_WINDOW filas con UPSERT en cada ciclo,
+# para capturar tanto OTs nuevas como aprobaciones sobre OTs ya existentes.
+ROLLING_TABLES: dict[str, str] = {
+    "Trabajos": "iditemtrabajo",
+}
+ROLLING_WINDOW = 600   # re-sync últimas 600 OTs (~6 meses de producción)
 
 
 def _sanitize_name(name: str) -> str:
@@ -82,20 +85,27 @@ def _coerce(value: str, col_type: str):
 
 def build_watermarks(conn: sqlite3.Connection) -> dict:
     """
-    Lee el MAX(pk) de cada tabla incremental que ya existe en SQLite.
+    Lee el MAX(pk) de cada tabla incremental/rolling que ya existe en SQLite.
+    Para ROLLING_TABLES escribe max_val - ROLLING_WINDOW para que Access
+    re-exporte ese rango y las aprobaciones tardías queden cubiertas.
     Devuelve dict: {access_table_name: {pk_col, max_val}}.
     """
     watermarks = {}
-    for table, pk_col in INCREMENTAL_TABLES.items():
+    all_tables = {**INCREMENTAL_TABLES, **ROLLING_TABLES}
+    for table, pk_col in all_tables.items():
         try:
             row = conn.execute(
                 f'SELECT MAX("{pk_col}") FROM "{table}"'
             ).fetchone()
             max_val = row[0] if (row and row[0] is not None) else 0
-            watermarks[table] = {"pk_col": pk_col, "max_val": int(max_val)}
-            log.debug(f"  watermark {table}.{pk_col} = {max_val}")
+            if table in ROLLING_TABLES:
+                effective = max(0, int(max_val) - ROLLING_WINDOW)
+            else:
+                effective = int(max_val)
+            watermarks[table] = {"pk_col": pk_col, "max_val": effective}
+            log.debug(f"  watermark {table}.{pk_col} = {effective}")
         except Exception:
-            pass  # tabla no existe todavía → no hay watermark
+            pass
     return watermarks
 
 
@@ -161,7 +171,8 @@ def import_csv(
         col_types.append(_infer_type(vals))
 
     placeholders = ", ".join("?" * len(safe_headers))
-    insert_sql = f'INSERT INTO "{table_name}" VALUES ({placeholders})'
+    insert_sql     = f'INSERT INTO "{table_name}" VALUES ({placeholders})'
+    upsert_sql     = f'INSERT OR REPLACE INTO "{table_name}" VALUES ({placeholders})'
 
     def _build_batch(rows_subset):
         batch = []
@@ -194,15 +205,22 @@ def import_csv(
         return 0, True
 
     if is_incremental:
-        pk_col = watermark["pk_col"]
+        pk_col  = watermark["pk_col"]
         max_val = watermark["max_val"]
-        # Limpiar cualquier importación parcial previa del mismo rango
-        conn.execute(f'DELETE FROM "{table_name}" WHERE "{pk_col}" > ?', (max_val,))
-        # Insertar delta
+        is_rolling = table_name in ROLLING_TABLES
+        if is_rolling:
+            # Borrar el rango completo que Access re-exportó (max_val a adelante)
+            conn.execute(f'DELETE FROM "{table_name}" WHERE "{pk_col}" >= ?', (max_val,))
+            sql = upsert_sql
+            mode_label = f"rolling upsert, pk>={max_val}"
+        else:
+            conn.execute(f'DELETE FROM "{table_name}" WHERE "{pk_col}" > ?', (max_val,))
+            sql = insert_sql
+            mode_label = f"incremental, pk>{max_val}"
         batch = _build_batch(rows)
         for i in range(0, len(batch), 500):
-            conn.executemany(insert_sql, batch[i:i+500])
-        log.info(f"  {display_name}: +{len(rows)} filas (incremental, pk>{max_val}).")
+            conn.executemany(sql, batch[i:i+500])
+        log.info(f"  {display_name}: +{len(rows)} filas ({mode_label}).")
         return len(rows), True
 
     # ── Sync completo ──────────────────────────────────────────────────────────
@@ -289,8 +307,9 @@ def sync_all(exports_dir: Path = EXPORTS_DIR, db_path: Path = DB_PATH, on_progre
                 on_progress(len(results), len(table_meta))
             continue
 
-        # Usar watermark si el PS marcó esta tabla como incremental Y tenemos el watermark
-        wm = watermarks.get(display) if meta.get("incremental") else None
+        # Usar watermark si la tabla es incremental o rolling (ambas usan watermarks.json)
+        is_rolling_table = display in ROLLING_TABLES
+        wm = watermarks.get(display) if (meta.get("incremental") or is_rolling_table) else None
 
         try:
             rows, incremental = import_csv(conn, csv_path, display, watermark=wm)
