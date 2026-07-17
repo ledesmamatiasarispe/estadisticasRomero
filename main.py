@@ -1311,9 +1311,16 @@ def analytics_evolucion_mensual(meses: int = Query(default=24, ge=3, le=60)):
         """, (meses,)).fetchall()
 
         # Kg-based monthly aggregation — two formulas:
-        #   metal: peso × coefcompl × AD/TR → total metal consumed (incl. losses/sprues)
-        #   pieza: peso alone              → finished piece weight (matches Excel "PesoAprobado")
+        #   metal: peso histórico OT × coefcompl × AD/TR → total metal consumed (incl. losses/sprues)
+        #   pieza: ÚltimoDePesoPieza (peso vigente actual, igual que Excel Power Query)
         kg_rows = conn.execute("""
+            WITH peso_vigente AS (
+                SELECT nombredepiezasid_,
+                       MAX(códpieza) AS max_cod
+                FROM PesosDePiezas
+                WHERE cuentaasteríscos >= 0
+                GROUP BY nombredepiezasid_
+            )
             SELECT strftime('%Y-%m', fpf.fecha) as mes,
                    ROUND(SUM(t.cantidadaprobada *
                        CASE WHEN np.nombrepieza LIKE '%(AD)' THEN pp.pesopieza * 2
@@ -1331,14 +1338,16 @@ def analytics_evolucion_mensual(meses: int = Query(default=24, ge=3, le=60)):
                        CASE WHEN np.nombrepieza LIKE '%(AD)' THEN pp.pesopieza * 2
                             WHEN np.nombrepieza LIKE '%(TR)' THEN pp.pesopieza * 3
                             ELSE pp.pesopieza END * COALESCE(np.coefcompl, 1)), 2) as kg_producidos,
-                   ROUND(SUM(t.cantidadaprobada  * pp.pesopieza), 2) as kg_aprobados_pieza,
-                   ROUND(SUM(t.cantidadrechazada * pp.pesopieza), 2) as kg_rechazados_pieza,
-                   ROUND(SUM(t.cantidadreparada  * pp.pesopieza), 2) as kg_reparados_pieza,
-                   ROUND(SUM(t.cantidadproducida * pp.pesopieza), 2) as kg_producidos_pieza
+                   ROUND(SUM(t.cantidadaprobada  * COALESCE(ppv.pesopieza, pp.pesopieza)), 2) as kg_aprobados_pieza,
+                   ROUND(SUM(t.cantidadrechazada * COALESCE(ppv.pesopieza, pp.pesopieza)), 2) as kg_rechazados_pieza,
+                   ROUND(SUM(t.cantidadreparada  * COALESCE(ppv.pesopieza, pp.pesopieza)), 2) as kg_reparados_pieza,
+                   ROUND(SUM(t.cantidadproducida * COALESCE(ppv.pesopieza, pp.pesopieza)), 2) as kg_producidos_pieza
             FROM Trabajos t
             JOIN "FundiciónPorFecha" fpf ON fpf.códfundición = t.códfundición
-            JOIN PesosDePiezas pp ON pp.códpieza = t.idpesopieza
+            JOIN PesosDePiezas pp  ON pp.códpieza = t.idpesopieza
             JOIN NombreDePiezas np ON np.id = pp.nombredepiezasid_
+            LEFT JOIN peso_vigente pv  ON pv.nombredepiezasid_ = np.id
+            LEFT JOIN PesosDePiezas ppv ON ppv.códpieza = pv.max_cod
             WHERE fpf.fecha IS NOT NULL
               AND t.códfundición IS NOT NULL
               AND t.idpesopieza IS NOT NULL
