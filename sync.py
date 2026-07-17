@@ -3,6 +3,7 @@ import csv
 import json
 import sqlite3
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -125,33 +126,30 @@ def _existing_columns(conn: sqlite3.Connection, table_name: str) -> list[str]:
     return [r[1] for r in rows]
 
 
-def import_csv(
-    conn: sqlite3.Connection,
-    csv_path: Path,
-    display_name: str,
-    watermark: dict | None = None,
-) -> tuple[int, bool]:
+BATCH_SIZE = 5000   # filas por executemany (antes 500)
+
+
+def _parse_csv_file(csv_path: Path, watermark: dict | None, existing_cols: list[str]) -> dict:
     """
-    Importa un CSV a SQLite.
-    Si watermark es None → sync completo (DROP + CREATE + INSERT).
-    Si watermark tiene max_val > 0 → sync incremental (solo inserta filas nuevas).
-    Devuelve (filas_importadas, fue_incremental).
+    Lee y parsea un CSV completamente en memoria (thread-safe, sin tocar SQLite).
+    Devuelve un dict con todo lo necesario para la escritura posterior.
     """
     table_name = csv_path.stem
 
-    with open(csv_path, encoding="utf-8-sig", newline="") as f:
-        reader = csv.reader(f)
-        try:
-            headers = next(reader)
-        except StopIteration:
-            return 0, False
-
-        rows = list(reader)
+    try:
+        with open(csv_path, encoding="utf-8-sig", newline="") as f:
+            reader = csv.reader(f)
+            try:
+                headers = next(reader)
+            except StopIteration:
+                return {"table_name": table_name, "error": "CSV vacío"}
+            rows = list(reader)
+    except Exception as e:
+        return {"table_name": table_name, "error": str(e)}
 
     if not headers:
-        return 0, False
+        return {"table_name": table_name, "error": "Sin cabeceras"}
 
-    # Sanitizar nombres de columna
     safe_headers = [_sanitize_name(h) or f"col_{i}" for i, h in enumerate(headers)]
     seen: dict[str, int] = {}
     deduped: list[str] = []
@@ -165,51 +163,63 @@ def import_csv(
     safe_headers = deduped
 
     sample = rows[:200]
-    col_types = []
-    for i in range(len(headers)):
-        vals = [r[i] for r in sample if i < len(r)]
-        col_types.append(_infer_type(vals))
+    col_types = [_infer_type([r[i] for r in sample if i < len(r)]) for i in range(len(headers))]
 
-    placeholders = ", ".join("?" * len(safe_headers))
-    insert_sql     = f'INSERT INTO "{table_name}" VALUES ({placeholders})'
-    upsert_sql     = f'INSERT OR REPLACE INTO "{table_name}" VALUES ({placeholders})'
-
-    def _build_batch(rows_subset):
-        batch = []
-        for row in rows_subset:
-            padded = row + [""] * (len(safe_headers) - len(row))
-            coerced = tuple(_coerce(padded[i], col_types[i]) for i in range(len(safe_headers)))
-            batch.append(coerced)
-        return batch
-
-    # ── Modo incremental ───────────────────────────────────────────────────────
-    is_incremental = (
-        watermark is not None
-        and watermark.get("max_val", 0) > 0
-    )
-
-    if is_incremental:
-        # Verificar que el esquema coincide (mismas columnas en el mismo orden).
-        # Si difiere, caer en sync completo para no romper la tabla.
-        existing_cols = _existing_columns(conn, table_name)
-        if existing_cols and existing_cols != safe_headers:
-            log.warning(
-                f"  {display_name}: esquema cambió ({len(existing_cols)} → {len(safe_headers)} cols), "
-                "forzando sync completo."
-            )
-            is_incremental = False
+    # Determinar modo
+    is_incremental = watermark is not None and watermark.get("max_val", 0) > 0
+    if is_incremental and existing_cols and existing_cols != safe_headers:
+        is_incremental = False   # esquema cambió → sync completo
 
     if is_incremental and not rows:
-        # Delta vacío: no hay nada nuevo
+        return {"table_name": table_name, "mode": "incremental_empty",
+                "headers": headers, "safe_headers": safe_headers,
+                "col_types": col_types, "batch": [], "watermark": watermark}
+
+    # Convertir todas las filas en memoria
+    n = len(safe_headers)
+    batch = []
+    for row in rows:
+        padded = row + [""] * (n - len(row))
+        batch.append(tuple(_coerce(padded[i], col_types[i]) for i in range(n)))
+
+    mode = "incremental" if is_incremental else "full"
+    return {
+        "table_name":  table_name,
+        "headers":     headers,
+        "safe_headers": safe_headers,
+        "col_types":   col_types,
+        "batch":       batch,
+        "watermark":   watermark,
+        "mode":        mode,
+    }
+
+
+def _write_parsed(conn: sqlite3.Connection, parsed: dict, display_name: str) -> tuple[int, bool]:
+    """Escribe a SQLite los datos ya parseados. Debe correr en el hilo principal."""
+    if "error" in parsed:
+        raise RuntimeError(parsed["error"])
+
+    table_name   = parsed["table_name"]
+    safe_headers = parsed["safe_headers"]
+    headers      = parsed["headers"]
+    col_types    = parsed["col_types"]
+    batch        = parsed["batch"]
+    watermark    = parsed["watermark"]
+    mode         = parsed.get("mode", "full")
+
+    placeholders = ", ".join("?" * len(safe_headers))
+    insert_sql   = f'INSERT INTO "{table_name}" VALUES ({placeholders})'
+    upsert_sql   = f'INSERT OR REPLACE INTO "{table_name}" VALUES ({placeholders})'
+
+    if mode == "incremental_empty":
         log.info(f"  {display_name}: sin filas nuevas (incremental).")
         return 0, True
 
-    if is_incremental:
+    if mode == "incremental":
         pk_col  = watermark["pk_col"]
         max_val = watermark["max_val"]
         is_rolling = table_name in ROLLING_TABLES
         if is_rolling:
-            # Borrar el rango completo que Access re-exportó (max_val a adelante)
             conn.execute(f'DELETE FROM "{table_name}" WHERE "{pk_col}" >= ?', (max_val,))
             sql = upsert_sql
             mode_label = f"rolling upsert, pk>={max_val}"
@@ -217,27 +227,37 @@ def import_csv(
             conn.execute(f'DELETE FROM "{table_name}" WHERE "{pk_col}" > ?', (max_val,))
             sql = insert_sql
             mode_label = f"incremental, pk>{max_val}"
-        batch = _build_batch(rows)
-        for i in range(0, len(batch), 500):
-            conn.executemany(sql, batch[i:i+500])
-        log.info(f"  {display_name}: +{len(rows)} filas ({mode_label}).")
-        return len(rows), True
+        for i in range(0, len(batch), BATCH_SIZE):
+            conn.executemany(sql, batch[i:i+BATCH_SIZE])
+        log.info(f"  {display_name}: +{len(batch)} filas ({mode_label}).")
+        return len(batch), True
 
-    # ── Sync completo ──────────────────────────────────────────────────────────
+    # Sync completo
     col_defs = ", ".join(f'"{h}" {t}' for h, t in zip(safe_headers, col_types))
     conn.execute(f'DROP TABLE IF EXISTS "{table_name}"')
     conn.execute(f'CREATE TABLE "{table_name}" ({col_defs})')
-
     conn.execute("""
         INSERT OR REPLACE INTO _table_names (safe_name, display_name, columns_json)
         VALUES (?, ?, ?)
     """, (table_name, display_name, json.dumps(list(zip(safe_headers, headers)))))
+    for i in range(0, len(batch), BATCH_SIZE):
+        conn.executemany(insert_sql, batch[i:i+BATCH_SIZE])
+    log.info(f"  {display_name}: {len(batch)} filas (sync completo).")
+    return len(batch), False
 
-    batch = _build_batch(rows)
-    for i in range(0, len(batch), 500):
-        conn.executemany(insert_sql, batch[i:i+500])
 
-    return len(rows), False
+def import_csv(
+    conn: sqlite3.Connection,
+    csv_path: Path,
+    display_name: str,
+    watermark: dict | None = None,
+) -> tuple[int, bool]:
+    """Wrapper de compatibilidad: parsea + escribe en un solo paso (sin paralelismo)."""
+    existing_cols = _existing_columns(conn, csv_path.stem) if watermark else []
+    parsed = _parse_csv_file(csv_path, watermark, existing_cols)
+    if "error" in parsed:
+        return 0, False
+    return _write_parsed(conn, parsed, display_name)
 
 
 def sync_all(exports_dir: Path = EXPORTS_DIR, db_path: Path = DB_PATH,
@@ -290,51 +310,75 @@ def sync_all(exports_dir: Path = EXPORTS_DIR, db_path: Path = DB_PATH,
         )
     """)
 
+    # SQLite bulk-import: apagar sync para mayor velocidad (se restaura al final)
+    conn.execute("PRAGMA synchronous = OFF")
+    conn.execute("PRAGMA cache_size = -65536")   # 64 MB de caché
+
     started = datetime.now().isoformat()
     results = []
 
+    # ── Fase 1: preparar lista de trabajos ────────────────────────────────────
+    jobs = []   # list of (meta, csv_path, wm, existing_cols)
+    skipped = []
     for meta in table_meta:
         if not meta.get("ok", True):
-            results.append({"table": meta["table"], "rows": 0, "ok": False, "error": meta.get("error", "")})
-            if on_progress:
-                on_progress(len(results), len(table_meta))
+            skipped.append({"table": meta["table"], "rows": 0, "ok": False,
+                            "error": meta.get("error", "")})
             continue
-
         safe_name = meta.get("safe", "")
         display   = meta.get("table", safe_name)
         csv_path  = exports_dir / f"{safe_name}.csv"
-
         if not csv_path.exists():
             log.warning(f"CSV no encontrado: {csv_path}")
-            results.append({"table": display, "rows": 0, "ok": False, "error": "CSV no encontrado"})
-            if on_progress:
-                on_progress(len(results), len(table_meta))
+            skipped.append({"table": display, "rows": 0, "ok": False,
+                            "error": "CSV no encontrado"})
             continue
-
-        # Usar watermark si la tabla es incremental o rolling (y no es full_refresh)
         is_rolling_table = display in ROLLING_TABLES
         wm = (watermarks.get(display)
               if (not full_refresh and (meta.get("incremental") or is_rolling_table))
               else None)
+        existing_cols = _existing_columns(conn, safe_name) if wm else []
+        jobs.append((meta, csv_path, wm, existing_cols, display, safe_name))
 
+    total = len(jobs) + len(skipped)
+
+    # ── Fase 2: parsear CSVs en paralelo (lectura I/O — sin tocar SQLite) ────
+    PARSE_WORKERS = 6
+    parsed_map: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=PARSE_WORKERS) as pool:
+        future_to_key = {
+            pool.submit(_parse_csv_file, csv_path, wm, existing_cols): display
+            for (meta, csv_path, wm, existing_cols, display, safe_name) in jobs
+        }
+        for future in as_completed(future_to_key):
+            display = future_to_key[future]
+            try:
+                parsed_map[display] = future.result()
+            except Exception as e:
+                parsed_map[display] = {"table_name": display, "error": str(e)}
+
+    # ── Fase 3: escribir a SQLite en el orden original (un solo escritor) ────
+    for meta, csv_path, wm, existing_cols, display, safe_name in jobs:
+        parsed = parsed_map.get(display, {"table_name": display, "error": "no parseado"})
         try:
-            rows, incremental = import_csv(conn, csv_path, display, watermark=wm)
+            n_rows, incremental = _write_parsed(conn, parsed, display)
             results.append({
                 "table":       display,
                 "safe":        safe_name,
-                "rows":        rows,
+                "rows":        n_rows,
                 "ok":          True,
                 "incremental": incremental,
             })
-            log.info(f"  {display}: {rows} filas {'(+delta)' if incremental else '(completo)'}")
         except Exception as e:
             log.error(f"  ERROR {display}: {e}")
             results.append({"table": display, "rows": 0, "ok": False, "error": str(e)})
 
         if on_progress:
-            on_progress(len(results), len(table_meta))
+            on_progress(len(results) + len(skipped), total)
 
+    results = skipped + results
     conn.commit()
+    conn.execute("PRAGMA synchronous = NORMAL")   # restaurar
 
     ended = datetime.now().isoformat()
     ok_count  = sum(1 for r in results if r["ok"])
