@@ -202,7 +202,7 @@ async def run_sync(full_refresh: bool = False):
         sync_state["groups"][group]["last_sync"] = sync_state["last_sync"]
 
 
-async def run_sync_group(group_name: str):
+async def run_sync_group(group_name: str, full_refresh: bool = False):
     """Sincroniza solo el grupo especificado: PS1 filtrado → sync_group()."""
     import sync as sync_module
 
@@ -216,13 +216,14 @@ async def run_sync_group(group_name: str):
 
     sync_state["status"]   = "syncing"
     sync_state["error"]    = None
-    sync_state["progress"] = {"done": 0, "total": 0, "phase": f"Exportando grupo '{group_name}'..."}
-    log.info("Sync grupo '%s': %d tablas", group_name, len(group_tables))
+    mode_sfx = " (completo)" if full_refresh else ""
+    sync_state["progress"] = {"done": 0, "total": 0, "phase": f"Exportando grupo '{group_name}'{mode_sfx}..."}
+    log.info("Sync grupo '%s' (full_refresh=%s): %d tablas", group_name, full_refresh, len(group_tables))
 
     loop = asyncio.get_event_loop()
 
-    # 0. Actualizar watermarks solo para las tablas incrementales del grupo
-    if DB_PATH.exists():
+    # 0. Actualizar watermarks solo para las tablas incrementales del grupo (omitido en full_refresh)
+    if not full_refresh and DB_PATH.exists():
         try:
             _wm_conn = sqlite3.connect(DB_PATH)
             sync_module.write_group_watermarks(_wm_conn, EXPORTS, group_name)
@@ -234,14 +235,14 @@ async def run_sync_group(group_name: str):
     tables_str = ";".join(group_tables)
 
     def _run_ps_group():
-        return subprocess.run(
-            [PS32, "-NonInteractive", "-ExecutionPolicy", "Bypass",
-             "-File", str(PS_SCRIPT),
-             "-OutputDir", str(EXPORTS),
-             "-DbPath", r"M:\bases\2011\datos\datosunificado2010.accdb",
-             "-Tables", tables_str],
-            capture_output=False,
-        )
+        args = [PS32, "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-File", str(PS_SCRIPT),
+                "-OutputDir", str(EXPORTS),
+                "-DbPath", r"M:\bases\2011\datos\datosunificado2010.accdb",
+                "-Tables", tables_str]
+        if full_refresh:
+            args.append("-FullRefresh")
+        return subprocess.run(args, capture_output=False)
 
     result = await loop.run_in_executor(None, _run_ps_group)
     if result.returncode != 0:
@@ -252,14 +253,15 @@ async def run_sync_group(group_name: str):
         return
 
     # 2. CSV → SQLite (solo tablas del grupo)
-    sync_state["progress"] = {"done": 0, "total": 0, "phase": f"Importando grupo '{group_name}'..."}
+    sync_state["progress"] = {"done": 0, "total": 0, "phase": f"Importando grupo '{group_name}'{mode_sfx}..."}
 
     def _on_progress(done: int, total: int):
         sync_state["progress"] = {"done": done, "total": total,
-                                   "phase": f"Importando '{group_name}'..."}
+                                   "phase": f"Importando '{group_name}'{mode_sfx}..."}
 
     def _run_import():
-        return sync_module.sync_group(group_name, EXPORTS, DB_PATH, on_progress=_on_progress)
+        return sync_module.sync_group(group_name, EXPORTS, DB_PATH,
+                                       on_progress=_on_progress, full_refresh=full_refresh)
 
     try:
         summary = await loop.run_in_executor(None, _run_import)
@@ -556,6 +558,7 @@ def _seed_lookups():
         ("5",  "Gris"),
         ("8",  "Nodular"),
         ("12", "Perlítico"),
+        ("13", "Nodular Perlítico Estaño"),
     ]
     try:
         for cod, nombre in _tipos_material_fixes:
@@ -737,16 +740,18 @@ async def trigger_full_sync():
 
 
 @app.post("/api/sync/group/{group_name}")
-async def trigger_group_sync(group_name: str):
-    """Fuerza el sync manual de un grupo específico (en_curso, movimientos, resoluciones, maestros)."""
+async def trigger_group_sync(group_name: str, full_refresh: bool = Query(False)):
+    """Fuerza el sync manual de un grupo específico (en_curso, movimientos, resoluciones, maestros).
+    full_refresh=true re-descarga todas las tablas del grupo ignorando watermarks."""
     import sync as sync_module
     if group_name not in sync_module.SYNC_GROUPS:
         raise HTTPException(404, f"Grupo '{group_name}' desconocido. "
                                   f"Grupos válidos: {list(sync_module.SYNC_GROUPS.keys())}")
     if sync_state["status"] == "syncing":
         raise HTTPException(409, "Sync ya en progreso")
-    asyncio.create_task(run_sync_group(group_name))
-    return {"message": f"Sync del grupo '{group_name}' iniciado",
+    asyncio.create_task(run_sync_group(group_name, full_refresh=full_refresh))
+    mode = "completo" if full_refresh else "incremental"
+    return {"message": f"Sync {mode} del grupo '{group_name}' iniciado",
             "tables": sync_module.SYNC_GROUPS[group_name]}
 
 
@@ -1245,6 +1250,45 @@ def dashboard_entregados(meses: int = 6):
             d["ot_estado"] = est.get(code, code) if code else None
             result.append(d)
         return result
+    finally:
+        conn.close()
+
+
+@app.get("/api/dashboard/pendiente_fundir")
+def dashboard_pendiente_fundir(meses: int = 6):
+    """Piezas pendientes de fundir (OTs activas con cantidad aún no fundida), agrupadas por material."""
+    meses = max(1, min(meses, 60))
+    conn = get_db()
+    try:
+        # Antigüedad de la OT: fechacargaot es NULL en ~93% de las OTs activas pendientes de
+        # fundir (a diferencia de datos históricos ya cerrados), así que igual que en
+        # analytics_top_defectos/analytics_top_piezas usamos p.fechapedido como respaldo.
+        rows = conn.execute("""
+            SELECT
+                t."códdeagregados" AS codigo,
+                COALESCE(tm.sobrenombrematerial, t."códdeagregados") AS material,
+                COUNT(*) AS ots,
+                SUM(t.cantidad - COALESCE(t.cantidadfundida, 0)) AS piezas_pendientes,
+                ROUND(SUM((t.cantidad - COALESCE(t.cantidadfundida, 0)) *
+                    CASE WHEN np.nombrepieza LIKE '%(AD)' THEN pp.pesopieza * 2
+                         WHEN np.nombrepieza LIKE '%(TR)' THEN pp.pesopieza * 3
+                         ELSE pp.pesopieza END * COALESCE(np.coefcompl, 1)), 2) AS kg_pendientes
+            FROM Trabajos t
+            JOIN ItemDetallePedido idp ON idp.iditempedido = t.iditempedido
+            JOIN Pedidos p             ON p.idpedido = idp.idpedido
+            LEFT JOIN TiposMaterial tm ON tm."códmaterial" = CAST(t."códdeagregados" AS TEXT)
+            LEFT JOIN PesosDePiezas pp ON pp.códpieza = t.idpesopieza
+            LEFT JOIN NombreDePiezas np ON np.id = pp.nombredepiezasid_
+            WHERE upper(t.estadotrabajo) NOT IN ('K','D','A','B')
+              AND upper(p.estadopedido)  NOT IN ('K','D')
+              AND upper(idp.estadoitem)  NOT IN ('K','D')
+              AND COALESCE(t.cantidadfundida, 0) < t.cantidad
+              AND t."códdeagregados" NOT IN ('--', '4', 'Ar', 'ar', 'AR')
+              AND COALESCE(t.fechacargaot, p.fechapedido) >= date('now', ? || ' months')
+            GROUP BY codigo
+            ORDER BY ots DESC
+        """, (f"-{meses}",)).fetchall()
+        return [dict(r) for r in rows]
     finally:
         conn.close()
 
