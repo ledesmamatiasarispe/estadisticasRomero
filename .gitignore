@@ -6,9 +6,11 @@ __pycache__/
 venv/
 env/
 
-# Data — DB y exports no van al repo (son grandes y locales)
+# Data — DB, exports, uploads y reportes generados no van al repo (grandes y/o locales)
 data/gnc.db
 data/exports/
+data/informes_psp/
+data/db_report.txt
 
 # PyInstaller build artifacts
 .build/
@@ -17,6 +19,16 @@ GNC API.exe
 
 # Logs
 *.log
+*_err.txt
+*_out.txt
+chk_out.txt
+
+# Runtime / launcher state
+_launcher.lock
+_version.txt
+
+# Scratch/debug scripts (ad-hoc queries, no forman parte de la app)
+chk*.py
 
 # VS Code
 .vscode/

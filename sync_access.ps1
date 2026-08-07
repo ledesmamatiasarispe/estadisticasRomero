@@ -1,8 +1,14 @@
-﻿# sync_access.ps1 - Exporta tablas de Access a CSVs (con sync incremental)
+# sync_access.ps1 — Exporta tablas de Access a CSVs (con sync incremental/por grupo)
 # Debe ejecutarse con SysWOW64\powershell.exe (32-bit) para acceder al driver ACE OLEDB 12.0
 param(
-    [string]$OutputDir = "C:\GNC_API\data\exports",
-    [string]$DbPath    = "M:\bases\2011\datos\datosunificado2010.accdb"
+    [string]$OutputDir     = "C:\GNC_API\data\exports",
+    [string]$DbPath        = "M:\bases\2011\datos\datosunificado2010.accdb",
+    # Filtro de tablas: si no está vacío, solo exporta las tablas de la lista (separadas por coma).
+    [string]$Tables        = "",
+    # Meses hacia atrás para el filtro de fecha de Trabajos (solo aplica en modo grupo).
+    [int]   $RollingMonths = 3,
+    # Cuando $true, ignora filtros de fecha/ID y exporta todo completo.
+    [switch]$FullRefresh
 )
 
 $ErrorActionPreference = "Stop"
@@ -34,10 +40,20 @@ try {
         New-Item -ItemType Directory -Path $OutputDir | Out-Null
     }
 
+    # -- Parsear filtro de tablas -----------------------------------------------
+    $filterSet = @()
+    if ($Tables -and $Tables.Trim() -ne "") {
+        $filterSet = $Tables -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+        Write-Host "[sync_access] Modo grupo: $($filterSet.Count) tablas filtradas ($($filterSet -join ', '))"
+    } else {
+        Write-Host "[sync_access] Modo completo: exportando todas las tablas."
+    }
+    $isGroupMode = $filterSet.Count -gt 0
+
     # -- Cargar watermarks para sync incremental --------------------------------
     $watermarks = @{}
     $wmPath = Join-Path $OutputDir "watermarks.json"
-    if (Test-Path $wmPath) {
+    if (-not $FullRefresh -and (Test-Path $wmPath)) {
         try {
             $wmJson = Get-Content $wmPath -Raw -Encoding UTF8
             $wmData = $wmJson | ConvertFrom-Json
@@ -55,41 +71,74 @@ try {
             Write-Host "[sync_access] Advertencia: no se pudo leer watermarks.json ($_). Usando sync completo."
             $watermarks = @{}
         }
+    } elseif ($FullRefresh) {
+        Write-Host "[sync_access] FullRefresh: ignorando watermarks."
     } else {
         Write-Host "[sync_access] Sin watermarks.json - sync completo para todas las tablas."
     }
 
-    # Limpiar CSVs anteriores solo para tablas que haran sync completo
-    # (los incrementales se sobreescriben de todos modos, pero es mas seguro limpiar todo)
-    Get-ChildItem $OutputDir -Filter "*.csv" | Remove-Item -Force
+    # Limpiar CSVs del run anterior (solo los que corresponden al grupo actual o todos)
+    if ($isGroupMode) {
+        foreach ($tbl in $filterSet) {
+            $safeTbl = $tbl -replace '[\\/:*?"<>|]', '_' -replace '\s+', '_'
+            $csvToClean = Join-Path $OutputDir "$safeTbl.csv"
+            if (Test-Path $csvToClean) { Remove-Item $csvToClean -Force }
+        }
+    } else {
+        Get-ChildItem $OutputDir -Filter "*.csv" | Remove-Item -Force
+    }
 
     $schema = $conn.GetSchema("Tables")
-    $tables = @($schema | Where-Object { $_.TABLE_TYPE -eq "TABLE" } | Select-Object -ExpandProperty TABLE_NAME)
-    Write-Host "[sync_access] Tablas encontradas: $($tables.Count)"
+    $allTables = @($schema | Where-Object { $_.TABLE_TYPE -eq "TABLE" } | Select-Object -ExpandProperty TABLE_NAME)
+
+    # Aplicar filtro de grupo si corresponde
+    if ($isGroupMode) {
+        $filterLower = @($filterSet | ForEach-Object { $_.ToLower() })
+        $matched = [System.Collections.Generic.List[string]]::new()
+        foreach ($t in $allTables) {
+            $tl = $t.ToLower()
+            foreach ($f in $filterLower) {
+                if ($f -eq $tl) { $matched.Add($t); break }
+            }
+        }
+        $tblList = $matched.ToArray()
+    } else {
+        $tblList = $allTables
+    }
+    Write-Host "[sync_access] Tablas a exportar: $($tblList.Count)"
 
     $results = @()
     $i = 0
 
-    foreach ($tableName in $tables) {
+    foreach ($tableName in $tblList) {
         $i++
 
         try {
             $cmd = $conn.CreateCommand()
-            $cmd.CommandTimeout = 120
+            $cmd.CommandTimeout = 180
 
-            # Verificar si esta tabla tiene watermark para sync incremental
-            $wm = $watermarks[$tableName]
             $isIncremental = $false
+            $isDateRolling = $false
 
-            if ($null -ne $wm) {
-                $pkCol  = $wm.pk_col
-                $maxVal = $wm.max_val
-                $cmd.CommandText = "SELECT * FROM [$tableName] WHERE [$pkCol] > $maxVal"
-                $isIncremental = $true
-                Write-Host "[sync_access] [$i/$($tables.Count)] $tableName  (+delta, $pkCol > $maxVal)"
+            # Trabajos en modo grupo (no full refresh): filtrar por fecha en Access
+            if ($tableName -eq "Trabajos" -and $isGroupMode -and -not $FullRefresh) {
+                $cmd.CommandText = "SELECT * FROM [Trabajos] WHERE [fechacargaot] >= DateAdd('m', -$RollingMonths, Now())"
+                $isDateRolling = $true
+                Write-Host "[sync_access] [$i/$($tblList.Count)] $tableName  (fecha >= -${RollingMonths}m)"
             } else {
-                $cmd.CommandText = "SELECT * FROM [$tableName]"
-                Write-Host "[sync_access] [$i/$($tables.Count)] $tableName"
+                # Verificar watermark para sync incremental
+                $wm = if (-not $FullRefresh) { $watermarks[$tableName] } else { $null }
+
+                if ($null -ne $wm) {
+                    $pkCol  = $wm.pk_col
+                    $maxVal = $wm.max_val
+                    $cmd.CommandText = "SELECT * FROM [$tableName] WHERE [$pkCol] > $maxVal"
+                    $isIncremental = $true
+                    Write-Host "[sync_access] [$i/$($tblList.Count)] $tableName  (+delta, $pkCol > $maxVal)"
+                } else {
+                    $cmd.CommandText = "SELECT * FROM [$tableName]"
+                    Write-Host "[sync_access] [$i/$($tblList.Count)] $tableName"
+                }
             }
 
             $reader = $cmd.ExecuteReader()
@@ -129,28 +178,32 @@ try {
             $utf8bom = New-Object System.Text.UTF8Encoding($true)
             [System.IO.File]::WriteAllText($csvPath, $sb.ToString(), $utf8bom)
 
-            if ($isIncremental) {
+            if ($isDateRolling) {
+                Write-Host "[sync_access]   -> $rowCount filas (ultimos $RollingMonths meses)"
+            } elseif ($isIncremental) {
                 Write-Host "[sync_access]   -> $rowCount filas nuevas"
             }
 
             $results += [PSCustomObject]@{
-                table       = $tableName
-                safe        = $safeName
-                rows        = $rowCount
-                ok          = $true
-                error       = ""
-                incremental = $isIncremental
+                table        = $tableName
+                safe         = $safeName
+                rows         = $rowCount
+                ok           = $true
+                error        = ""
+                incremental  = $isIncremental
+                date_rolling = $isDateRolling
             }
         }
         catch {
             Write-Host "[sync_access]   ERROR en tabla '$tableName': $_"
             $results += [PSCustomObject]@{
-                table       = $tableName
-                safe        = ""
-                rows        = 0
-                ok          = $false
-                error       = $_.ToString()
-                incremental = $false
+                table        = $tableName
+                safe         = ""
+                rows         = 0
+                ok           = $false
+                error        = $_.ToString()
+                incremental  = $false
+                date_rolling = $false
             }
         }
     }
@@ -161,11 +214,12 @@ try {
     $utf8 = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText((Join-Path $OutputDir "tables.json"), $json, $utf8)
 
-    $ok        = ($results | Where-Object { $_.ok }).Count
-    $total     = $results.Count
-    $incr      = ($results | Where-Object { $_.ok -and $_.incremental }).Count
-    $completo  = ($results | Where-Object { $_.ok -and -not $_.incremental }).Count
-    Write-Host "[sync_access] Completado: $ok/$total tablas OK ($incr incrementales, $completo completas)"
+    $ok          = ($results | Where-Object { $_.ok }).Count
+    $total       = $results.Count
+    $incr        = ($results | Where-Object { $_.ok -and $_.incremental }).Count
+    $dateRoll    = ($results | Where-Object { $_.ok -and $_.date_rolling }).Count
+    $completo    = ($results | Where-Object { $_.ok -and -not $_.incremental -and -not $_.date_rolling }).Count
+    Write-Host "[sync_access] Completado: $ok/$total tablas OK ($incr incrementales, $dateRoll date-rolling, $completo completas)"
     exit 0
 }
 catch {

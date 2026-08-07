@@ -5,6 +5,7 @@ import shutil
 import zipfile
 import tempfile
 import subprocess
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -131,6 +132,28 @@ def auto_update():
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    # Prevent multiple launcher instances via a PID lock file
+    lock_path = ROOT / "_launcher.lock"
+    if lock_path.exists():
+        try:
+            old_pid = int(lock_path.read_text().strip())
+            # Check if that PID is still alive
+            import ctypes
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, old_pid)
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                print(f"  Ya hay un launcher corriendo (PID {old_pid}). Saliendo.")
+                return
+        except Exception:
+            pass  # stale lock — proceed
+    lock_path.write_text(str(os.getpid()))
+    try:
+        _main_body()
+    finally:
+        lock_path.unlink(missing_ok=True)
+
+
+def _main_body():
     print("=" * 55)
     print("  GNC API")
     print("=" * 55)
@@ -180,7 +203,27 @@ def main():
                         str(ROOT / "requirements.txt"), "-q"])
 
     print("Iniciando GNC API en http://localhost:50504 ...")
+    kiosk_script = ROOT / "kiosk_server.py"
+    if kiosk_script.exists():
+        print("Iniciando Kiosk en http://localhost:50505 ...")
     print()
+
+    _kiosk_running = threading.Event()
+    _kiosk_running.set()
+
+    def _kiosk_watchdog():
+        """Mantiene kiosk_server.py vivo mientras _kiosk_running esté activo."""
+        while _kiosk_running.is_set():
+            proc = subprocess.Popen([str(VENV_PY), str(kiosk_script)])
+            proc.wait()
+            if _kiosk_running.is_set():
+                time.sleep(2)  # pausa breve antes de reiniciar
+
+    kiosk_thread = None
+    if kiosk_script.exists():
+        kiosk_thread = threading.Thread(target=_kiosk_watchdog, daemon=True)
+        kiosk_thread.start()
+
     while True:
         r = subprocess.run([str(VENV_PY), str(ROOT / "main.py")])
         if r.returncode == 0:
@@ -193,6 +236,8 @@ def main():
         except KeyboardInterrupt:
             print("\n Reinicio cancelado.")
             break
+
+    _kiosk_running.clear()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,1087 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kiosk — Fundición José Romero</title>
+<script src="/vendor/chart.min.js"></script>
+<style>
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface2: #21262d;
+  --card: #1e2430;
+  --border: #30363d;
+  --accent: #4fc3f7;
+  --purple: #a78bfa;
+  --accent-dim: #1e3a5f;
+  --red: #ef5350;
+  --green: #66bb6a;
+  --yellow: #ffa726;
+  --text: #e6edf3;
+  --muted: #8b949e;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 14px; }
+
+/* Main content area */
+#main { height: 100vh; padding: 24px 32px 20px; overflow-y: auto;
+  scroll-behavior: auto; scrollbar-width: none; }
+#main::-webkit-scrollbar { display: none; }
+body.has-kiosk-alerts #main { padding-top: 70px; }
+
+/* Kiosk overlay */
+#kiosk-overlay { position: fixed; inset: 0; pointer-events: none; z-index: 9000; }
+#kiosk-info {
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+  background: rgba(0,0,0,.6); color: #fff; font-size: 13px; font-weight: 600;
+  padding: 5px 16px; border-radius: 20px; pointer-events: none;
+  letter-spacing: .03em; white-space: nowrap; transition: top .3s;
+}
+body.has-kiosk-alerts #kiosk-info { top: 56px; }
+#kiosk-pause {
+  position: absolute; top: 8px; right: 48px;
+  background: rgba(0,0,0,.45); color: #fff;
+  width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; cursor: pointer; pointer-events: all;
+  font-size: 15px; opacity: 0; transition: opacity .25s;
+}
+body.has-kiosk-alerts #kiosk-pause { top: 56px; }
+#kiosk-overlay:hover #kiosk-pause { opacity: 1; }
+#kiosk-prev, #kiosk-next {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  background: rgba(0,0,0,.3); color: #fff; font-size: 36px;
+  width: 44px; height: 90px; display: flex; align-items: center; justify-content: center;
+  cursor: pointer; pointer-events: all; opacity: 0; transition: opacity .25s;
+}
+#kiosk-prev { left: 0; border-radius: 0 8px 8px 0; }
+#kiosk-next { right: 0; border-radius: 8px 0 0 8px; }
+#kiosk-overlay:hover #kiosk-prev,
+#kiosk-overlay:hover #kiosk-next { opacity: .75; }
+#kiosk-bar-wrap { position: absolute; bottom: 0; left: 0; right: 0;
+  height: 3px; background: rgba(255,255,255,.08); pointer-events: none; }
+#kiosk-bar { height: 100%; width: 0%; background: var(--accent); }
+
+/* Alert banner */
+#kiosk-alerts {
+  position: absolute; top: 0; left: 0; right: 0; height: 46px;
+  background: rgba(120,50,220,.28); border-bottom: 2px solid rgba(167,107,250,.55);
+  display: none; align-items: center; gap: 12px; padding: 0 20px;
+  pointer-events: none; overflow: hidden; z-index: 1;
+}
+#kiosk-alerts.visible { display: flex; }
+#kiosk-alert-icon { font-size: 20px; flex-shrink: 0; }
+#kiosk-alert-text { flex: 1; font-size: 14px; font-weight: 600; color: #e0d0ff;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#kiosk-alert-counter { font-size: 12px; color: rgba(200,180,255,.7); flex-shrink: 0; }
+
+/* Slide content */
+.ktv { }
+.ktv-head { margin-bottom: 18px; }
+.ktv-head h2 { font-size: 30px; font-weight: 800; margin: 0 0 3px; letter-spacing: -.03em; line-height: 1.1; }
+.ktv-head .ktv-ts { font-size: 13px; color: var(--muted); }
+.ktv-kpis { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+.ktv-kpis .kk { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px 18px; min-width: 100px; }
+.ktv-kpis .kk .lbl { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; }
+.ktv-kpis .kk .val { font-size: 24px; font-weight: 700; line-height: 1.15; margin-top: 2px; }
+.tbl-wrap { border-radius: 10px; overflow: clip; border: 1px solid var(--border); }
+.tbl-wrap table { table-layout: auto; width: 100%; border-collapse: collapse; }
+.tbl-wrap table th { font-size: 12px; padding: 10px 14px; background: var(--surface); text-align: left; position: sticky; top: 0; z-index: 2; box-shadow: 0 1px 0 var(--border); }
+.tbl-wrap table td { font-size: 15px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+.tbl-wrap table tbody tr:last-child td { border-bottom: none; }
+.empty-ktv { padding: 80px; text-align: center; color: var(--muted); font-size: 18px;
+  background: var(--surface); border-radius: 10px; }
+
+/* Row colors */
+.venc-30 { background-color: rgba(79,140,247,.13); }
+.venc-15 { background-color: rgba(255,167,38,.15); }
+.venc-7  { background-color: rgba(239,83,80,.18); }
+.venc-2  { background-color: rgba(255,255,255,.22); font-weight: 600; }
+.prod-ok { background-image: repeating-linear-gradient(45deg, transparent, transparent 7px, rgba(60,200,60,.28) 7px, rgba(60,200,60,.28) 14px); }
+.ent-completo { background-color: rgba(60,200,60,.18); }
+.ent-parcial  { background-color: rgba(255,167,38,.18); }
+
+/* Color helpers */
+.c-blue   { color: var(--accent); }
+.c-green  { color: var(--green); }
+.c-red    { color: var(--red); }
+.c-yellow { color: var(--yellow); }
+.c-purple { color: var(--purple); }
+
+/* Tags */
+.tag { display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+.tag-g { background: #1b3a1f; color: var(--green); }
+.tag-r { background: #3a1b1b; color: var(--red); }
+.tag-y { background: #3a2e1b; color: var(--yellow); }
+.tag-b { background: var(--accent-dim); color: var(--accent); }
+.tag-m { background: var(--surface2); color: var(--muted); }
+
+/* Loading */
+.loading { padding: 80px; text-align: center; color: var(--muted); font-size: 18px; }
+
+/* Table paginator indicator */
+.tbl-pager-ind {
+  display: flex; align-items: center; justify-content: center;
+  gap: 8px; padding: 8px 0 4px; pointer-events: none; user-select: none;
+}
+.tbl-pager-dots { display: flex; align-items: center; gap: 5px; }
+.tbl-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--muted); opacity: .3;
+  transition: opacity .35s ease, transform .35s ease, background .35s ease;
+  flex-shrink: 0;
+}
+.tbl-dot.tbl-dot-active { opacity: 1; background: var(--accent); transform: scale(1.35); }
+.tbl-pager-lbl { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+
+<div id="main"><div class="loading">Iniciando…</div></div>
+
+<script>
+// ── Config ─────────────────────────────────────────────────────────────────────
+// Las llamadas /api/* las maneja kiosk_server como proxy → puerto 50504
+const API_BASE = '';
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+function $id(id) { return document.getElementById(id); }
+function fmt(n) { return n == null ? '—' : Number(n).toLocaleString('es-AR'); }
+
+const RANK_COLORS = ['#5c6bc0','#26a69a','#ffa726','#ab47bc','#8d6e63','#90a4ae'];
+
+const _OT_ESTADO = {
+  K:'Cumplido Auto', k:'Cumplido Auto',
+  D:'Cumplido Manual', d:'Cumplido Manual',
+  A:'Anulado c/Imp', a:'Anulado c/Imp',
+  B:'Anulado s/Imp',
+  R:'Remito s/Ctrl',
+  L:'Listo p/Entregar',
+  P:'Programado', I:'Inicial', F:'Fundido',
+  O:'Impreso', C:'Confirmado', Y:'Para Cumplir',
+  T:'Trabajando', M:'Moldeado',
+};
+
+function estadoTag(codigo, label) {
+  const up = (codigo || '').toUpperCase();
+  const cls = ['K','D'].includes(up) ? 'tag-g'
+    : ['A','B'].includes(up) ? 'tag-r'
+    : ['R','Y','I','C'].includes(up) ? 'tag-y'
+    : ['L'].includes(up) ? 'tag-b'
+    : 'tag-m';
+  return `<span class="tag ${cls}">${label || _OT_ESTADO[codigo] || codigo || '—'}</span>`;
+}
+
+async function api(path, opts) {
+  const r = await fetch(API_BASE + path, opts);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+const _gcv = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim() || '#888';
+
+// ── Date params (for rechazos/devoluciones) ────────────────────────────────────
+function _rechDateParams() {
+  const d = new Date();
+  const mes = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+  const [y, m] = mes.split('-').map(Number);
+  const toDate   = new Date(y, m, 0);
+  const fromDate = new Date(y, m - 12, 1);
+  const meses = ['','Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+  const fmt2 = d => d.toISOString().slice(0, 10);
+  return {
+    url_qs: `?desde=${fmt2(fromDate)}&hasta=${fmt2(toDate)}`,
+    label: meses[fromDate.getMonth()+1] + ' ' + fromDate.getFullYear()
+      + ' – ' + meses[toDate.getMonth()+1] + ' ' + toDate.getFullYear(),
+  };
+}
+
+// ── Kiosk config ───────────────────────────────────────────────────────────────
+const KIOSK_SLIDES = [
+  { id: 'dash_vencidos',   label: 'Pedidos Vencidos',     icon: '🔴', group: 'Dashboard',   period: true },
+  { id: 'dash_proximos',   label: 'Próximos a Vencer',    icon: '🟡', group: 'Dashboard' },
+  { id: 'dash_entregados', label: 'Entregados Recientes', icon: '🟢', group: 'Dashboard',   period: true },
+  { id: 'rechazos',        label: 'Rechazos',             icon: '⚠️', group: 'Calidad',     period: true },
+  { id: 'devoluciones',    label: 'Devoluciones',         icon: '↩️', group: 'Calidad',     period: true },
+  { id: 'stock',           label: 'Stock Actual',         icon: '📦', group: 'Inventario' },
+  { id: 'mejores',         label: 'Mejores Clientes',     icon: '⭐', group: 'Clientes',    period: true },
+  { id: 'pedidos',         label: 'Pedidos',              icon: '📋', group: 'Operaciones', period: true },
+  { id: 'remitos',         label: 'Remitos',              icon: '📄', group: 'Operaciones', period: true },
+  { id: 'trabajos',        label: 'Trabajos',             icon: '🔧', group: 'Operaciones', period: true },
+  { id: 'evol_bar',        label: 'Producción Mensual',   icon: '📊', group: 'Estadística', period: true },
+  { id: 'evol_pct',        label: 'Índices de Calidad',   icon: '📉', group: 'Estadística', period: true },
+  { id: 'evol_prod',       label: 'Productividad',        icon: '⚡', group: 'Estadística', period: true },
+  { id: 'ranking_rd',      label: 'Ranking Rechazadas',   icon: '🏆', group: 'Estadística', period: true },
+  { id: 'ranking_rep',     label: 'Ranking Reparadas',    icon: '🔧', group: 'Estadística', period: true },
+  { id: 'defectos_rech',   label: 'Motivos de Rechazo',   icon: '⚠️', group: 'Estadística', period: true },
+  { id: 'defectos_rep',    label: 'Tipos de Reparación',  icon: '🛠️', group: 'Estadística', period: true },
+  { id: 'probeta',         label: 'Probetas de Tracción', icon: '🔬', group: 'Calidad',     period: true },
+];
+
+function _kioskGetConfig() {
+  try {
+    const s = JSON.parse(localStorage.getItem('kiosk_cfg') || '{}');
+    return {
+      interval:      s.interval      || 60,
+      rows_per_page: s.rows_per_page  || 15,
+      page_interval: s.page_interval  || 8,
+      enabled:       s.enabled        || ['dash_vencidos','dash_proximos','dash_entregados','rechazos','evol_bar','evol_pct','evol_prod','ranking_rd','ranking_rep'],
+      slidesMeses:   s.slidesMeses    || {},
+      _dfltM:        s.kioskMeses     || 6,
+    };
+  } catch(e) {
+    return { interval: 60, rows_per_page: 15, page_interval: 8, enabled: ['dash_vencidos','dash_proximos','dash_entregados','rechazos','evol_bar','evol_pct','evol_prod','ranking_rd','ranking_rep'], slidesMeses: {}, _dfltM: 6 };
+  }
+}
+function _kioskDateQS(meses) {
+  const now = new Date();
+  const to   = now.toISOString().slice(0, 10);
+  const from = new Date(now.getFullYear(), now.getMonth() - meses + 1, 1).toISOString().slice(0, 10);
+  return '?date_from=' + from + '&date_to=' + to;
+}
+function _kioskMesesLabel(m) {
+  if (m === 1) return 'Este mes';
+  const now = new Date();
+  const desde = new Date(now.getFullYear(), now.getMonth() - m + 1, 1);
+  const ms = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+  return ms[desde.getMonth()] + ' ' + desde.getFullYear() + ' — Hoy';
+}
+
+function _kioskActiveSlides() {
+  const { enabled } = _kioskGetConfig();
+  return KIOSK_SLIDES.filter(s => enabled.includes(s.id));
+}
+
+// ── Kiosk state ────────────────────────────────────────────────────────────────
+let _kioskActive    = false;
+let _kioskIdx       = 0;
+let _kioskTimer     = null;
+let _kioskPaused    = false;
+let _kioskInterval  = 60;
+let _kioskScrollRaf = null;
+let _tblPager       = null;
+
+function kioskStart() {
+  const slides = _kioskActiveSlides();
+  if (!slides.length) return;
+  _kioskActive   = true;
+  _kioskIdx      = 0;
+  _kioskPaused   = false;
+  _kioskInterval = _kioskGetConfig().interval;
+  if (!$id('kiosk-overlay')) {
+    document.body.insertAdjacentHTML('beforeend', `
+      <div id="kiosk-overlay">
+        <div id="kiosk-alerts">
+          <span id="kiosk-alert-icon">&#128300;</span>
+          <span id="kiosk-alert-text"></span>
+          <span id="kiosk-alert-counter"></span>
+        </div>
+        <div id="kiosk-info"></div>
+        <div id="kiosk-pause" onclick="_kioskTogglePause()" title="Pausar/Reanudar">&#9646;&#9646;</div>
+        <div id="kiosk-prev"  onclick="_kioskStep(-1)">&#8249;</div>
+        <div id="kiosk-next"  onclick="_kioskStep(1)">&#8250;</div>
+        <div id="kiosk-bar-wrap"><div id="kiosk-bar"></div></div>
+      </div>`);
+  }
+  _kioskStartAlerts();
+  _kioskGoTo(0);
+}
+
+function kioskStop() {
+  _kioskActive = false;
+  _kioskStopScroll();
+  _kioskStopAlerts();
+  document.body.classList.remove('has-kiosk-alerts');
+  clearTimeout(_kioskTimer);
+  // Reload after a brief pause — kiosk.html is always kiosk mode
+  setTimeout(() => location.reload(), 2000);
+}
+
+function _kioskStopScroll() {
+  if (_kioskScrollRaf) { cancelAnimationFrame(_kioskScrollRaf); _kioskScrollRaf = null; }
+}
+
+function _kioskStartAutoScroll() {
+  _kioskStopScroll();
+  const main = $id('main');
+  if (!main) return;
+  main.scrollTop = 0;
+
+  const topPause = 2500;
+  const scrollMs = Math.max(_kioskInterval * 1000 - topPause, 1500);
+  let startTs = null, scrollStartTs = null;
+
+  function tick(ts) {
+    if (!_kioskActive || _kioskPaused) return;
+    const m = $id('main');
+    if (!m) return;
+    if (!startTs) startTs = ts;
+    if (ts - startTs < topPause) { _kioskScrollRaf = requestAnimationFrame(tick); return; }
+    const scrollable = m.scrollHeight - m.clientHeight;
+    if (scrollable <= 10) return;
+    if (!scrollStartTs) scrollStartTs = ts;
+    const progress = Math.min((ts - scrollStartTs) / scrollMs, 1);
+    const t = progress < 0.5 ? 2 * progress * progress : 1 - Math.pow(-2 * progress + 2, 2) / 2;
+    m.scrollTop = t * scrollable;
+    if (progress < 1) _kioskScrollRaf = requestAnimationFrame(tick);
+  }
+  _kioskScrollRaf = requestAnimationFrame(tick);
+}
+
+// ── Table paginator ────────────────────────────────────────────────────────────
+function _tblPagerStop() {
+  if (_tblPager) {
+    clearTimeout(_tblPager.timer);
+    try { _tblPager.indicator.remove(); } catch(_) {}
+    _tblPager = null;
+  }
+}
+
+// Returns total duration in seconds if pagination was activated, 0 otherwise.
+function _tblPagerSetup(main, rowsPerPage, pageInterval, onDone) {
+  const tblWrap = main.querySelector('.tbl-wrap');
+  if (!tblWrap) return 0;
+  const tbody = tblWrap.querySelector('tbody');
+  if (!tbody) return 0;
+  const allRows = Array.from(tbody.querySelectorAll('tr'));
+  if (allRows.length <= rowsPerPage) return 0;
+
+  // Chunk rows into pages
+  const pages = [];
+  for (let i = 0; i < allRows.length; i += rowsPerPage) {
+    pages.push(allRows.slice(i, i + rowsPerPage));
+  }
+  const numPages = pages.length;
+
+  // Indicator strip below the table
+  const ind = document.createElement('div');
+  ind.className = 'tbl-pager-ind';
+  tblWrap.insertAdjacentElement('afterend', ind);
+
+  const pager = { timer: null, indicator: ind };
+
+  function renderInd(page) {
+    const dotsHtml = numPages <= 9
+      ? '<div class="tbl-pager-dots">' +
+        pages.map((_,i) => `<span class="tbl-dot${i===page?' tbl-dot-active':''}"></span>`).join('') +
+        '</div>'
+      : '';
+    ind.innerHTML = dotsHtml + `<span class="tbl-pager-lbl">${page+1} / ${numPages}</span>`;
+  }
+
+  function goPage(page, animate) {
+    clearTimeout(pager.timer);
+    const swap = () => {
+      allRows.forEach(r => (r.style.display = 'none'));
+      pages[page].forEach(r => (r.style.display = ''));
+      renderInd(page);
+      tbody.style.transition = animate ? 'opacity .25s ease' : 'none';
+      requestAnimationFrame(() => requestAnimationFrame(() => { tbody.style.opacity = '1'; }));
+      const wait = Math.max((pageInterval - (animate ? 0.25 : 0)) * 1000, 500);
+      pager.timer = setTimeout(
+        page < numPages - 1 ? () => goPage(page + 1, true) : onDone,
+        wait
+      );
+    };
+    if (animate) {
+      tbody.style.transition = 'opacity .2s ease';
+      tbody.style.opacity = '0';
+      pager.timer = setTimeout(swap, 210);
+    } else {
+      tbody.style.opacity = '1';
+      swap();
+    }
+  }
+
+  goPage(0, false);
+  _tblPager = pager;
+  return numPages * pageInterval;
+}
+
+function _kioskGoTo(idx) {
+  _tblPagerStop();
+  _kioskStopScroll();
+  const slides = _kioskActiveSlides();
+  if (!slides.length) { kioskStop(); return; }
+  _kioskIdx = ((idx % slides.length) + slides.length) % slides.length;
+  const slide = slides[_kioskIdx];
+  const info = $id('kiosk-info');
+  if (info) info.textContent = `${slide.icon} ${slide.label}  ·  ${_kioskIdx + 1} / ${slides.length}`;
+  // Ocultar banner de alertas mientras se muestra la slide de probetas
+  const alertBar = $id('kiosk-alerts');
+  if (slide.id === 'probeta') {
+    document.body.classList.remove('has-kiosk-alerts');
+    if (alertBar) alertBar.classList.remove('visible');
+  } else if (_kioskAlerts.length) {
+    document.body.classList.add('has-kiosk-alerts');
+    if (alertBar) alertBar.classList.add('visible');
+  }
+  _kioskShowSlide(slide);
+  _kioskResetBar();
+  clearTimeout(_kioskTimer);
+  if (!_kioskPaused) {
+    _kioskTimer = setTimeout(() => _kioskGoTo(_kioskIdx + 1), _kioskInterval * 1000);
+  }
+}
+
+function _kioskStep(dir) { clearTimeout(_kioskTimer); _kioskGoTo(_kioskIdx + dir); }
+
+function _kioskTogglePause() {
+  _kioskPaused = !_kioskPaused;
+  const btn = $id('kiosk-pause');
+  if (btn) btn.innerHTML = _kioskPaused ? '&#9654;' : '&#9646;&#9646;';
+  if (_kioskPaused) {
+    clearTimeout(_kioskTimer);
+    _kioskStopScroll();
+    _tblPagerStop();
+    const bar = $id('kiosk-bar');
+    if (bar) { bar.style.transition = 'none'; bar.style.width = bar.getBoundingClientRect().width / bar.parentElement.getBoundingClientRect().width * 100 + '%'; }
+  } else {
+    _kioskGoTo(_kioskIdx);
+  }
+}
+
+function _kioskResetBar(dur) {
+  const d = dur || _kioskInterval;
+  const bar = $id('kiosk-bar');
+  if (!bar) return;
+  bar.style.transition = 'none';
+  bar.style.width = '0%';
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    bar.style.transition = `width ${d}s linear`;
+    bar.style.width = '100%';
+  }));
+}
+
+// ── Slide renderers ────────────────────────────────────────────────────────────
+function _kioskKpi(label, val, cls) {
+  return `<div class="kk"><div class="lbl">${label}</div><div class="val ${cls||''}">${val}</div></div>`;
+}
+
+function _kioskWrap(slide, sub, kpis, body) {
+  const now = new Date().toLocaleTimeString('es-AR', {hour:'2-digit', minute:'2-digit'});
+  return `<div class="ktv">
+    <div class="ktv-head">
+      <h2>${slide.icon} ${slide.label}</h2>
+      <div class="ktv-ts">${sub ? sub + ' &middot; ' : ''}Actualizado ${now}</div>
+    </div>
+    ${kpis ? `<div class="ktv-kpis">${kpis}</div>` : ''}
+    <div class="tbl-wrap">${body}</div>
+  </div>`;
+}
+
+// ── Evol cache ─────────────────────────────────────────────────────────────────
+let _kioskEvolCache = null, _kioskEvolCacheTs = 0;
+let _kioskRankCache = null, _kioskRankCacheTs = 0;
+let _kioskDefCache  = null, _kioskDefCacheTs  = 0;
+
+async function _getKioskEvolData(meses) {
+  const m = Math.max(3, Math.min(meses, 60));
+  if (_kioskEvolCache?.key === m && (Date.now() - _kioskEvolCacheTs) < 300000) return _kioskEvolCache.data;
+  const d = await api('/api/analytics/evolucion_mensual?meses=' + (m + 1));
+  const data = (d.meses || []).slice(-m);
+  _kioskEvolCache = { key: m, data };
+  _kioskEvolCacheTs = Date.now();
+  return data;
+}
+
+async function _getKioskRankData(meses) {
+  const m = Math.max(3, Math.min(meses, 12));
+  if (_kioskRankCache?.key === m && (Date.now() - _kioskRankCacheTs) < 300000) return _kioskRankCache.data;
+  const data = await api('/api/analytics/top_piezas?meses=' + m);
+  _kioskRankCache = { key: m, data };
+  _kioskRankCacheTs = Date.now();
+  return data;
+}
+
+async function _getKioskDefData(meses) {
+  const m = Math.max(3, Math.min(meses, 12));
+  if (_kioskDefCache?.key === m && (Date.now() - _kioskDefCacheTs) < 300000) return _kioskDefCache.data;
+  const data = await api('/api/analytics/top_defectos?meses=' + m);
+  _kioskDefCache = { key: m, data };
+  _kioskDefCacheTs = Date.now();
+  return data;
+}
+
+function _kMes(mes) {
+  const [y, m] = mes.split('-');
+  return ['','Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'][+m]+"'"+y.slice(2);
+}
+
+// ── Page builders ──────────────────────────────────────────────────────────────
+function _kioskPageVenc(slide, rows, emptyMsg) {
+  if (!rows || !rows.length) return _kioskWrap(slide, '', '', `<div class="empty-ktv">${emptyMsg}</div>`);
+  const total = rows.reduce((s,r) => s+(r.cantidadpedida||0), 0);
+  const kpis = _kioskKpi('Pedidos', rows.length, 'c-blue') + _kioskKpi('Unidades totales', fmt(total), 'c-yellow');
+  const tbody = rows.map(r => {
+    const dias = r.dias != null ? r.dias : 0;
+    const cls = dias >= 0
+      ? (dias <= 2 ? 'venc-2' : dias <= 7 ? 'venc-7' : dias <= 15 ? 'venc-15' : 'venc-30')
+      : 'venc-7';
+    const diasLabel = dias === 0
+      ? '<strong style="color:var(--red)">HOY</strong>'
+      : dias < 0 ? '<strong style="color:var(--red)">−' + Math.abs(dias) + 'd</strong>'
+      : '+' + dias + 'd';
+    const prod = r.tot_producida || 0, rech = r.tot_rechazada || 0, ped = r.cantidadpedida || 0;
+    const neta = prod - rech;
+    const netaColor = (neta >= ped && ped > 0) ? 'var(--green)' : 'var(--accent)';
+    const prodOk = (prod >= ped && ped > 0) ? ' prod-ok' : '';
+    return `<tr class="${cls}${prodOk}">
+      <td><div style="font-weight:600">${r.cliente_nombre||'—'}</div></td>
+      <td><div>${r.nombrepieza||'—'}</div>${r.codigo_pieza?'<div style="font-size:12px;color:var(--muted)">'+r.codigo_pieza+'</div>':''}</td>
+      <td style="text-align:right;font-weight:600;white-space:nowrap">${ped}${prod>0?' / <span style="color:'+netaColor+'">'+neta+'</span>':''}${rech>0?'<span style="font-size:11px;color:var(--red)"> −'+rech+'</span>':''}</td>
+      <td style="white-space:nowrap">${r.fecha_entrega||'—'}</td>
+      <td style="text-align:right">${diasLabel}</td>
+    </tr>`;
+  }).join('');
+  return _kioskWrap(slide, `${rows.length} pedido${rows.length!==1?'s':''}`, kpis,
+    `<table><thead><tr><th>Cliente</th><th>Pieza</th><th style="text-align:right">Ped / Neta</th><th>F. Entrega</th><th style="text-align:right">Días</th></tr></thead><tbody>${tbody}</tbody></table>`);
+}
+
+function _kioskPageEnt(slide, rows) {
+  if (!rows || !rows.length) return _kioskWrap(slide, '', '', '<div class="empty-ktv">Sin entregas recientes</div>');
+  const completas = rows.filter(r => r.tot_entregada >= r.cantidadpedida).length;
+  const kpis = _kioskKpi('Entregas', rows.length, 'c-blue') + _kioskKpi('Completas', completas, 'c-green') + _kioskKpi('Parciales', rows.length - completas, 'c-yellow');
+  const tbody = rows.map(r => {
+    const pct = r.cantidadpedida > 0 ? Math.round(r.tot_entregada / r.cantidadpedida * 100) : 0;
+    const cls = r.tot_entregada >= r.cantidadpedida ? 'ent-completo' : 'ent-parcial';
+    return `<tr class="${cls}">
+      <td><div style="font-weight:600">${r.cliente_nombre||'—'}</div></td>
+      <td><div>${r.nombrepieza||'—'}</div>${r.codigo_pieza?'<div style="font-size:12px;color:var(--muted)">'+r.codigo_pieza+'</div>':''}</td>
+      <td style="text-align:right">${r.tot_entregada} / <span style="color:var(--muted)">${r.cantidadpedida}</span></td>
+      <td style="text-align:right"><span class="${pct>=100?'c-green':pct>=50?'c-yellow':'c-red'}">${pct}%</span></td>
+      <td style="white-space:nowrap;color:var(--muted)">${(r.fecha_entrega||'').slice(0,10)}</td>
+    </tr>`;
+  }).join('');
+  return _kioskWrap(slide, 'últimos 90 días', kpis,
+    `<table><thead><tr><th>Cliente</th><th>Pieza</th><th style="text-align:right">Entregadas / Pedidas</th><th style="text-align:right">%</th><th>Fecha</th></tr></thead><tbody>${tbody}</tbody></table>`);
+}
+
+function _kioskPageRechazos(slide, data, period) {
+  const totR = data.reduce((s,c)=>s+(c.tot_rechazada||0),0);
+  const totP = data.reduce((s,c)=>s+(c.tot_producida||0),0);
+  const pctT = totP>0 ? (totR/totP*100).toFixed(1) : '0.0';
+  const kpis = _kioskKpi('Clientes', data.length, 'c-blue') + _kioskKpi('Rechazadas', fmt(totR), 'c-yellow') + _kioskKpi('% Rechazo', pctT+'%', parseFloat(pctT)>10?'c-red':parseFloat(pctT)>5?'c-yellow':'c-green');
+  if (!data.length) return _kioskWrap(slide, period, kpis, '<div class="empty-ktv">Sin rechazos en el período</div>');
+  const tbody = data.slice(0,30).map(c => {
+    const cls = c.pct_rechazo>10 ? 'c-red' : c.pct_rechazo>5 ? 'c-yellow' : '';
+    return `<tr>
+      <td><div style="font-weight:600">${c.nombre||c.codigo}</div><div style="font-size:12px;color:var(--muted)">${c.codigo}</div></td>
+      <td style="text-align:right">${fmt(c.tot_rechazada)}</td>
+      <td style="text-align:right;color:var(--muted)">${fmt(c.tot_producida)}</td>
+      <td style="text-align:right"><span class="${cls}" style="font-weight:700">${c.pct_rechazo}%</span></td>
+      <td style="text-align:right;color:var(--muted)">${c.piezas.length} piez.</td>
+    </tr>`;
+  }).join('');
+  return _kioskWrap(slide, period, kpis,
+    `<table><thead><tr><th>Cliente</th><th style="text-align:right">Rechazadas</th><th style="text-align:right">Producidas</th><th style="text-align:right">%</th><th style="text-align:right">Piezas</th></tr></thead><tbody>${tbody}</tbody></table>`);
+}
+
+function _kioskPageDevol(slide, data, period) {
+  const totD = data.reduce((s,c)=>s+(c.tot_devuelta||0),0);
+  const totE = data.reduce((s,c)=>s+(c.tot_entregada||0),0);
+  const pctT = totE>0 ? (totD/totE*100).toFixed(1) : '0.0';
+  const kpis = _kioskKpi('Clientes', data.length, 'c-blue') + _kioskKpi('Devueltas', fmt(totD), 'c-red') + _kioskKpi('% Devolución', pctT+'%', parseFloat(pctT)>10?'c-red':parseFloat(pctT)>5?'c-yellow':'c-green');
+  if (!data.length) return _kioskWrap(slide, period, kpis, '<div class="empty-ktv">Sin devoluciones en el período</div>');
+  const tbody = data.slice(0,30).map(c => {
+    const cls = c.pct_devolucion>10 ? 'c-red' : c.pct_devolucion>5 ? 'c-yellow' : '';
+    return `<tr>
+      <td><div style="font-weight:600">${c.nombre||c.codigo}</div><div style="font-size:12px;color:var(--muted)">${c.codigo}</div></td>
+      <td style="text-align:right;color:var(--red)">${fmt(c.tot_devuelta)}</td>
+      <td style="text-align:right;color:var(--muted)">${fmt(c.tot_entregada)}</td>
+      <td style="text-align:right"><span class="${cls}" style="font-weight:700">${c.pct_devolucion}%</span></td>
+      <td style="text-align:right;color:var(--muted)">${c.piezas.length} piez.</td>
+    </tr>`;
+  }).join('');
+  return _kioskWrap(slide, period, kpis,
+    `<table><thead><tr><th>Cliente</th><th style="text-align:right">Devueltas</th><th style="text-align:right">Entregadas</th><th style="text-align:right">%</th><th style="text-align:right">Piezas</th></tr></thead><tbody>${tbody}</tbody></table>`);
+}
+
+function _kioskPageStock(slide, data) {
+  const items = (data.items || []).slice(0, 35);
+  const totalKg = (data.items||[]).reduce((s,r)=>s+(r.kg_stock||0),0);
+  const kpis = _kioskKpi('Piezas', data.total_piezas||0, 'c-blue') + _kioskKpi('Unidades', fmt(data.total_unidades||0), 'c-green') + (totalKg>0 ? _kioskKpi('kg total', fmt(Math.round(totalKg)), 'c-yellow') : '');
+  if (!items.length) return _kioskWrap(slide, '', kpis, '<div class="empty-ktv">Sin piezas en stock</div>');
+  const tbody = items.map((r, i) => `<tr>
+    <td style="color:var(--muted);font-size:13px">${i+1}</td>
+    <td><div>${r.nombre}</div>${r.codigo?'<div style="font-size:12px;color:var(--muted)">'+r.codigo+'</div>':''}</td>
+    <td style="font-size:13px;color:var(--accent)">${r.cliente}</td>
+    <td style="text-align:right;font-weight:700;color:var(--green)">${r.stock_actual}</td>
+    <td style="text-align:right;color:var(--muted)">${r.kg_stock>0?r.kg_stock.toFixed(1)+' kg':''}</td>
+    <td style="font-size:12px;color:var(--muted)">${r.ubicacion||''}</td>
+  </tr>`).join('');
+  return _kioskWrap(slide, '', kpis,
+    `<table><thead><tr><th>#</th><th>Pieza</th><th>Cliente</th><th style="text-align:right">Stock</th><th style="text-align:right">kg</th><th>Ubicación</th></tr></thead><tbody>${tbody}</tbody></table>`);
+}
+
+function _kioskPageMejores(slide, data) {
+  const maxPct = Math.max(...data.map(r=>r.pct||0)) || 1;
+  const kpis = _kioskKpi('Clientes activos', data.length, 'c-blue');
+  if (!data.length) return _kioskWrap(slide, '', kpis, '<div class="empty-ktv">Sin datos</div>');
+  const tbody = data.slice(0,25).map((r, i) => {
+    const barW = Math.round((r.pct/maxPct)*100);
+    const kgLabel = r.tot_kg>0 ? (r.tot_kg>=1000?(r.tot_kg/1000).toFixed(1)+'t':Math.round(r.tot_kg)+'kg') : '—';
+    return `<tr>
+      <td style="color:var(--muted);font-size:13px;text-align:right;padding-right:6px">${i+1}</td>
+      <td><div style="font-weight:600">${r.nombre||r.codigo}</div><div style="font-size:12px;color:var(--muted)">${r.codigo}</div></td>
+      <td style="text-align:right;font-weight:600;color:var(--accent)">${fmt(r.tot_entregada)}</td>
+      <td style="text-align:right;color:var(--muted)">${kgLabel}</td>
+      <td style="min-width:140px;padding-right:8px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <div style="flex:1;height:8px;border-radius:4px;background:var(--border)"><div style="width:${barW}%;height:8px;border-radius:4px;background:var(--accent)"></div></div>
+          <span style="font-size:13px;width:40px;text-align:right">${r.pct.toFixed(1)}%</span>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+  return _kioskWrap(slide, '', kpis,
+    `<table><thead><tr><th>#</th><th>Cliente</th><th style="text-align:right">Entregadas</th><th style="text-align:right">kg</th><th>Vol. relativo</th></tr></thead><tbody>${tbody}</tbody></table>`);
+}
+
+function _kioskPagePedidos(slide, data) {
+  const rows = (data.rows||[]).slice(0,25);
+  const kpis = _kioskKpi('Total pedidos', fmt(data.total||0), 'c-blue');
+  if (!rows.length) return _kioskWrap(slide, '', kpis, '<div class="empty-ktv">Sin pedidos</div>');
+  const tbody = rows.map(r => `<tr>
+    <td><code style="color:var(--accent);font-size:14px">${r.nropedido||r.idpedido}</code></td>
+    <td style="color:var(--muted);font-size:13px">${(r.fechapedido||'').slice(0,10)}</td>
+    <td><div style="font-weight:600">${r.cliente_nombre||r['códigocliente']}</div><div style="font-size:12px;color:var(--muted)">${r['códigocliente']||''}</div></td>
+    <td>${estadoTag(r.estadopedido,r.estado_label)}</td>
+    <td style="text-align:right;color:var(--muted)">${r.n_items}</td>
+  </tr>`).join('');
+  return _kioskWrap(slide, `${fmt(data.total)} pedidos`, kpis,
+    `<table><thead><tr><th>Nro</th><th>Fecha</th><th>Cliente</th><th>Estado</th><th style="text-align:right">Ítems</th></tr></thead><tbody>${tbody}</tbody></table>`);
+}
+
+function _kioskPageRemitos(slide, data) {
+  const rows = (data.rows||[]).slice(0,25);
+  const kpis = _kioskKpi('Total remitos', fmt(data.total||0), 'c-blue');
+  if (!rows.length) return _kioskWrap(slide, '', kpis, '<div class="empty-ktv">Sin remitos</div>');
+  const tbody = rows.map(r => `<tr>
+    <td><code style="color:var(--accent);font-size:14px">${r.idnroremito}</code></td>
+    <td style="color:var(--muted);font-size:13px">${(r.fecharemito||'').slice(0,10)}</td>
+    <td><div style="font-weight:600">${r.cliente_nombre||r['códigocliente']}</div><div style="font-size:12px;color:var(--muted)">${r['códigocliente']||''}</div></td>
+    <td style="text-align:right;font-weight:600">${fmt(r.total_piezas)}</td>
+    <td>${r.marcacontrolado==='True'||r.marcacontrolado===1?'<span class="tag tag-g">✓</span>':'<span class="tag tag-m">Pendiente</span>'}</td>
+  </tr>`).join('');
+  return _kioskWrap(slide, `${fmt(data.total)} remitos`, kpis,
+    `<table><thead><tr><th>Nº Remito</th><th>Fecha</th><th>Cliente</th><th style="text-align:right">Piezas</th><th>Estado</th></tr></thead><tbody>${tbody}</tbody></table>`);
+}
+
+function _kioskPageTrabajos(slide, data) {
+  const rows = (data.rows||[]).slice(0,25);
+  const s = data.summary||{};
+  const kpis = _kioskKpi('Total OTs', fmt(data.total||0), 'c-blue') + _kioskKpi('Producidas', fmt(s.producidas||0), 'c-blue') + _kioskKpi('Rechazadas', fmt(s.rechazadas||0), 'c-yellow') + _kioskKpi('Entregadas', fmt(s.entregadas||0), 'c-green');
+  if (!rows.length) return _kioskWrap(slide, '', kpis, '<div class="empty-ktv">Sin trabajos</div>');
+  const tbody = rows.map(r => `<tr>
+    <td><code style="color:var(--accent);font-size:14px">${String(r.iditemtrabajo).padStart(6,'0')}</code></td>
+    <td style="color:var(--muted);font-size:13px">${(r.fechaprevista||'').slice(0,10)||'—'}</td>
+    <td><div style="font-size:13px">${r.cliente_nombre||r.codigo_cliente||'—'}</div></td>
+    <td><div>${r.nombrepieza||'—'}</div>${r.codigo_pieza?'<div style="font-size:12px;color:var(--muted)">'+r.codigo_pieza+'</div>':''}</td>
+    <td style="text-align:right">${r.cantidadproducida??'—'}</td>
+    <td>${estadoTag(r.estadotrabajo,r.estado_label)}</td>
+  </tr>`).join('');
+  return _kioskWrap(slide, '', kpis,
+    `<table><thead><tr><th>Nº OT</th><th>F. Entrega</th><th>Cliente</th><th>Pieza</th><th style="text-align:right">Prod.</th><th>Estado</th></tr></thead><tbody>${tbody}</tbody></table>`);
+}
+
+// ── Evol/chart page builders ───────────────────────────────────────────────────
+function _kioskPageEvolBar(slide, meses) {
+  const now = new Date().toLocaleTimeString('es-AR', {hour:'2-digit', minute:'2-digit'});
+  if (!meses || !meses.length) return _kioskWrap(slide,'','','<div class="empty-ktv">Sin datos</div>');
+  const kgRows = meses.filter(r => r.kg_aprobados !== null);
+  const totalApro = kgRows.reduce((s,r) => s + (r.kg_aprobados||0), 0);
+  const totalRech = kgRows.reduce((s,r) => s + (r.kg_rechazados||0), 0);
+  const totalDev  = kgRows.reduce((s,r) => s + (r.kg_devueltos||0), 0);
+  const scrapVals = kgRows.filter(r => r.pct_scrap_kg !== null).map(r => r.pct_scrap_kg);
+  const avgScrap  = scrapVals.length ? scrapVals.reduce((s,v)=>s+v,0)/scrapVals.length : null;
+  const kpis = _kioskKpi('Kg Aprobados',  Math.round(totalApro).toLocaleString('es-AR'), 'c-blue')
+             + _kioskKpi('Kg Rechazados', Math.round(totalRech).toLocaleString('es-AR'), 'c-red')
+             + _kioskKpi('Kg Devueltos',  Math.round(totalDev).toLocaleString('es-AR'),  'c-purple')
+             + (avgScrap !== null ? _kioskKpi('Rec. Interno prom.', avgScrap.toFixed(1)+'%', avgScrap>5?'c-red':avgScrap>2?'c-yellow':'c-green') : '');
+  return `<div class="ktv">
+    <div class="ktv-head"><h2>${slide.icon} ${slide.label}</h2>
+      <div class="ktv-ts">Últimos ${meses.length} meses &middot; Actualizado ${now}</div></div>
+    <div class="ktv-kpis">${kpis}</div>
+    <div style="background:var(--card);border-radius:10px;border:1px solid var(--border);padding:16px 20px 12px;height:calc(100vh - 230px);position:relative">
+      <canvas id="kiosk-chart-bar"></canvas></div></div>`;
+}
+
+function _kioskRenderEvolBar(meses) {
+  const canvas = $id('kiosk-chart-bar');
+  if (!canvas) return;
+  try { Chart.getChart(canvas)?.destroy(); } catch(_) {}
+  const useKg = meses.some(r => r.kg_aprobados !== null);
+  const ct = _gcv('--text'), cm = _gcv('--muted');
+  new Chart(canvas, {
+    type: 'bar',
+    data: { labels: meses.map(r => _kMes(r.mes)), datasets: [
+      { label: 'Aprobado',  data: meses.map(r => useKg ? (r.kg_aprobados||0)  : (r.aprobadas||0)),  backgroundColor: '#66bb6abb', stack: 'a' },
+      { label: 'Rechazado', data: meses.map(r => useKg ? (r.kg_rechazados||0) : (r.rechazadas||0)), backgroundColor: '#ef5350bb', stack: 'a' },
+      { label: 'Devuelto',  data: meses.map(r => useKg ? (r.kg_devueltos||0)  : (r.devueltas||0)),  backgroundColor: '#a78bfabb', stack: 'a' },
+    ]},
+    options: { responsive:true, maintainAspectRatio:false,
+      plugins: { legend: { labels: { color:ct, font:{size:14}, boxWidth:14 } } },
+      scales: {
+        x: { stacked:true, ticks:{color:cm, font:{size:13}}, grid:{color:'rgba(128,128,128,.15)'} },
+        y: { stacked:true, ticks:{color:cm, font:{size:13}}, grid:{color:'rgba(128,128,128,.15)'},
+             title:{display:true, text:useKg?'kg':'unidades', color:cm, font:{size:12}} }
+      }
+    }
+  });
+}
+
+function _kioskPageEvolPct(slide, meses) {
+  const now = new Date().toLocaleTimeString('es-AR', {hour:'2-digit', minute:'2-digit'});
+  if (!meses || !meses.length) return _kioskWrap(slide,'','','<div class="empty-ktv">Sin datos</div>');
+  const avg = k => { const v=meses.filter(r=>r[k]!==null&&r[k]!==undefined).map(r=>r[k]); return v.length?v.reduce((s,x)=>s+x,0)/v.length:null; };
+  const avgS=avg('pct_scrap_kg'), avgR=avg('pct_rep_kg'), avgD=avg('pct_devol_kg');
+  const kpis = (avgS!==null ? _kioskKpi('Rec. Interno prom.', avgS.toFixed(1)+'%', avgS>5?'c-red':avgS>2?'c-yellow':'c-green') : '')
+             + (avgR!==null ? _kioskKpi('Reparación prom.', avgR.toFixed(1)+'%', avgR>10?'c-red':avgR>5?'c-yellow':'c-green') : '')
+             + (avgD!==null ? _kioskKpi('Devolución prom.', avgD.toFixed(1)+'%', avgD>3?'c-red':avgD>1?'c-yellow':'c-green') : '');
+  return `<div class="ktv">
+    <div class="ktv-head"><h2>${slide.icon} ${slide.label}</h2>
+      <div class="ktv-ts">Últimos ${meses.length} meses &middot; Actualizado ${now}</div></div>
+    <div class="ktv-kpis">${kpis}</div>
+    <div style="background:var(--card);border-radius:10px;border:1px solid var(--border);padding:16px 20px 12px;height:calc(100vh - 230px);position:relative">
+      <canvas id="kiosk-chart-pct"></canvas></div></div>`;
+}
+
+function _kioskRenderEvolPct(meses) {
+  const canvas = $id('kiosk-chart-pct');
+  if (!canvas) return;
+  try { Chart.getChart(canvas)?.destroy(); } catch(_) {}
+  const ct = _gcv('--text'), cm = _gcv('--muted');
+  const nullTo0 = v => (v === null || v === undefined) ? 0 : v;
+  try {
+    new Chart(canvas, {
+      type: 'line',
+      data: { labels: meses.map(r => _kMes(r.mes)), datasets: [
+        { label:'% Rechazo Interno', data:meses.map(r=>nullTo0(r.pct_scrap_kg)), borderColor:'#ef5350', backgroundColor:'#ef535022', fill:'origin', tension:.3, spanGaps:true, pointRadius:4, borderWidth:2.5 },
+        { label:'% Reparación', data:meses.map(r=>nullTo0(r.pct_rep_kg)),  borderColor:'#ffa726', fill:false, borderDash:[5,4], tension:.3, spanGaps:true, pointRadius:4, borderWidth:2.5 },
+        { label:'% Devolución', data:meses.map(r=>nullTo0(r.pct_devol_kg)),borderColor:'#a78bfa', fill:false, borderDash:[2,4], tension:.3, spanGaps:true, pointRadius:4, borderWidth:2.5 },
+      ]},
+      options: { responsive:true, maintainAspectRatio:false,
+        plugins: { legend: { labels: { color:ct, font:{size:14}, boxWidth:14 } } },
+        scales: {
+          x: { ticks:{color:cm, font:{size:13}}, grid:{color:'rgba(128,128,128,.15)'} },
+          y: { ticks:{color:cm, font:{size:13}, callback:v=>v+'%'}, grid:{color:'rgba(128,128,128,.15)'}, beginAtZero:true }
+        }
+      }
+    });
+  } catch(e) {}
+}
+
+function _kioskPageEvolProd(slide, meses) {
+  const now = new Date().toLocaleTimeString('es-AR', {hour:'2-digit', minute:'2-digit'});
+  if (!meses || !meses.length) return _kioskWrap(slide,'','','<div class="empty-ktv">Sin datos</div>');
+  const avg = k => { const v=meses.filter(r=>r[k]!=null).map(r=>r[k]); return v.length?+(v.reduce((s,x)=>s+x,0)/v.length).toFixed(2):null; };
+  const avgP = avg('productividad'), avgS = avg('scrap_hs'), avgD = avg('devol_hs');
+  const kpis = (avgP!==null ? _kioskKpi('Aprobado / hs',  avgP.toFixed(1)+' kg/hs', 'c-blue') : '')
+             + (avgS!==null ? _kioskKpi('Rec. Int. / hs', avgS.toFixed(2)+' kg/hs', avgS>2?'c-red':'c-green') : '')
+             + (avgD!==null ? _kioskKpi('Devolución / hs', avgD.toFixed(2)+' kg/hs', avgD>1?'c-red':'c-green') : '');
+  const hasProd = avgP !== null;
+  return `<div class="ktv">
+    <div class="ktv-head"><h2>${slide.icon} ${slide.label}</h2>
+      <div class="ktv-ts">Últimos ${meses.length} meses &middot; Actualizado ${now}</div></div>
+    <div class="ktv-kpis">${kpis}</div>
+    ${hasProd
+      ? `<div style="background:var(--card);border-radius:10px;border:1px solid var(--border);padding:16px 20px 12px;height:calc(100vh - 230px);position:relative">
+           <canvas id="kiosk-chart-prod"></canvas></div>`
+      : '<div class="empty-ktv">Sin datos de horas trabajadas</div>'}</div>`;
+}
+
+function _kioskRenderEvolProd(meses) {
+  const canvas = $id('kiosk-chart-prod');
+  if (!canvas) return;
+  try { Chart.getChart(canvas)?.destroy(); } catch(_) {}
+  const ct = _gcv('--text'), cm = _gcv('--muted');
+  new Chart(canvas, {
+    type: 'line',
+    data: { labels: meses.map(r => _kMes(r.mes)), datasets: [
+      { label:'kg aprobados / hs', data:meses.map(r=>r.productividad), borderColor:'#4fc3f7', backgroundColor:'#4fc3f733', fill:true, tension:.3, spanGaps:false, pointRadius:5, borderWidth:2.5 },
+      { label:'kg rechazo / hs', data:meses.map(r=>r.scrap_hs ?? null), borderColor:'#ef5350', backgroundColor:'transparent', fill:false, tension:.3, spanGaps:false, pointRadius:5, borderWidth:2.5, borderDash:[5,4] },
+      { label:'kg devuelto / hs', data:meses.map(r=>r.devol_hs ?? null), borderColor:'#a78bfa', backgroundColor:'transparent', fill:false, tension:.3, spanGaps:false, pointRadius:5, borderWidth:2.5, borderDash:[2,4] },
+    ]},
+    options: { responsive:true, maintainAspectRatio:false,
+      plugins: { legend: { labels:{ color:ct, font:{size:14}, boxWidth:14 } } },
+      scales: {
+        x: { ticks:{color:cm, font:{size:13}}, grid:{color:'rgba(128,128,128,.15)'} },
+        y: { ticks:{color:cm, font:{size:13}, callback:v=>v+' kg/hs'}, grid:{color:'rgba(128,128,128,.15)'}, beginAtZero:true,
+             title:{display:true, text:'kg / hs trabajadas', color:cm, font:{size:12}} }
+      }
+    }
+  });
+}
+
+function _kioskPageRanking(slide, rows, canvasId) {
+  const now = new Date().toLocaleTimeString('es-AR', {hour:'2-digit', minute:'2-digit'});
+  if (!rows?.length) return _kioskWrap(slide,'','','<div class="empty-ktv">Sin datos</div>');
+  const n = rows.length;
+  const cols = rows.map(row => {
+    const [y,mo] = row.mes.split('-');
+    const lbl = ['','Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'][+mo]+"'"+y.slice(2);
+    const items = row.top5.map((item, i) =>
+      `<div style="display:flex;align-items:flex-start;gap:5px;padding:3px 0;line-height:1.35">
+        <div style="width:9px;height:9px;border-radius:2px;background:${RANK_COLORS[i]};flex-shrink:0;margin-top:3px"></div>
+        <div style="min-width:0">
+          <div style="font-size:13px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${item.nombre||'?'}</div>
+          <div style="font-size:11px;color:var(--muted)">${item.kg} kg &middot; ${item.cant} pzas</div>
+        </div></div>`
+    ).join('');
+    return `<div style="min-width:0"><div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:5px;border-bottom:1px solid var(--border);padding-bottom:4px">${lbl}</div>${items}</div>`;
+  }).join('');
+  const table = `<div style="display:grid;grid-template-columns:repeat(${n},1fr);gap:0 16px;margin-top:10px">${cols}</div>`;
+  return `<div class="ktv">
+    <div class="ktv-head"><h2>${slide.icon} ${slide.label}</h2>
+      <div class="ktv-ts">Últimos 6 meses &middot; Actualizado ${now}</div></div>
+    <div style="background:var(--card);border-radius:10px;border:1px solid var(--border);padding:16px 20px 12px;display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden">
+      <div style="position:relative;height:calc(45vh - 110px)"><canvas id="${canvasId}"></canvas></div>
+      <div style="overflow-y:auto;margin-top:4px">${table}</div>
+    </div></div>`;
+}
+
+function _kioskRenderRanking(canvasId, rows) {
+  const canvas = $id(canvasId);
+  if (!canvas || !rows?.length) return;
+  try { Chart.getChart(canvas)?.destroy(); } catch(_) {}
+  const ct = _gcv('--text'), cm = _gcv('--muted');
+  const labels = rows.map(r => { const [y,mo]=r.mes.split('-'); return ['','Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'][+mo]+"'"+y.slice(2); });
+  const maxRank = Math.max(...rows.map(r => r.top5.length));
+  const datasets = Array.from({length: maxRank}, (_, rank) => ({
+    label: `#${rank+1}`,
+    data:   rows.map(r => r.top5[rank]?.kg ?? 0),
+    _names: rows.map(r => r.top5[rank]?.nombre ?? ''),
+    backgroundColor: RANK_COLORS[rank] + 'cc',
+    borderRadius: 4,
+  }));
+  new Chart(canvas, {
+    type: 'bar', data: { labels, datasets },
+    options: { responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false },
+        tooltip: { callbacks: {
+          title: ctx => ctx[0].label,
+          label: ctx => `${ctx.dataset._names[ctx.dataIndex] || ('#'+(ctx.datasetIndex+1))}: ${ctx.parsed.y.toFixed(0)} kg`,
+        }}},
+      scales: {
+        x: { ticks:{color:cm, font:{size:13}}, grid:{color:'rgba(128,128,128,.15)'} },
+        y: { ticks:{color:cm, font:{size:13}}, grid:{color:'rgba(128,128,128,.15)'}, beginAtZero:true,
+             title:{display:true, text:'kg', color:cm, font:{size:12}} },
+      },
+    },
+  });
+}
+
+function _kioskPageDefectos(slide, rows, canvasId) {
+  const now = new Date().toLocaleTimeString('es-AR', {hour:'2-digit', minute:'2-digit'});
+  if (!rows?.length) return _kioskWrap(slide,'','','<div class="empty-ktv">Sin datos</div>');
+  const n = rows.length;
+  const cols = rows.map(row => {
+    const [y,mo] = row.mes.split('-');
+    const lbl = ['','Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'][+mo]+"'"+y.slice(2);
+    const items = row.top5.map((item, i) =>
+      `<div style="display:flex;align-items:flex-start;gap:5px;padding:3px 0;line-height:1.35">
+        <div style="width:9px;height:9px;border-radius:2px;background:${RANK_COLORS[i]};flex-shrink:0;margin-top:3px"></div>
+        <div style="min-width:0">
+          <div style="font-size:13px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${item.nombre||'?'}</div>
+          <div style="font-size:11px;color:var(--muted)">${item.cant} ocurr.</div>
+        </div></div>`
+    ).join('');
+    return `<div style="min-width:0"><div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:5px;border-bottom:1px solid var(--border);padding-bottom:4px">${lbl}</div>${items}</div>`;
+  }).join('');
+  const table = `<div style="display:grid;grid-template-columns:repeat(${n},1fr);gap:0 16px;margin-top:10px">${cols}</div>`;
+  return `<div class="ktv">
+    <div class="ktv-head"><h2>${slide.icon} ${slide.label}</h2>
+      <div class="ktv-ts">Últimos 6 meses &middot; Actualizado ${now}</div></div>
+    <div style="background:var(--card);border-radius:10px;border:1px solid var(--border);padding:16px 20px 12px;display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden">
+      <div style="position:relative;height:calc(45vh - 110px)"><canvas id="${canvasId}"></canvas></div>
+      <div style="overflow-y:auto;margin-top:4px">${table}</div>
+    </div></div>`;
+}
+
+function _kioskRenderDefectos(canvasId, rows) {
+  const canvas = $id(canvasId);
+  if (!canvas || !rows?.length) return;
+  try { Chart.getChart(canvas)?.destroy(); } catch(_) {}
+  const ct = _gcv('--text'), cm = _gcv('--muted');
+  const labels = rows.map(r => { const [y,mo]=r.mes.split('-'); return ['','Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'][+mo]+"'"+y.slice(2); });
+  const maxRank = Math.max(...rows.map(r => r.top5.length));
+  const datasets = Array.from({length: maxRank}, (_, rank) => ({
+    label: `#${rank+1}`,
+    data:   rows.map(r => r.top5[rank]?.cant ?? 0),
+    _names: rows.map(r => r.top5[rank]?.nombre ?? ''),
+    backgroundColor: RANK_COLORS[rank] + 'cc',
+    borderRadius: 4,
+  }));
+  new Chart(canvas, {
+    type: 'bar', data: { labels, datasets },
+    options: { responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false },
+        tooltip: { callbacks: {
+          title: ctx => ctx[0].label,
+          label: ctx => `${ctx.dataset._names[ctx.dataIndex] || ('#'+(ctx.datasetIndex+1))}: ${ctx.parsed.y} ocurr.`,
+        }}},
+      scales: {
+        x: { ticks:{color:cm, font:{size:13}}, grid:{color:'rgba(128,128,128,.15)'} },
+        y: { ticks:{color:cm, font:{size:13}}, grid:{color:'rgba(128,128,128,.15)'}, beginAtZero:true,
+             title:{display:true, text:'ocurrencias', color:cm, font:{size:12}} },
+      },
+    },
+  });
+}
+
+function _kioskPageProbeta(slide, rows) {
+  if (!rows || !rows.length) return _kioskWrap(slide, '', '', '<div class="empty-ktv">Sin OTs activas que requieran probeta de tracción</div>');
+  const kpis = _kioskKpi('OTs pendientes', rows.length, 'c-purple');
+  const tbody = rows.map(r => {
+    const matParts = [r.material_agregados, r.material_norma].filter(Boolean);
+    const matCell  = matParts.length ? matParts.join(' — ') : '—';
+    const diasLabel = r.fecha_entrega ? (() => {
+      const diff = Math.round((new Date(r.fecha_entrega) - new Date()) / 86400000);
+      return diff < 0  ? `<strong style="color:var(--red)">−${Math.abs(diff)}d</strong>`
+           : diff === 0 ? `<strong style="color:var(--red)">HOY</strong>`
+           : diff <= 7  ? `<span style="color:var(--yellow)">+${diff}d</span>`
+           : `+${diff}d`;
+    })() : '—';
+    return `<tr>
+      <td><code style="color:var(--purple)">#${r.ot_id}</code></td>
+      <td><div style="font-weight:600">${r.nombrepieza || '—'}</div>${r.codigo_pieza ? '<div style="font-size:12px;color:var(--muted)">'+r.codigo_pieza+'</div>' : ''}</td>
+      <td style="font-size:13px">${r.cliente_nombre || '—'}</td>
+      <td style="font-size:12px;white-space:nowrap">${matCell}</td>
+      <td style="text-align:right">${r.cantidad || '—'}</td>
+      <td style="white-space:nowrap;font-size:13px">${r.fecha_entrega || '—'}</td>
+      <td style="text-align:right">${diasLabel}</td>
+    </tr>`;
+  }).join('');
+  return _kioskWrap(slide, `${rows.length} OT${rows.length !== 1 ? 's' : ''} activas`, kpis,
+    `<table><thead><tr>
+      <th>OT</th><th>Pieza</th><th>Cliente</th><th>Material</th>
+      <th style="text-align:right">Cant.</th><th>Entrega</th><th style="text-align:right">Días</th>
+    </tr></thead><tbody>${tbody}</tbody></table>`);
+}
+
+// ── Slide dispatcher ───────────────────────────────────────────────────────────
+async function _kioskShowSlide(slide) {
+  const main = $id('main');
+  if (!main) return;
+  main.innerHTML = `<div class="ktv"><div class="ktv-head"><h2>${slide.icon} ${slide.label}</h2></div><div class="loading">Cargando…</div></div>`;
+  try {
+    const _kcfg = _kioskGetConfig();
+    const _sM = id => _kcfg.slidesMeses?.[id] ?? _kcfg._dfltM ?? 6;
+    let html, afterRender = null;
+    switch (slide.id) {
+      case 'dash_vencidos':   { const m=_sM('dash_vencidos');   const d = await api('/api/dashboard/vencidos?meses='  +m); html = _kioskPageVenc(slide,d,'Sin pedidos vencidos');                                                                                   break; }
+      case 'dash_proximos':   {                                  const d = await api('/api/dashboard/proximos');            html = _kioskPageVenc(slide,d,'Sin pedidos próximos a vencer');                                                                           break; }
+      case 'dash_entregados': { const m=_sM('dash_entregados'); const d = await api('/api/dashboard/entregados?meses='+m); html = _kioskPageEnt(slide,d);                                                                                                            break; }
+      case 'rechazos':        { const m=_sM('rechazos');        const d = await api('/api/analytics/rechazos'       +_kioskDateQS(m)); html = _kioskPageRechazos(slide,d,_kioskMesesLabel(m)); break; }
+      case 'devoluciones':    { const m=_sM('devoluciones');    const d = await api('/api/analytics/devoluciones'   +_kioskDateQS(m)); html = _kioskPageDevol(slide,d,_kioskMesesLabel(m));    break; }
+      case 'stock':           {                                  const d = await api('/api/stock');                          html = _kioskPageStock(slide,d);                                                                                                          break; }
+      case 'mejores':         { const m=_sM('mejores');         const d = await api('/api/analytics/mejores_clientes'+_kioskDateQS(m)); html = _kioskPageMejores(slide,d);                   break; }
+      case 'pedidos':         { const m=_sM('pedidos');          const d = await api('/api/pedidos?meses='  +m);             html = _kioskPagePedidos(slide,d);                                                                                                        break; }
+      case 'remitos':         { const m=_sM('remitos');          const d = await api('/api/remitos?meses='  +m);             html = _kioskPageRemitos(slide,d);                                                                                                        break; }
+      case 'trabajos':        { const m=_sM('trabajos');         const d = await api('/api/trabajos?meses=' +m+'&page_size=50'); html = _kioskPageTrabajos(slide,d);                                                                                                 break; }
+      case 'evol_bar':        { const m=_sM('evol_bar');        const r = await _getKioskEvolData(m); html = _kioskPageEvolBar(slide,r);  afterRender = () => _kioskRenderEvolBar(r);  break; }
+      case 'evol_pct':        { const m=_sM('evol_pct');        const r = await _getKioskEvolData(m); html = _kioskPageEvolPct(slide,r);  afterRender = () => _kioskRenderEvolPct(r);  break; }
+      case 'evol_prod':       { const m=_sM('evol_prod');       const r = await _getKioskEvolData(m); html = _kioskPageEvolProd(slide,r); afterRender = () => _kioskRenderEvolProd(r); break; }
+      case 'ranking_rd':      { const m=_sM('ranking_rd');      const d = await _getKioskRankData(m); html = _kioskPageRanking(slide, d?.rechazadas_devueltas, 'kiosk-rank-rd');  afterRender = () => _kioskRenderRanking('kiosk-rank-rd',  d?.rechazadas_devueltas); break; }
+      case 'ranking_rep':     { const m=_sM('ranking_rep');     const d = await _getKioskRankData(m); html = _kioskPageRanking(slide, d?.reparadas,            'kiosk-rank-rep'); afterRender = () => _kioskRenderRanking('kiosk-rank-rep', d?.reparadas);            break; }
+      case 'defectos_rech':   { const m=_sM('defectos_rech');   const d = await _getKioskDefData(m);  html = _kioskPageDefectos(slide, d?.defectos,    'kiosk-def-rech'); afterRender = () => _kioskRenderDefectos('kiosk-def-rech', d?.defectos);    break; }
+      case 'defectos_rep':    { const m=_sM('defectos_rep');    const d = await _getKioskDefData(m);  html = _kioskPageDefectos(slide, d?.reparaciones, 'kiosk-def-rep');  afterRender = () => _kioskRenderDefectos('kiosk-def-rep',  d?.reparaciones); break; }
+      case 'probeta':         { const m=_sM('probeta');         const d = await api('/api/alertas/probeta_traccion?meses='+m); html = _kioskPageProbeta(slide, d);          break; }
+      default: html = `<div class="ktv"><div class="ktv-head"><h2>${slide.icon} ${slide.label}</h2></div><div style="color:var(--muted);padding:40px">Vista no disponible.</div></div>`;
+    }
+    if (_kioskActive) {
+      main.innerHTML = html;
+      if (afterRender) requestAnimationFrame(afterRender);
+      main.scrollTop = 0;
+      const _pc = _kioskGetConfig();
+      const _dur = _tblPagerSetup(main, _pc.rows_per_page || 15, _pc.page_interval || 8, () => _kioskGoTo(_kioskIdx + 1));
+      if (_dur) {
+        // Pagination active: cancel the fallback timer, correct the progress bar
+        clearTimeout(_kioskTimer);
+        _kioskTimer = null;
+        _kioskResetBar(_dur);
+      } else {
+        setTimeout(_kioskStartAutoScroll, 80);
+      }
+    }
+  } catch(e) {
+    if (_kioskActive) main.innerHTML = `<div class="ktv"><div class="ktv-head"><h2>${slide.icon} ${slide.label}</h2></div><div style="color:var(--muted);padding:80px;text-align:center;font-size:18px">No se pudieron cargar los datos.<br><span style="font-size:14px;margin-top:8px;display:block">${e.message||''}</span></div></div>`;
+  }
+}
+
+// ── Alert cycling ──────────────────────────────────────────────────────────────
+let _kioskAlerts = [], _kioskAlertIdx = 0, _kioskAlertTimer = null;
+const KIOSK_ALERT_INTERVAL = 6000;
+
+async function _kioskStartAlerts() {
+  _kioskStopAlerts();
+  try { const _kc=_kioskGetConfig(); const _pm=_kc.slidesMeses?.['probeta']??_kc._dfltM??6; _kioskAlerts = await api('/api/alertas/probeta_traccion?meses=' + _pm); } catch(e) { _kioskAlerts = []; }
+  _kioskAlertIdx = 0;
+  if (!_kioskAlerts.length) return;
+  document.body.classList.add('has-kiosk-alerts');
+  const bar = $id('kiosk-alerts');
+  if (bar) bar.classList.add('visible');
+  _kioskAlertRender();
+  _kioskAlertTimer = setInterval(_kioskAlertTick, KIOSK_ALERT_INTERVAL);
+}
+
+function _kioskStopAlerts() {
+  if (_kioskAlertTimer) { clearInterval(_kioskAlertTimer); _kioskAlertTimer = null; }
+  _kioskAlerts = [];
+}
+
+function _kioskAlertRender() {
+  const txt = $id('kiosk-alert-text'), cnt = $id('kiosk-alert-counter');
+  if (!txt || !_kioskAlerts.length) return;
+  const a = _kioskAlerts[_kioskAlertIdx];
+  const fechaLabel = a.fecha_entrega ? '  ·  Entrega: ' + a.fecha_entrega : '';
+  const matParts = [a.material_agregados, a.material_norma].filter(Boolean);
+  const matLabel = matParts.length ? '  ·  ' + matParts.join(' — ') : '';
+  txt.textContent = 'Probeta de Tracción  —  ' + (a.nombrepieza || '?')
+    + '  ·  ' + (a.cliente_nombre || '?')
+    + '  ·  OT #' + a.ot_id + matLabel + fechaLabel;
+  if (cnt) cnt.textContent = (_kioskAlertIdx + 1) + ' / ' + _kioskAlerts.length;
+}
+
+function _kioskAlertTick() {
+  if (!_kioskAlerts.length) return;
+  _kioskAlertIdx = (_kioskAlertIdx + 1) % _kioskAlerts.length;
+  if (_kioskAlertIdx === 0) {
+    const _kc2=_kioskGetConfig(); const _pm2=_kc2.slidesMeses?.['probeta']??_kc2._dfltM??6;
+    api('/api/alertas/probeta_traccion?meses=' + _pm2).then(fresh => {
+      _kioskAlerts = fresh;
+      if (!fresh.length) {
+        document.body.classList.remove('has-kiosk-alerts');
+        const bar = $id('kiosk-alerts');
+        if (bar) bar.classList.remove('visible');
+        _kioskStopAlerts();
+      }
+    }).catch(() => {});
+  }
+  _kioskAlertRender();
+}
+
+// ── Keyboard ───────────────────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight') { _kioskStep(1); }
+  else if (e.key === 'ArrowLeft')  { _kioskStep(-1); }
+  else if (e.key === ' ')     { _kioskTogglePause(); e.preventDefault(); }
+});
+
+// ── Auto-start ─────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', async () => {
+  // Sincroniza config desde el servidor ANTES de arrancar (garantiza slidesMeses correctos)
+  try {
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 4000);
+    const r = await fetch(API_BASE + '/api/kiosk/config', { signal: ac.signal });
+    const cfg = await r.json();
+    if (cfg && cfg.enabled) localStorage.setItem('kiosk_cfg', JSON.stringify(cfg));
+  } catch(e) {}
+  kioskStart();
+});
+</script>
+</body>
+</html>

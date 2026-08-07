@@ -1,9 +1,11 @@
 """main.py — GNC API: FastAPI + sync Access → SQLite + frontend."""
 import asyncio
 import concurrent.futures as _cf
+import hashlib
 import json
 import logging
 import os
+import secrets
 import sqlite3
 import subprocess
 import sys
@@ -14,7 +16,8 @@ from pathlib import Path
 from typing import List, Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -27,6 +30,8 @@ PS_SCRIPT  = ROOT / "sync_access.ps1"
 
 # Carpeta con fotos de modelos — actualizar cuando se encuentre la ruta en M:
 FOTOS_MODELOS_PATH: str = r"M:\ArchivosCompartidosResguardo\ArchivosCompartidos NO BORRAR\FotosDigitales\FotosdB\Modelos"
+INFORMES_PSP = ROOT / "data" / "informes_psp"
+INFORMES_PSP.mkdir(parents=True, exist_ok=True)
 
 _fotos_ok: Optional[bool] = None
 _fotos_ok_ts: float = 0.0
@@ -87,7 +92,12 @@ sync_state: dict = {
     "tables":    [],
     "error":     None,
     "progress":  {"done": 0, "total": 0, "phase": ""},
+    "groups":    {},       # poblado en lifespan desde sync.SYNC_GROUPS
 }
+
+# Timestamps monotónicos de último sync por grupo (clock del event loop).
+# Compartido entre run_sync(), run_sync_group() y _group_scheduler().
+_last_group_run: dict[str, float] = {}
 
 
 def _should_auto_sync() -> bool:
@@ -183,6 +193,114 @@ async def run_sync(full_refresh: bool = False):
         sync_state["error"]    = str(e)
         sync_state["progress"] = {"done": 0, "total": 0, "phase": ""}
         log.error("Error en importación: %s", e)
+        return
+
+    # Marcar todos los grupos como recién sincronizados (full sync cubre todo)
+    now_mono = asyncio.get_event_loop().time()
+    for group in list(sync_state["groups"].keys()):
+        _last_group_run[group] = now_mono
+        sync_state["groups"][group]["last_sync"] = sync_state["last_sync"]
+
+
+async def run_sync_group(group_name: str):
+    """Sincroniza solo el grupo especificado: PS1 filtrado → sync_group()."""
+    import sync as sync_module
+
+    group_tables = sync_module.SYNC_GROUPS.get(group_name, [])
+    if not group_tables:
+        log.warning("run_sync_group: grupo desconocido '%s'", group_name)
+        return
+    if sync_state["status"] == "syncing":
+        log.debug("run_sync_group: sync en progreso, saltando grupo '%s'", group_name)
+        return
+
+    sync_state["status"]   = "syncing"
+    sync_state["error"]    = None
+    sync_state["progress"] = {"done": 0, "total": 0, "phase": f"Exportando grupo '{group_name}'..."}
+    log.info("Sync grupo '%s': %d tablas", group_name, len(group_tables))
+
+    loop = asyncio.get_event_loop()
+
+    # 0. Actualizar watermarks solo para las tablas incrementales del grupo
+    if DB_PATH.exists():
+        try:
+            _wm_conn = sqlite3.connect(DB_PATH)
+            sync_module.write_group_watermarks(_wm_conn, EXPORTS, group_name)
+            _wm_conn.close()
+        except Exception as _e:
+            log.warning("No se pudieron escribir watermarks del grupo '%s': %s", group_name, _e)
+
+    # 1. PowerShell: exportar solo las tablas del grupo
+    tables_str = ";".join(group_tables)
+
+    def _run_ps_group():
+        return subprocess.run(
+            [PS32, "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-File", str(PS_SCRIPT),
+             "-OutputDir", str(EXPORTS),
+             "-DbPath", r"M:\bases\2011\datos\datosunificado2010.accdb",
+             "-Tables", tables_str],
+            capture_output=False,
+        )
+
+    result = await loop.run_in_executor(None, _run_ps_group)
+    if result.returncode != 0:
+        sync_state["status"]   = "error"
+        sync_state["error"]    = f"PowerShell falló para grupo '{group_name}'"
+        sync_state["progress"] = {"done": 0, "total": 0, "phase": ""}
+        log.error("PS1 falló para grupo '%s' (código %d)", group_name, result.returncode)
+        return
+
+    # 2. CSV → SQLite (solo tablas del grupo)
+    sync_state["progress"] = {"done": 0, "total": 0, "phase": f"Importando grupo '{group_name}'..."}
+
+    def _on_progress(done: int, total: int):
+        sync_state["progress"] = {"done": done, "total": total,
+                                   "phase": f"Importando '{group_name}'..."}
+
+    def _run_import():
+        return sync_module.sync_group(group_name, EXPORTS, DB_PATH, on_progress=_on_progress)
+
+    try:
+        summary = await loop.run_in_executor(None, _run_import)
+        now_iso  = summary["ended_at"]
+        now_mono = loop.time()
+        sync_state["status"]    = "ready"
+        sync_state["last_sync"] = now_iso
+        sync_state["progress"]  = {"done": 0, "total": 0, "phase": ""}
+        _last_group_run[group_name] = now_mono
+        if group_name in sync_state["groups"]:
+            sync_state["groups"][group_name]["last_sync"]  = now_iso
+            sync_state["groups"][group_name]["tables_ok"]  = summary["tables_ok"]
+        log.info("Sync grupo '%s' OK: %d tablas, %d errores",
+                 group_name, summary["tables_ok"], summary["tables_err"])
+    except Exception as e:
+        sync_state["status"]   = "error"
+        sync_state["error"]    = str(e)
+        sync_state["progress"] = {"done": 0, "total": 0, "phase": ""}
+        log.error("Error en sync grupo '%s': %s", group_name, e)
+
+
+async def _group_scheduler():
+    """Loop asyncio: sincroniza el grupo más vencido cada 60 s (uno por tick)."""
+    import sync as sync_module
+    log.info("Scheduler de grupos iniciado.")
+    while True:
+        await asyncio.sleep(60)
+        if sync_state["status"] == "syncing":
+            continue
+        now = asyncio.get_event_loop().time()
+        best_group:   str | None = None
+        best_overdue: float = 0
+        for group, interval in sync_module.GROUP_INTERVALS.items():
+            last    = _last_group_run.get(group, 0)
+            overdue = (now - last) - interval
+            if overdue > 0 and overdue > best_overdue:
+                best_overdue = overdue
+                best_group   = group
+        if best_group:
+            log.info("Scheduler: grupo '%s' vencido por %.0fs", best_group, best_overdue)
+            await run_sync_group(best_group)
 
 
 # ── DB helper ─────────────────────────────────────────────────────────────────
@@ -237,6 +355,52 @@ def list_user_tables(conn: sqlite3.Connection) -> list[str]:
     return [r["name"] for r in rows]
 
 
+# ── Auth helpers ──────────────────────────────────────────────────────────────
+
+_SESSION_HOURS = 10
+
+_ALL_SECCIONES = [
+    "dashboard", "clientes", "analisis", "trabajos", "pedidos", "remitos",
+    "piezas", "stock", "modelos", "fundiciones", "personal", "documentos",
+    "presentacion", "proveedores", "admin",
+]
+
+
+def _hash_pwd(salt: str, password: str) -> str:
+    return hashlib.sha256(f"{salt}{password}".encode()).hexdigest()
+
+def _make_salt() -> str:
+    return secrets.token_hex(16)
+
+def _verify_pwd(password: str, salt: str, stored: str) -> bool:
+    return _hash_pwd(salt, password) == stored
+
+
+def _get_auth_user(authorization: Optional[str] = Header(None)) -> dict:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "No autenticado")
+    token = authorization.split(" ", 1)[1].strip()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT u.legajo, u.nombre, u.is_admin "
+            "FROM _sesiones s JOIN _usuarios u ON u.legajo = s.legajo "
+            "WHERE s.token=? AND s.activa=1 AND s.expires_at>? AND u.activo=1",
+            (token, datetime.now().isoformat())
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise HTTPException(401, "Sesión inválida o expirada")
+    return {"legajo": row[0], "nombre": row[1], "is_admin": bool(row[2])}
+
+
+def _require_admin(user: dict = Depends(_get_auth_user)) -> dict:
+    if not user["is_admin"]:
+        raise HTTPException(403, "Se requiere rol administrador")
+    return user
+
+
 # ── Lookup tables (manually maintained, survive sync) ─────────────────────────
 
 def _seed_lookups():
@@ -260,6 +424,225 @@ def _seed_lookups():
     conn.executemany(
         "INSERT OR IGNORE INTO TiposOperacionModelo (codigo, descripcion) VALUES (?, ?)", ops
     )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _piezas_config (
+            pieza_id              INTEGER PRIMARY KEY,
+            pide_probeta_traccion INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _kiosk_config (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
+    conn.execute(
+        "INSERT OR IGNORE INTO _kiosk_config (key, value) VALUES ('config', ?)",
+        ('{"interval":60,"enabled":["dash_vencidos","dash_proximos","dash_entregados","rechazos","evol_bar","evol_pct","evol_prod","ranking_rd","ranking_rep"]}',)
+    )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _usuarios (
+            legajo        INTEGER PRIMARY KEY,
+            nombre        TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            salt          TEXT NOT NULL,
+            is_admin      INTEGER NOT NULL DEFAULT 0,
+            activo        INTEGER NOT NULL DEFAULT 1,
+            created_at    TEXT,
+            updated_at    TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _permisos (
+            legajo  INTEGER NOT NULL,
+            seccion TEXT NOT NULL,
+            PRIMARY KEY (legajo, seccion)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _sesiones (
+            token      TEXT PRIMARY KEY,
+            legajo     INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            activa     INTEGER NOT NULL DEFAULT 1
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _personal_ext (
+            access_id  INTEGER PRIMARY KEY,
+            legajo     TEXT    NOT NULL DEFAULT '',
+            apellido   TEXT    NOT NULL DEFAULT '',
+            nombre     TEXT    NOT NULL DEFAULT '',
+            sector     INTEGER          DEFAULT NULL
+        )
+    """)
+    # Migración: agregar columna sector si la tabla ya existía sin ella
+    existing_cols = [r[1] for r in conn.execute("PRAGMA table_info(_personal_ext)").fetchall()]
+    if "sector" not in existing_cols:
+        conn.execute("ALTER TABLE _personal_ext ADD COLUMN sector INTEGER DEFAULT NULL")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _sectores (
+            id     INTEGER PRIMARY KEY,
+            nombre TEXT NOT NULL
+        )
+    """)
+    for sid, snombre in [(1,"Producción"),(3,"Administración"),(6,"Laboratorio"),
+                         (7,"Mantenimiento"),(97,"Desvinculado"),(99,"Dirección")]:
+        conn.execute("INSERT OR IGNORE INTO _sectores (id, nombre) VALUES (?,?)", (sid, snombre))
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _personal_ausentismo (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            access_id         INTEGER NOT NULL,
+            fecha             TEXT NOT NULL,
+            dias_laborables   INTEGER NOT NULL DEFAULT 0,
+            enfermedad        REAL    NOT NULL DEFAULT 0,
+            falta_con_aviso   REAL    NOT NULL DEFAULT 0,
+            falta_sin_aviso   REAL    NOT NULL DEFAULT 0,
+            accidente         REAL    NOT NULL DEFAULT 0,
+            vacaciones        REAL    NOT NULL DEFAULT 0,
+            llegada_tarde     INTEGER NOT NULL DEFAULT 0,
+            retiro_anticipado INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(access_id, fecha)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _responsables_extra (
+            codigoresponsable   INTEGER PRIMARY KEY,
+            apellidoynombre     TEXT NOT NULL DEFAULT '',
+            nombre              TEXT NOT NULL DEFAULT '',
+            apellido            TEXT NOT NULL DEFAULT '',
+            codsector           INTEGER NOT NULL DEFAULT 0,
+            cargo               TEXT NOT NULL DEFAULT '',
+            comentarios         TEXT NOT NULL DEFAULT ''
+        )
+    """)
+    # INSERT OR IGNORE: si ya existe no sobreescribe
+    conn.execute("""
+        INSERT OR IGNORE INTO _responsables_extra
+            (codigoresponsable, apellidoynombre, nombre, apellido, codsector)
+        VALUES (9001, 'Giordano Agustin', 'Agustin', 'Giordano', 1)
+    """)
+    # Vista que unifica Responsables (Access) con _responsables_extra (locales)
+    conn.execute("DROP VIEW IF EXISTS _v_responsables")
+    conn.execute("""
+        CREATE VIEW _v_responsables AS
+            SELECT "códigoresponsable"       AS codigoresponsable,
+                   apellidoynombreresponsable AS apellidoynombre,
+                   nombre, apellido,
+                   "códsector"               AS codsector,
+                   cargo, comentarios
+            FROM Responsables
+            UNION ALL
+            SELECT codigoresponsable, apellidoynombre, nombre, apellido,
+                   codsector, cargo, comentarios
+            FROM _responsables_extra
+    """)
+    # Admin por defecto si no hay usuarios
+    if conn.execute("SELECT COUNT(*) FROM _usuarios").fetchone()[0] == 0:
+        salt = _make_salt()
+        conn.execute(
+            "INSERT INTO _usuarios (legajo, nombre, password_hash, salt, is_admin, activo, created_at) "
+            "VALUES (?, ?, ?, ?, 1, 1, ?)",
+            (0, "Administrador", _hash_pwd(salt, "admin123"), salt, datetime.now().isoformat())
+        )
+        for sec in _ALL_SECCIONES:
+            conn.execute("INSERT OR IGNORE INTO _permisos (legajo, seccion) VALUES (0, ?)", (sec,))
+    # Correcciones sobre TiposMaterial (Access tiene datos incompletos/incorrectos).
+    # Se aplican en cada arranque para sobrevivir sincronizaciones.
+    _tipos_material_fixes = [
+        ("1",  "Común Finos"),
+        ("3",  "Común"),
+        ("5",  "Gris"),
+        ("8",  "Nodular"),
+        ("12", "Perlítico"),
+    ]
+    try:
+        for cod, nombre in _tipos_material_fixes:
+            conn.execute(
+                "UPDATE TiposMaterial SET sobrenombrematerial = ? WHERE códmaterial = ?",
+                (nombre, cod)
+            )
+    except Exception:
+        pass  # TiposMaterial puede no existir en installs frescas
+
+    # ── Módulo Proveedores ISO 9001 ────────────────────────────────────────────
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _prov_grupos (
+            id     TEXT PRIMARY KEY,
+            nombre TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _prov_unidades (
+            id          TEXT PRIMARY KEY,
+            descripcion TEXT NOT NULL DEFAULT ''
+        )
+    """)
+    for uid, udesc in [("Kg","Kilogramo"),("Tn","Tonelada"),("Un","Unidad"),("L","Litro")]:
+        conn.execute("INSERT OR IGNORE INTO _prov_unidades (id, descripcion) VALUES (?,?)", (uid, udesc))
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _prov_proveedores (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre         TEXT NOT NULL,
+            rubros         TEXT DEFAULT '',
+            grupos         TEXT DEFAULT '',
+            nivel          TEXT DEFAULT 'sin datos en el ultimo año',
+            valoracion     TEXT DEFAULT '#DIV/0!',
+            cant_recibida  TEXT DEFAULT '0',
+            cant_observada TEXT DEFAULT '0',
+            cant_prueba    TEXT DEFAULT '0',
+            vencimiento    TEXT DEFAULT '-',
+            observaciones  TEXT DEFAULT ''
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _prov_productos (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre           TEXT NOT NULL,
+            descripcion      TEXT DEFAULT '',
+            rubro            TEXT DEFAULT '',
+            grupo            TEXT DEFAULT '',
+            proveedor_id     INTEGER REFERENCES _prov_proveedores(id),
+            proveedor_nombre TEXT DEFAULT '',
+            cantidad_ref     TEXT DEFAULT '',
+            etp              TEXT DEFAULT '',
+            critico          INTEGER DEFAULT 0,
+            unidad           TEXT DEFAULT 'Kg'
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _prov_etp (
+            codigo    TEXT PRIMARY KEY,
+            producto  TEXT DEFAULT '',
+            revision  TEXT DEFAULT '',
+            estado    TEXT DEFAULT 'Vigente',
+            detalle   TEXT DEFAULT '',
+            pdf_path  TEXT DEFAULT ''
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _prov_psp (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            producto        TEXT NOT NULL,
+            proveedor       TEXT NOT NULL,
+            grupo           TEXT DEFAULT '',
+            etp             TEXT DEFAULT '',
+            fecha           TEXT NOT NULL,
+            cant_recibida   REAL NOT NULL DEFAULT 0,
+            unidad          TEXT DEFAULT 'Kg',
+            cant_observada  TEXT DEFAULT '-',
+            motivo          TEXT DEFAULT '-',
+            tiene_remito    INTEGER DEFAULT 1,
+            control_visual  INTEGER DEFAULT 1,
+            tiene_informe   INTEGER DEFAULT 0,
+            partida         TEXT DEFAULT '',
+            remito          TEXT DEFAULT '',
+            observaciones   TEXT DEFAULT '',
+            archivo_informe TEXT DEFAULT '',
+            created_at      TEXT
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -297,19 +680,36 @@ def _run_warmup() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import sync as sync_module
+
     _seed_lookups()
+
+    # Inicializar sub-dict de estado por grupo
+    for group in sync_module.SYNC_GROUPS:
+        sync_state["groups"][group] = {"last_sync": None, "tables_ok": 0}
+
     if _should_auto_sync():
-        log.info("Auto-sync: iniciando (última sync hace ≥10 horas o primera vez)")
+        log.info("Auto-sync: iniciando sync completo (primera vez o ≥10 h sin sync)")
         asyncio.create_task(run_sync())
     else:
-        log.info("Auto-sync: omitido (última sync hace <10 horas)")
+        log.info("Auto-sync: omitido (sync reciente detectado)")
         sync_state["status"] = "ready"
+
+    asyncio.create_task(_group_scheduler())
+
     import threading
     threading.Thread(target=_run_warmup, daemon=True).start()
     yield
 
 
 app = FastAPI(title="piezas.fundicionjoseromero.com", version="0.1.0", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # ── Endpoints API ─────────────────────────────────────────────────────────────
@@ -329,12 +729,224 @@ async def trigger_sync():
 
 @app.post("/api/sync/full")
 async def trigger_full_sync():
-    """Re-descarga TODAS las tablas desde Access ignorando watermarks.
-    Úsalo para corregir datos incorrectos por sync incremental mal configurado."""
+    """Re-descarga TODAS las tablas desde Access ignorando watermarks."""
     if sync_state["status"] == "syncing":
         raise HTTPException(409, "Sync ya en progreso")
     asyncio.create_task(run_sync(full_refresh=True))
     return {"message": "Full sync iniciado — todas las tablas se re-descargarán desde Access"}
+
+
+@app.post("/api/sync/group/{group_name}")
+async def trigger_group_sync(group_name: str):
+    """Fuerza el sync manual de un grupo específico (en_curso, movimientos, resoluciones, maestros)."""
+    import sync as sync_module
+    if group_name not in sync_module.SYNC_GROUPS:
+        raise HTTPException(404, f"Grupo '{group_name}' desconocido. "
+                                  f"Grupos válidos: {list(sync_module.SYNC_GROUPS.keys())}")
+    if sync_state["status"] == "syncing":
+        raise HTTPException(409, "Sync ya en progreso")
+    asyncio.create_task(run_sync_group(group_name))
+    return {"message": f"Sync del grupo '{group_name}' iniciado",
+            "tables": sync_module.SYNC_GROUPS[group_name]}
+
+
+# ── Auth endpoints ────────────────────────────────────────────────────────────
+
+@app.post("/api/auth/login")
+async def auth_login(req: Request):
+    body     = await req.json()
+    login    = str(body.get("login") or body.get("legajo", "")).strip()
+    password = str(body.get("password", ""))
+    if not login:
+        raise HTTPException(400, "Legajo o nombre requerido")
+    if not password:
+        raise HTTPException(400, "Contraseña requerida")
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        # Buscar por legajo si es numérico, por nombre si es texto
+        try:
+            legajo_int = int(login)
+            u = conn.execute(
+                "SELECT legajo, nombre, password_hash, salt, is_admin FROM _usuarios "
+                "WHERE legajo=? AND activo=1", (legajo_int,)
+            ).fetchone()
+        except ValueError:
+            u = conn.execute(
+                "SELECT legajo, nombre, password_hash, salt, is_admin FROM _usuarios "
+                "WHERE lower(nombre)=lower(?) AND activo=1", (login,)
+            ).fetchone()
+        if not u or not _verify_pwd(password, u["salt"], u["password_hash"]):
+            raise HTTPException(401, "Legajo o contraseña incorrectos")
+        legajo  = u["legajo"]
+        token   = secrets.token_hex(32)
+        now     = datetime.now()
+        expires = (now + timedelta(hours=_SESSION_HOURS)).isoformat()
+        conn.execute(
+            "INSERT INTO _sesiones (token, legajo, created_at, expires_at, activa) VALUES (?,?,?,?,1)",
+            (token, legajo, now.isoformat(), expires)
+        )
+        conn.commit()
+        secciones = [r[0] for r in conn.execute(
+            "SELECT seccion FROM _permisos WHERE legajo=?", (legajo,)
+        ).fetchall()]
+    finally:
+        conn.close()
+    return {"token": token, "user": {
+        "legajo": u["legajo"], "nombre": u["nombre"],
+        "is_admin": bool(u["is_admin"]), "secciones": secciones
+    }}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(user: dict = Depends(_get_auth_user),
+                authorization: Optional[str] = Header(None)):
+    token = (authorization or "").split(" ", 1)[-1].strip()
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE _sesiones SET activa=0 WHERE token=?", (token,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.get("/api/auth/me")
+def auth_me(user: dict = Depends(_get_auth_user)):
+    conn = sqlite3.connect(DB_PATH)
+    secciones = [r[0] for r in conn.execute(
+        "SELECT seccion FROM _permisos WHERE legajo=?", (user["legajo"],)
+    ).fetchall()]
+    conn.close()
+    return {**user, "secciones": secciones}
+
+
+# ── Admin: usuarios ───────────────────────────────────────────────────────────
+
+@app.get("/api/admin/responsables")
+def admin_responsables(admin: dict = Depends(_require_admin)):
+    """Devuelve Responsables activos (excluye desvinculados y entradas de sistema)."""
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            'SELECT "códigoresponsable" AS legajo, "apellidoynombreresponsable" AS nombre '
+            'FROM Responsables '
+            'WHERE "códigoresponsable" > 0 '
+            "AND (comentarios IS NULL OR LOWER(comentarios) != 'desvinculado') "
+            'ORDER BY nombre'
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@app.get("/api/admin/usuarios")
+def admin_get_usuarios(admin: dict = Depends(_require_admin)):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT legajo, nombre, is_admin, activo, created_at, updated_at FROM _usuarios ORDER BY nombre"
+        ).fetchall()
+        result = []
+        for u in rows:
+            secciones = [r[0] for r in conn.execute(
+                "SELECT seccion FROM _permisos WHERE legajo=?", (u["legajo"],)
+            ).fetchall()]
+            result.append({**dict(u), "secciones": secciones})
+        return result
+    finally:
+        conn.close()
+
+
+@app.post("/api/admin/usuarios")
+async def admin_create_usuario(req: Request, admin: dict = Depends(_require_admin)):
+    body = await req.json()
+    legajo   = int(body.get("legajo", -1))
+    nombre   = str(body.get("nombre", "")).strip()
+    password = str(body.get("password", "")).strip()
+    is_adm   = bool(body.get("is_admin", False))
+    secciones = body.get("secciones", [])
+    if legajo < 0:
+        raise HTTPException(400, "Legajo inválido")
+    if not nombre:
+        raise HTTPException(400, "Nombre requerido")
+    if not password:
+        raise HTTPException(400, "Contraseña requerida")
+    salt = _make_salt()
+    now  = datetime.now().isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        existing = conn.execute("SELECT legajo FROM _usuarios WHERE legajo=?", (legajo,)).fetchone()
+        if existing:
+            raise HTTPException(409, f"Ya existe un usuario con legajo {legajo}")
+        conn.execute(
+            "INSERT INTO _usuarios (legajo, nombre, password_hash, salt, is_admin, activo, created_at) "
+            "VALUES (?,?,?,?,?,1,?)",
+            (legajo, nombre, _hash_pwd(salt, password), salt, 1 if is_adm else 0, now)
+        )
+        conn.execute("DELETE FROM _permisos WHERE legajo=?", (legajo,))
+        for sec in secciones:
+            if sec in _ALL_SECCIONES:
+                conn.execute("INSERT OR IGNORE INTO _permisos (legajo, seccion) VALUES (?,?)", (legajo, sec))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "legajo": legajo}
+
+
+@app.put("/api/admin/usuarios/{legajo}")
+async def admin_update_usuario(legajo: int, req: Request, admin: dict = Depends(_require_admin)):
+    body = await req.json()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        u = conn.execute("SELECT legajo FROM _usuarios WHERE legajo=?", (legajo,)).fetchone()
+        if not u:
+            raise HTTPException(404, "Usuario no encontrado")
+        updates = {}
+        if "nombre"   in body: updates["nombre"]   = str(body["nombre"]).strip()
+        if "is_admin" in body: updates["is_admin"]  = 1 if body["is_admin"] else 0
+        if "activo"   in body: updates["activo"]    = 1 if body["activo"] else 0
+        if updates:
+            updates["updated_at"] = datetime.now().isoformat()
+            set_clause = ", ".join(f"{k}=?" for k in updates)
+            conn.execute(f"UPDATE _usuarios SET {set_clause} WHERE legajo=?",
+                         list(updates.values()) + [legajo])
+        if "secciones" in body:
+            conn.execute("DELETE FROM _permisos WHERE legajo=?", (legajo,))
+            for sec in body["secciones"]:
+                if sec in _ALL_SECCIONES:
+                    conn.execute("INSERT OR IGNORE INTO _permisos (legajo, seccion) VALUES (?,?)", (legajo, sec))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/admin/usuarios/{legajo}/password")
+async def admin_reset_password(legajo: int, req: Request, admin: dict = Depends(_require_admin)):
+    body = await req.json()
+    password = str(body.get("password", "")).strip()
+    if len(password) < 4:
+        raise HTTPException(400, "La contraseña debe tener al menos 4 caracteres")
+    salt = _make_salt()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        u = conn.execute("SELECT legajo FROM _usuarios WHERE legajo=?", (legajo,)).fetchone()
+        if not u:
+            raise HTTPException(404, "Usuario no encontrado")
+        conn.execute(
+            "UPDATE _usuarios SET password_hash=?, salt=?, updated_at=? WHERE legajo=?",
+            (_hash_pwd(salt, password), salt, datetime.now().isoformat(), legajo)
+        )
+        conn.execute("UPDATE _sesiones SET activa=0 WHERE legajo=?", (legajo,))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
+@app.get("/api/admin/secciones")
+def admin_secciones(admin: dict = Depends(_require_admin)):
+    return _ALL_SECCIONES
 
 
 @app.get("/api/tables")
@@ -516,7 +1128,8 @@ _PROXIMOS_SELECT = """
         t_last.estadotrabajo AS ot_estado,
         qty.tot_producida,
         qty.tot_rechazada,
-        qty.tot_entregada
+        qty.tot_entregada,
+        COALESCE(pc.pide_probeta_traccion, 0) AS pide_probeta_traccion
     FROM ItemDetallePedido idp
     JOIN Pedidos p ON idp.idpedido = p.idpedido
     JOIN Clientes c ON p.códigocliente = c.códigocliente
@@ -535,6 +1148,7 @@ _PROXIMOS_SELECT = """
         FROM Trabajos
         GROUP BY iditempedido
     ) qty ON qty.iditempedido = idp.iditempedido
+    LEFT JOIN _piezas_config pc ON pc.pieza_id = np.id
     WHERE idp.fechadeentrega IS NOT NULL
       AND upper(p.estadopedido) NOT IN ('K','D')
       AND upper(idp.estadoitem) NOT IN ('K','D')
@@ -567,13 +1181,15 @@ def dashboard_proximos():
 
 
 @app.get("/api/dashboard/vencidos")
-def dashboard_vencidos():
+def dashboard_vencidos(meses: int = 2):
+    meses = max(1, min(meses, 60))
     conn = get_db()
     try:
         rows = conn.execute(
             _PROXIMOS_SELECT +
-            "  AND date(idp.fechadeentrega) BETWEEN date('now', '-60 days') AND date('now', '-1 days')"
-            " ORDER BY idp.fechadeentrega DESC LIMIT 50"
+            "  AND date(idp.fechadeentrega) BETWEEN date('now', ? || ' months') AND date('now', '-1 days')"
+            " ORDER BY idp.fechadeentrega DESC LIMIT 50",
+            (f"-{meses}",)
         ).fetchall()
         return _resolve_ot_estados(rows, conn)
     finally:
@@ -581,7 +1197,8 @@ def dashboard_vencidos():
 
 
 @app.get("/api/dashboard/entregados")
-def dashboard_entregados():
+def dashboard_entregados(meses: int = 6):
+    meses = max(1, min(meses, 60))
     conn = get_db()
     try:
         est = _est_map(conn)
@@ -595,7 +1212,8 @@ def dashboard_entregados():
                 qty.tot_entregada,
                 qty.tot_producida,
                 last_ot.ot_id,
-                t_last.estadotrabajo AS ot_estado
+                t_last.estadotrabajo AS ot_estado,
+                COALESCE(pc.pide_probeta_traccion, 0) AS pide_probeta_traccion
             FROM ItemDetallePedido idp
             JOIN Pedidos p ON idp.idpedido = p.idpedido
             JOIN Clientes c ON p.códigocliente = c.códigocliente
@@ -611,14 +1229,15 @@ def dashboard_entregados():
                        COALESCE(SUM(cantidadproducida),  0) AS tot_producida
                 FROM Trabajos GROUP BY iditempedido
             ) qty ON qty.iditempedido = idp.iditempedido
+            LEFT JOIN _piezas_config pc ON pc.pieza_id = np.id
             WHERE idp.fechadeentrega IS NOT NULL
               AND qty.tot_entregada > 0
-              AND date(idp.fechadeentrega) BETWEEN date('now', '-90 days') AND date('now', '+30 days')
+              AND date(idp.fechadeentrega) BETWEEN date('now', ? || ' months') AND date('now', '+30 days')
             ORDER BY
                 CASE WHEN qty.tot_entregada >= idp.cantidadpedida THEN 1 ELSE 0 END ASC,
                 idp.fechadeentrega DESC
-            LIMIT 100
-        """).fetchall()
+            LIMIT 200
+        """, (f"-{meses}",)).fetchall()
         result = []
         for r in rows:
             d = dict(r)
@@ -626,6 +1245,144 @@ def dashboard_entregados():
             d["ot_estado"] = est.get(code, code) if code else None
             result.append(d)
         return result
+    finally:
+        conn.close()
+
+
+@app.post("/api/piezas/{pieza_id}/probeta_traccion")
+def toggle_probeta_traccion(pieza_id: int, activar: bool = True):
+    """Activa o desactiva el flag pide_probeta_traccion para una pieza."""
+    conn = get_db()
+    try:
+        # Verificar que la pieza existe
+        row = conn.execute("SELECT id FROM NombreDePiezas WHERE id = ?", (pieza_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, f"Pieza {pieza_id} no encontrada")
+        conn.execute("""
+            INSERT INTO _piezas_config (pieza_id, pide_probeta_traccion)
+            VALUES (?, ?)
+            ON CONFLICT(pieza_id) DO UPDATE SET pide_probeta_traccion = excluded.pide_probeta_traccion
+        """, (pieza_id, 1 if activar else 0))
+        conn.commit()
+        return {"pieza_id": pieza_id, "pide_probeta_traccion": activar}
+    finally:
+        conn.close()
+
+
+@app.get("/api/alertas/probeta_traccion")
+def alertas_probeta_traccion(meses: int = 6):
+    """Devuelve OTs activas (no entregadas) de piezas con pide_probeta_traccion=1, dentro del período."""
+    meses = max(1, min(meses, 60))
+    conn = get_db()
+    try:
+        est = _est_map(conn)
+        rows = conn.execute("""
+            SELECT
+                np.id AS pieza_id,
+                np.nombrepieza,
+                np.códigopiezapuestoporcliente AS codigo_pieza,
+                COALESCE(c.nombrefantasía, c.nombrecliente) AS cliente_nombre,
+                t.iditemtrabajo AS ot_id,
+                t.estadotrabajo AS ot_estado,
+                t.cantidad,
+                t.cantidadaprobada,
+                date(idp.fechadeentrega) AS fecha_entrega,
+                t.códmaterial AS material_id,
+                t.códdeagregados AS material_agregados,
+                COALESCE(m1.norma, tm.sobrenombrematerial) AS material_norma
+            FROM _piezas_config pc
+            JOIN NombreDePiezas np ON np.id = pc.pieza_id
+            JOIN Clientes c ON c.códigocliente = np.códcliente
+            JOIN ItemDetallePedido idp ON idp.idpieza = np.id
+            JOIN Pedidos p ON p.idpedido = idp.idpedido
+            JOIN Trabajos t ON t.iditempedido = idp.iditempedido
+            LEFT JOIN Materiales m1 ON m1."especificaciónmaterial" = t.códmaterial
+            LEFT JOIN TiposMaterial tm ON tm.códmaterial = CAST(t.códdeagregados AS TEXT)
+            WHERE pc.pide_probeta_traccion = 1
+              AND upper(p.estadopedido) NOT IN ('K','D')
+              AND upper(idp.estadoitem) NOT IN ('K','D')
+              AND COALESCE(t.cantidadentregada, 0) = 0
+              AND COALESCE(t.cantidadfundida, 0) = 0
+              AND (date(idp.fechadeentrega) IS NULL
+                   OR date(idp.fechadeentrega) >= date('now', ? || ' months'))
+            ORDER BY fecha_entrega ASC, np.nombrepieza ASC
+        """, (f"-{meses}",)).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            code = d.get("ot_estado") or ""
+            d["ot_estado"] = est.get(code, code) if code else None
+            result.append(d)
+        return result
+    finally:
+        conn.close()
+
+
+@app.post("/api/clientes/{codigo}/probeta_traccion")
+def toggle_probeta_traccion_cliente(codigo: str, activar: bool = True):
+    """Activa o desactiva pide_probeta_traccion en TODAS las piezas de un cliente."""
+    conn = get_db()
+    try:
+        cl = conn.execute(
+            "SELECT códigocliente FROM Clientes WHERE códigocliente = ?", (codigo,)
+        ).fetchone()
+        if not cl:
+            raise HTTPException(404, f"Cliente '{codigo}' no encontrado")
+        pieza_ids = conn.execute(
+            "SELECT id FROM NombreDePiezas WHERE códcliente = ?", (codigo,)
+        ).fetchall()
+        if not pieza_ids:
+            return {"cliente_id": codigo, "piezas_actualizadas": 0, "pide_probeta_traccion": activar}
+        valor = 1 if activar else 0
+        conn.executemany("""
+            INSERT INTO _piezas_config (pieza_id, pide_probeta_traccion)
+            VALUES (?, ?)
+            ON CONFLICT(pieza_id) DO UPDATE SET pide_probeta_traccion = excluded.pide_probeta_traccion
+        """, [(r["id"], valor) for r in pieza_ids])
+        conn.commit()
+        return {"cliente_id": codigo, "piezas_actualizadas": len(pieza_ids), "pide_probeta_traccion": activar}
+    finally:
+        conn.close()
+
+
+@app.get("/api/piezas_config")
+def get_piezas_config():
+    """Lista todas las piezas con configuración especial."""
+    conn = get_db()
+    try:
+        rows = conn.execute("""
+            SELECT pc.pieza_id, np.nombrepieza,
+                   COALESCE(c.nombrefantasía, c.nombrecliente) AS cliente_nombre,
+                   pc.pide_probeta_traccion
+            FROM _piezas_config pc
+            JOIN NombreDePiezas np ON np.id = pc.pieza_id
+            JOIN Clientes c ON c.códigocliente = np.códcliente
+            ORDER BY np.nombrepieza
+        """).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@app.get("/api/kiosk/config")
+def get_kiosk_config():
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT value FROM _kiosk_config WHERE key = 'config'").fetchone()
+        default = {"interval": 60, "enabled": ["dash_vencidos","dash_proximos","dash_entregados","rechazos","evol_bar","evol_pct","evol_prod","ranking_rd","ranking_rep"]}
+        return json.loads(row["value"]) if row else default
+    finally:
+        conn.close()
+
+
+@app.put("/api/kiosk/config")
+async def put_kiosk_config(request: Request):
+    body = await request.json()
+    conn = get_db()
+    try:
+        conn.execute("INSERT OR REPLACE INTO _kiosk_config (key, value) VALUES ('config', ?)", (json.dumps(body),))
+        conn.commit()
+        return body
     finally:
         conn.close()
 
@@ -640,33 +1397,43 @@ def analytics_overview():
         trend_rows = conn.execute("""
             SELECT strftime('%Y', p.fechapedido) as año,
                    COALESCE(SUM(t.cantidadentregada), 0) as entregadas,
-                   COALESCE(SUM(t.cantidadrechazada), 0) as rechazadas
+                   COALESCE(SUM(t.cantidadrechazada), 0) as rechazadas,
+                   ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadentregada * np.pesoestablecido ELSE 0 END), 1) as kg_entregadas,
+                   ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadrechazada * np.pesoestablecido ELSE 0 END), 1) as kg_rechazadas
             FROM Trabajos t
             JOIN ItemDetallePedido idp ON t.iditempedido = idp.iditempedido
             JOIN Pedidos p ON idp.idpedido = p.idpedido
+            LEFT JOIN NombreDePiezas np ON idp.idpieza = np.id
             WHERE p.fechapedido >= ? AND t.cantidadentregada > 0
             GROUP BY año ORDER BY año
         """, (f"{año_actual - 4}-01-01",)).fetchall()
 
-        # Returns by year
+        # Returns by year (with kg via PesosDePiezas → NombreDePiezas)
         dev_rows = conn.execute("""
-            SELECT CAST(año AS TEXT) as año,
-                   COALESCE(SUM("cantidaddevolución"), 0) as devueltas
-            FROM "ItemDevolución"
-            WHERE año >= ?
-            GROUP BY año ORDER BY año
+            SELECT CAST(id.año AS TEXT) as año,
+                   COALESCE(SUM(id."cantidaddevolución"), 0) as devueltas,
+                   ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN id."cantidaddevolución" * np.pesoestablecido ELSE 0 END), 1) as kg_devueltas
+            FROM "ItemDevolución" id
+            JOIN PesosDePiezas pp ON id.códpieza = pp.códpieza
+            JOIN NombreDePiezas np ON pp.nombredepiezasid_ = np.id
+            WHERE id.año >= ?
+            GROUP BY id.año ORDER BY id.año
         """, (año_actual - 4,)).fetchall()
-        dev_map = {r["año"]: r["devueltas"] for r in dev_rows}
+        dev_map = {r["año"]: dict(r) for r in dev_rows}
 
         tendencia = []
         año_ent = año_dev = 0
         for r in trend_rows:
-            dev = dev_map.get(r["año"], 0)
+            dv = dev_map.get(r["año"], {})
+            dev = dv.get("devueltas", 0)
             tendencia.append({
                 "año": r["año"],
                 "entregadas": r["entregadas"],
                 "rechazadas": r["rechazadas"],
                 "devueltas": dev,
+                "kg_entregadas": r["kg_entregadas"] or 0.0,
+                "kg_rechazadas": r["kg_rechazadas"] or 0.0,
+                "kg_devueltas":  dv.get("kg_devueltas", 0.0),
             })
             if r["año"] == str(año_actual):
                 año_ent = r["entregadas"]
@@ -700,6 +1467,30 @@ def analytics_overview():
             "top_clientes": [dict(r) for r in top],
             "n_tablas": n_tablas,
         }
+    finally:
+        conn.close()
+
+
+@app.get("/api/analytics/tendencia_mensual")
+def analytics_tendencia_mensual():
+    conn = get_db()
+    try:
+        año_actual = datetime.now().year
+        rows = conn.execute("""
+            SELECT strftime('%Y', p.fechapedido) AS año,
+                   CAST(strftime('%m', p.fechapedido) AS INTEGER) AS mes,
+                   COALESCE(SUM(t.cantidadentregada), 0) AS entregadas,
+                   COALESCE(SUM(t.cantidadrechazada), 0) AS rechazadas,
+                   ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadentregada * np.pesoestablecido ELSE 0 END), 1) AS kg_entregadas,
+                   ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadrechazada * np.pesoestablecido ELSE 0 END), 1) AS kg_rechazadas
+            FROM Trabajos t
+            JOIN ItemDetallePedido idp ON t.iditempedido = idp.iditempedido
+            JOIN Pedidos p ON idp.idpedido = p.idpedido
+            LEFT JOIN NombreDePiezas np ON idp.idpieza = np.id
+            WHERE p.fechapedido >= ? AND t.cantidadentregada > 0
+            GROUP BY año, mes ORDER BY año, mes
+        """, (f"{año_actual - 4}-01-01",)).fetchall()
+        return [dict(r) for r in rows]
     finally:
         conn.close()
 
@@ -1246,45 +2037,53 @@ def analytics_tendencia_piezas(ids: List[int] = Query(default=[])):
         piezas_rows = conn.execute(
             f"SELECT np.id, np.nombrepieza as nombre, "
             f"np.códigopiezapuestoporcliente as codigo, "
-            f"COALESCE(c.nombrefantasía, c.nombrecliente) as cliente "
+            f"COALESCE(c.nombrefantasía, c.nombrecliente) as cliente, "
+            f"np.pesoestablecido as peso "
             f"FROM NombreDePiezas np "
             f"LEFT JOIN Clientes c ON c.códigocliente = np.códcliente "
             f"WHERE np.id IN ({ph})",
             ids,
         ).fetchall()
 
-        # Annual rechazos & entregas from Trabajos
+        # Annual rechazos & entregas from Trabajos (with kg via pesoestablecido)
         ent_rows = conn.execute(
             f"SELECT strftime('%Y', p.fechapedido) as año, "
             f"COALESCE(SUM(t.cantidadproducida), 0) as producidas, "
             f"COALESCE(SUM(t.cantidadrechazada), 0) as rechazadas, "
-            f"COALESCE(SUM(t.cantidadentregada), 0) as entregadas "
+            f"COALESCE(SUM(t.cantidadentregada), 0) as entregadas, "
+            f"ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadentregada * np.pesoestablecido ELSE 0 END), 1) as kg_entregadas, "
+            f"ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadrechazada * np.pesoestablecido ELSE 0 END), 1) as kg_rechazadas, "
+            f"ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadproducida * np.pesoestablecido ELSE 0 END), 1) as kg_producidas "
             f"FROM Trabajos t "
             f"JOIN ItemDetallePedido idp ON t.iditempedido = idp.iditempedido "
             f"JOIN Pedidos p ON idp.idpedido = p.idpedido "
+            f"LEFT JOIN NombreDePiezas np ON idp.idpieza = np.id "
             f"WHERE idp.idpieza IN ({ph}) AND p.fechapedido IS NOT NULL "
             f"GROUP BY año ORDER BY año",
             ids,
         ).fetchall()
 
-        # Annual devoluciones from ItemDevolución via PesosDePiezas
+        # Annual devoluciones from ItemDevolución via PesosDePiezas (with kg)
         dev_rows = conn.execute(
             f"SELECT CAST(id.año AS TEXT) as año, "
-            f"COALESCE(SUM(id.\"cantidaddevolución\"), 0) as devueltas "
+            f"COALESCE(SUM(id.\"cantidaddevolución\"), 0) as devueltas, "
+            f"ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN id.\"cantidaddevolución\" * np.pesoestablecido ELSE 0 END), 1) as kg_devueltas "
             f"FROM \"ItemDevolución\" id "
             f"JOIN PesosDePiezas pp ON id.códpieza = pp.códpieza "
+            f"JOIN NombreDePiezas np ON pp.nombredepiezasid_ = np.id "
             f"WHERE pp.nombredepiezasid_ IN ({ph}) "
             f"GROUP BY id.año ORDER BY id.año",
             ids,
         ).fetchall()
-        dev_map = {r["año"]: r["devueltas"] for r in dev_rows}
+        dev_map = {r["año"]: dict(r) for r in dev_rows}
         ent_map = {r["año"]: r for r in ent_rows}
 
         all_years = sorted(set(ent_map) | set(dev_map))
         anual = []
         for año in all_years:
             er = ent_map.get(año)
-            dev = dev_map.get(año, 0)
+            dv = dev_map.get(año, {})
+            dev = dv.get("devueltas", 0)
             prod = er["producidas"] if er else 0
             rech = er["rechazadas"] if er else 0
             ent  = er["entregadas"] if er else 0
@@ -1294,13 +2093,34 @@ def analytics_tendencia_piezas(ids: List[int] = Query(default=[])):
                 "rechazadas": rech,
                 "entregadas": ent,
                 "devueltas":  dev,
+                "kg_entregadas": er["kg_entregadas"] if er else 0.0,
+                "kg_rechazadas": er["kg_rechazadas"] if er else 0.0,
+                "kg_producidas": er["kg_producidas"] if er else 0.0,
+                "kg_devueltas":  dv.get("kg_devueltas", 0.0),
                 "pct_rechazo":    round(rech / prod * 100, 2) if prod else 0,
                 "pct_devolucion": round(dev  / ent  * 100, 2) if ent  else 0,
             })
 
+        mensual_rows = conn.execute(
+            f"SELECT strftime('%Y', p.fechapedido) AS año, "
+            f"CAST(strftime('%m', p.fechapedido) AS INTEGER) AS mes, "
+            f"COALESCE(SUM(t.cantidadentregada), 0) AS entregadas, "
+            f"COALESCE(SUM(t.cantidadrechazada), 0) AS rechazadas, "
+            f"ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadentregada * np.pesoestablecido ELSE 0 END), 1) AS kg_entregadas, "
+            f"ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadrechazada * np.pesoestablecido ELSE 0 END), 1) AS kg_rechazadas "
+            f"FROM Trabajos t "
+            f"JOIN ItemDetallePedido idp ON t.iditempedido = idp.iditempedido "
+            f"JOIN Pedidos p ON idp.idpedido = p.idpedido "
+            f"LEFT JOIN NombreDePiezas np ON idp.idpieza = np.id "
+            f"WHERE idp.idpieza IN ({ph}) AND p.fechapedido IS NOT NULL "
+            f"GROUP BY año, mes ORDER BY año, mes",
+            ids,
+        ).fetchall()
+
         return {
             "piezas": [dict(r) for r in piezas_rows],
             "anual": anual,
+            "mensual": [dict(r) for r in mensual_rows],
         }
     finally:
         conn.close()
@@ -1838,37 +2658,42 @@ def analytics_cliente_detail(codigo: str):
         if not cl:
             raise HTTPException(404, f"Cliente '{codigo}' no encontrado")
 
-        # Annual deliveries via ItemDetallePedido → Pedidos
+        # Annual deliveries via ItemDetallePedido → Pedidos (with kg via pesoestablecido)
         # Use p.fechapedido as year source — fechacargaot is NULL on ~85% of rows
         ent_rows = conn.execute("""
             SELECT strftime('%Y', p.fechapedido) as año,
                    COALESCE(SUM(t.cantidadentregada), 0) as entregadas,
                    COALESCE(SUM(t.cantidadrechazada), 0) as rechazadas,
-                   COALESCE(SUM(t.cantidadaprobada), 0) as aprobadas
+                   COALESCE(SUM(t.cantidadaprobada), 0) as aprobadas,
+                   ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadentregada * np.pesoestablecido ELSE 0 END), 1) as kg_entregadas,
+                   ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadrechazada * np.pesoestablecido ELSE 0 END), 1) as kg_rechazadas
             FROM Trabajos t
             JOIN ItemDetallePedido idp ON t.iditempedido = idp.iditempedido
             JOIN Pedidos p ON idp.idpedido = p.idpedido
+            LEFT JOIN NombreDePiezas np ON idp.idpieza = np.id
             WHERE p.códigocliente = ? AND t.cantidadentregada > 0
               AND p.fechapedido IS NOT NULL
             GROUP BY año ORDER BY año
         """, (codigo,)).fetchall()
 
-        # Annual returns: ItemDevolución → PesosDePiezas → NombreDePiezas
+        # Annual returns: ItemDevolución → PesosDePiezas → NombreDePiezas (with kg)
         dev_rows = conn.execute("""
             SELECT CAST(id.año AS TEXT) as año,
-                   COALESCE(SUM(id."cantidaddevolución"), 0) as devueltas
+                   COALESCE(SUM(id."cantidaddevolución"), 0) as devueltas,
+                   ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN id."cantidaddevolución" * np.pesoestablecido ELSE 0 END), 1) as kg_devueltas
             FROM "ItemDevolución" id
             JOIN PesosDePiezas pp ON id.códpieza = pp.códpieza
             JOIN NombreDePiezas np ON pp.nombredepiezasid_ = np.id
             WHERE np.códcliente = ?
             GROUP BY id.año ORDER BY id.año
         """, (codigo,)).fetchall()
-        dev_map = {r["año"]: r["devueltas"] for r in dev_rows}
+        dev_map = {r["año"]: dict(r) for r in dev_rows}
 
         anual = []
         total_ent = total_dev = total_rech = 0
         for r in ent_rows:
-            dev = dev_map.get(r["año"], 0)
+            dv = dev_map.get(r["año"], {})
+            dev = dv.get("devueltas", 0)
             ent = r["entregadas"]
             rech = r["rechazadas"]
             total_ent  += ent
@@ -1880,6 +2705,9 @@ def analytics_cliente_detail(codigo: str):
                 "rechazadas": rech,
                 "aprobadas": r["aprobadas"],
                 "devueltas": dev,
+                "kg_entregadas": r["kg_entregadas"] or 0.0,
+                "kg_rechazadas": r["kg_rechazadas"] or 0.0,
+                "kg_devueltas":  dv.get("kg_devueltas", 0.0),
                 "tasa": round(dev / ent * 100, 2) if ent else 0,
             })
 
@@ -1914,6 +2742,17 @@ def analytics_cliente_detail(codigo: str):
             ).fetchall()
             dev_pieza = {r["nombredepiezasid_"]: r["devueltas"] for r in dp}
 
+        # probeta config por pieza
+        probeta_set: set[int] = set()
+        if piezas_rows:
+            ids = tuple(r["pieza_id"] for r in piezas_rows)
+            ph = ",".join("?" * len(ids))
+            pb = conn.execute(
+                f"SELECT pieza_id FROM _piezas_config WHERE pieza_id IN ({ph}) AND pide_probeta_traccion = 1",
+                ids,
+            ).fetchall()
+            probeta_set = {r["pieza_id"] for r in pb}
+
         piezas = []
         for r in piezas_rows:
             ent = r["entregadas"]
@@ -1927,7 +2766,26 @@ def analytics_cliente_detail(codigo: str):
                 "rechazadas": r["rechazadas"],
                 "devueltas": dev,
                 "tasa_devolucion": round(dev / ent * 100, 2) if ent else 0,
+                "pide_probeta_traccion": r["pieza_id"] in probeta_set,
             })
+
+        todas_con_probeta = bool(piezas) and len(probeta_set) == len(piezas)
+
+        mensual_cl = conn.execute("""
+            SELECT strftime('%Y', p.fechapedido) AS año,
+                   CAST(strftime('%m', p.fechapedido) AS INTEGER) AS mes,
+                   COALESCE(SUM(t.cantidadentregada), 0) AS entregadas,
+                   COALESCE(SUM(t.cantidadrechazada), 0) AS rechazadas,
+                   ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadentregada * np.pesoestablecido ELSE 0 END), 1) AS kg_entregadas,
+                   ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadrechazada * np.pesoestablecido ELSE 0 END), 1) AS kg_rechazadas
+            FROM Trabajos t
+            JOIN ItemDetallePedido idp ON t.iditempedido = idp.iditempedido
+            JOIN Pedidos p ON idp.idpedido = p.idpedido
+            LEFT JOIN NombreDePiezas np ON idp.idpieza = np.id
+            WHERE p.códigocliente = ? AND t.cantidadentregada > 0
+              AND p.fechapedido IS NOT NULL
+            GROUP BY año, mes ORDER BY año, mes
+        """, (codigo,)).fetchall()
 
         return {
             "cliente": dict(cl),
@@ -1937,7 +2795,9 @@ def analytics_cliente_detail(codigo: str):
             "tasa_total": round(total_dev / total_ent * 100, 2) if total_ent else 0,
             "n_piezas": len(piezas),
             "anual": anual,
+            "mensual": [dict(r) for r in mensual_cl],
             "piezas": piezas,
+            "todas_con_probeta": todas_con_probeta,
             "raw": _raw(conn, "Clientes", "códigocliente", codigo),
         }
     finally:
@@ -1951,7 +2811,8 @@ def analytics_pieza_detail(pieza_id: int):
         pieza = conn.execute("""
             SELECT id as pieza_id, códcliente as codigo_cliente,
                    códigopiezapuestoporcliente as codigo_pieza,
-                   nombrepieza as nombre
+                   nombrepieza as nombre,
+                   pesoestablecido as peso
             FROM NombreDePiezas WHERE id = ?
         """, (pieza_id,)).fetchone()
         if not pieza:
@@ -2022,11 +2883,39 @@ def analytics_pieza_detail(pieza_id: int):
             "colada":   _inf("InfTécnicaColada"),
         }
 
+        cfg = conn.execute(
+            "SELECT pide_probeta_traccion FROM _piezas_config WHERE pieza_id = ?", (pieza_id,)
+        ).fetchone()
+        pide_probeta = bool(cfg["pide_probeta_traccion"]) if cfg else False
+
+        peso_pz = pieza["peso"] or 0
+        mensual_pz = conn.execute("""
+            SELECT strftime('%Y', p.fechapedido) AS año,
+                   CAST(strftime('%m', p.fechapedido) AS INTEGER) AS mes,
+                   COALESCE(SUM(t.cantidadentregada), 0) AS entregadas,
+                   COALESCE(SUM(t.cantidadrechazada), 0) AS rechazadas
+            FROM Trabajos t
+            JOIN ItemDetallePedido idp ON t.iditempedido = idp.iditempedido
+            JOIN Pedidos p ON idp.idpedido = p.idpedido
+            WHERE idp.idpieza = ? AND t.cantidadentregada > 0
+              AND p.fechapedido IS NOT NULL
+            GROUP BY año, mes ORDER BY año, mes
+        """, (pieza_id,)).fetchall()
+        # kg computed from known peso (single pieza, no JOIN needed)
+        mensual_pz_out = []
+        for r in mensual_pz:
+            d2 = dict(r)
+            d2["kg_entregadas"] = round(d2["entregadas"] * peso_pz, 1) if peso_pz else 0.0
+            d2["kg_rechazadas"] = round(d2["rechazadas"] * peso_pz, 1) if peso_pz else 0.0
+            mensual_pz_out.append(d2)
+
         return {
             "pieza": dict(pieza),
             "anual": anual,
+            "mensual": mensual_pz_out,
             "defectos": defectos,
             "inftecnica": inftecnica,
+            "pide_probeta_traccion": pide_probeta,
             "raw": _raw(conn, "NombreDePiezas", "id", pieza_id),
         }
     finally:
@@ -2128,6 +3017,7 @@ def _est_map(conn: sqlite3.Connection) -> dict:
 @app.get("/api/pedidos")
 def get_pedidos(
     año: Optional[int] = Query(None),
+    meses: Optional[int] = Query(None, ge=1, le=24),
     cliente: Optional[str] = Query(None),
     estado: Optional[str] = Query(None),
     search:    List[str]      = Query(default=[]),
@@ -2140,6 +3030,8 @@ def get_pedidos(
         wp, pa = [], []
         if año:
             wp.append("strftime('%Y', p.fechapedido) = ?"); pa.append(str(año))
+        if meses:
+            wp.append("date(p.fechapedido) >= date('now', ? || ' months')"); pa.append(f"-{meses}")
         if cliente:
             wp.append("p.códigocliente = ?"); pa.append(cliente)
         if estado:
@@ -2241,6 +3133,7 @@ def get_pedido_detail(pedido_id: int):
 @app.get("/api/remitos")
 def get_remitos(
     año: Optional[int] = Query(None),
+    meses: Optional[int] = Query(None, ge=1, le=24),
     cliente: Optional[str] = Query(None),
     search:    List[str]  = Query(default=[]),
     page: int = Query(1, ge=1),
@@ -2251,6 +3144,8 @@ def get_remitos(
         wp, pa = [], []
         if año:
             wp.append("strftime('%Y', r.fecharemito) = ?"); pa.append(str(año))
+        if meses:
+            wp.append("date(r.fecharemito) >= date('now', ? || ' months')"); pa.append(f"-{meses}")
         if cliente:
             wp.append("r.códigocliente = ?"); pa.append(cliente)
         for term in search:
@@ -2722,12 +3617,67 @@ def get_documentos(
 
 # ── Personal ───────────────────────────────────────────────────────────────────
 
-_SECTOR_NAMES = {
-    1: "Producción", 3: "Administración", 6: "Laboratorio",
-    7: "Mantenimiento", 97: "Desvinculado", 99: "Dirección",
-}
 _EXCLUIR_NOMBRES = {"-", "NN", "DbAdministrator", "AgenciaTaller",
                     "AgenciaAdmin", "IRAM", "Batiplane"}
+
+
+def _sector_names(conn) -> dict:
+    rows = conn.execute("SELECT id, nombre FROM _sectores").fetchall()
+    return {r[0]: r[1] for r in rows}
+
+
+# ── Endpoints: Sectores ────────────────────────────────────────────────────────
+
+@app.get("/api/personal/sectores")
+def get_sectores(user: dict = Depends(_get_auth_user)):
+    conn = get_db()
+    try:
+        rows = conn.execute("SELECT id, nombre FROM _sectores ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@app.post("/api/personal/sectores")
+async def post_sector(req: Request, admin: dict = Depends(_require_admin)):
+    body = await req.json()
+    sid  = body.get("id")
+    nombre = str(body.get("nombre") or "").strip()
+    if sid is None or not nombre:
+        raise HTTPException(400, "id y nombre requeridos")
+    conn = get_db()
+    try:
+        conn.execute("INSERT INTO _sectores (id, nombre) VALUES (?,?)", (int(sid), nombre))
+        conn.commit()
+        return {"id": int(sid), "nombre": nombre}
+    finally:
+        conn.close()
+
+
+@app.put("/api/personal/sectores/{sector_id}")
+async def put_sector(sector_id: int, req: Request, admin: dict = Depends(_require_admin)):
+    body = await req.json()
+    nombre = str(body.get("nombre") or "").strip()
+    if not nombre:
+        raise HTTPException(400, "nombre requerido")
+    conn = get_db()
+    try:
+        conn.execute("UPDATE _sectores SET nombre=? WHERE id=?", (nombre, sector_id))
+        conn.commit()
+        return {"id": sector_id, "nombre": nombre}
+    finally:
+        conn.close()
+
+
+@app.delete("/api/personal/sectores/{sector_id}")
+def delete_sector(sector_id: int, admin: dict = Depends(_require_admin)):
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM _sectores WHERE id=?", (sector_id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
 
 
 @app.get("/api/personal")
@@ -2745,15 +3695,18 @@ def get_personal(
         f_desde = fecha_desde.isoformat()
         f_hasta = fecha_hasta.isoformat()
 
-        wdev = "" if desvinculados else 'AND r."códsector" <> 97'
+        wdev = "" if desvinculados else "AND COALESCE(pe.sector, r.codsector) <> 97"
         rows = conn.execute(f"""
-            SELECT r."códigoresponsable"          AS id,
-                   r.apellidoynombreresponsable    AS nombre,
+            SELECT r.codigoresponsable             AS id,
+                   r.apellidoynombre               AS nombre,
                    r.nombre                        AS nombre_propio,
                    r.apellido,
-                   r."códsector"                   AS sector,
+                   COALESCE(pe.sector, r.codsector) AS sector,
                    r.cargo,
                    r.comentarios,
+                   COALESCE(pe.legajo, '')          AS legajo,
+                   COALESCE(pe.apellido, '')         AS ext_apellido,
+                   COALESCE(pe.nombre, '')           AS ext_nombre,
                    COALESCE(SUM(
                        CASE WHEN substr(h.fecha,1,10) BETWEEN ? AND ?
                                  AND h.horastrabajadas > 0
@@ -2771,21 +3724,40 @@ def get_personal(
                    MAX(
                        CASE WHEN h.horastrabajadas > 0
                             THEN substr(h.fecha,1,10) END
-                   ) AS ultimo_registro
-            FROM Responsables r
+                   ) AS ultimo_registro,
+                   COALESCE(aus.aus_enf, 0) AS aus_enf,
+                   COALESCE(aus.aus_fca, 0) AS aus_fca,
+                   COALESCE(aus.aus_fsa, 0) AS aus_fsa,
+                   COALESCE(aus.aus_acc, 0) AS aus_acc
+            FROM _v_responsables r
+            LEFT JOIN _personal_ext pe ON pe.access_id = r.codigoresponsable
             LEFT JOIN HorasPorFecha h
-                   ON h."códigoresponsable" = r."códigoresponsable"
-            WHERE r."códigoresponsable" BETWEEN 1 AND 2000
-              AND r."códsector" NOT IN (0, 99)
-              AND r.apellidoynombreresponsable NOT IN
+                   ON h."códigoresponsable" = r.codigoresponsable
+            LEFT JOIN (
+                SELECT access_id,
+                       SUM(enfermedad)      AS aus_enf,
+                       SUM(falta_con_aviso) AS aus_fca,
+                       SUM(falta_sin_aviso) AS aus_fsa,
+                       SUM(accidente)       AS aus_acc
+                FROM _personal_ausentismo
+                WHERE fecha LIKE strftime('%Y','now') || '-%'
+                GROUP BY access_id
+            ) aus ON aus.access_id = r.codigoresponsable
+            WHERE (r.codigoresponsable BETWEEN 1 AND 2000 OR pe.access_id IS NOT NULL)
+              AND COALESCE(pe.sector, r.codsector) NOT IN (0, 99)
+              AND r.apellidoynombre NOT IN
                   ('-','NN','DbAdministrator','AgenciaTaller',
                    'AgenciaAdmin','IRAM','Batiplane')
               {wdev}
-            GROUP BY r."códigoresponsable"
-            ORDER BY hs_periodo DESC, r.apellidoynombreresponsable
+            GROUP BY r.codigoresponsable
+            ORDER BY hs_periodo DESC, r.apellidoynombre
         """, (f_desde, f_hasta, f_desde, f_hasta)).fetchall()
+        snames = _sector_names(conn)
+        aus_anio = fecha_hasta.year
         return [
-            {**dict(r), "sector_nombre": _SECTOR_NAMES.get(r["sector"], str(r["sector"]))}
+            {**dict(r),
+             "sector_nombre": snames.get(r["sector"], str(r["sector"])),
+             "aus_anio": aus_anio}
             for r in rows
         ]
     finally:
@@ -2797,14 +3769,20 @@ def get_personal_detail(persona_id: int, periodos: int = Query(default=36)):
     conn = get_db()
     try:
         p = conn.execute("""
-            SELECT "códigoresponsable" AS id,
-                   apellidoynombreresponsable AS nombre,
-                   nombre AS nombre_propio,
-                   apellido,
-                   "códsector" AS sector,
-                   cargo,
-                   comentarios
-            FROM Responsables WHERE "códigoresponsable" = ?
+            SELECT r.codigoresponsable AS id,
+                   r.apellidoynombre  AS nombre,
+                   r.nombre           AS nombre_propio,
+                   r.apellido,
+                   COALESCE(pe.sector, r.codsector) AS sector,
+                   r.cargo,
+                   r.comentarios,
+                   COALESCE(pe.legajo, '')   AS legajo,
+                   COALESCE(pe.apellido, '') AS ext_apellido,
+                   COALESCE(pe.nombre, '')   AS ext_nombre,
+                   pe.sector                 AS sector_override
+            FROM _v_responsables r
+            LEFT JOIN _personal_ext pe ON pe.access_id = r.codigoresponsable
+            WHERE r.codigoresponsable = ?
         """, (persona_id,)).fetchone()
         if not p:
             raise HTTPException(404, f"Persona {persona_id} no encontrada")
@@ -2822,8 +3800,9 @@ def get_personal_detail(persona_id: int, periodos: int = Query(default=36)):
         total_hs = sum(h["hs"] for h in historial)
         avg_hs = round(total_hs / len(historial), 1) if historial else 0
 
+        snames = _sector_names(conn)
         persona = dict(p)
-        persona["sector_nombre"] = _SECTOR_NAMES.get(p["sector"], str(p["sector"]))
+        persona["sector_nombre"] = snames.get(p["sector"], str(p["sector"]))
 
         return {
             "persona":         persona,
@@ -2832,6 +3811,166 @@ def get_personal_detail(persona_id: int, periodos: int = Query(default=36)):
             "avg_hs_periodo":  avg_hs,
             "n_periodos":      len(historial),
         }
+    finally:
+        conn.close()
+
+
+@app.put("/api/personal/{persona_id}/ext")
+async def put_personal_ext(persona_id: int, req: Request, admin: dict = Depends(_require_admin)):
+    body = await req.json()
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO _personal_ext (access_id, legajo, apellido, nombre) VALUES (?,?,?,?) "
+            "ON CONFLICT(access_id) DO UPDATE SET legajo=excluded.legajo, apellido=excluded.apellido, nombre=excluded.nombre",
+            (persona_id, str(body.get("legajo") or ""), str(body.get("apellido") or ""), str(body.get("nombre") or ""))
+        )
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@app.put("/api/personal/{persona_id}/sector")
+async def put_personal_sector(persona_id: int, req: Request, admin: dict = Depends(_require_admin)):
+    body = await req.json()
+    sector_id = body.get("sector_id")
+    conn = get_db()
+    try:
+        if sector_id is None:
+            # Quitar override: volver al sector del Access
+            conn.execute(
+                "UPDATE _personal_ext SET sector=NULL WHERE access_id=?",
+                (persona_id,)
+            )
+        else:
+            # Verificar que el sector existe
+            exists = conn.execute("SELECT 1 FROM _sectores WHERE id=?", (int(sector_id),)).fetchone()
+            if not exists:
+                raise HTTPException(404, f"Sector {sector_id} no existe")
+            # Upsert _personal_ext para asegurarse que la fila existe
+            conn.execute(
+                "INSERT INTO _personal_ext (access_id, sector) VALUES (?,?) "
+                "ON CONFLICT(access_id) DO UPDATE SET sector=excluded.sector",
+                (persona_id, int(sector_id))
+            )
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+def _ausen_calc(r: dict) -> dict:
+    """Agrega totales y porcentajes calculados a un registro de ausentismo."""
+    dl  = r.get("dias_laborables") or 0
+    enf = r.get("enfermedad")      or 0
+    fca = r.get("falta_con_aviso") or 0
+    fsa = r.get("falta_sin_aviso") or 0
+    acc = r.get("accidente")       or 0
+    vac = r.get("vacaciones")      or 0
+    total_real  = enf + fca + fsa + acc
+    total_pond  = enf * 0.5 + fca * 0.5 + fsa * 1.0
+    pct_real    = round(total_real / dl * 100, 2) if dl else 0
+    pct_pond    = round(total_pond / dl * 100, 2) if dl else 0
+    return {**r,
+            "total_faltas_real":      round(total_real, 2),
+            "total_faltas_ponderado": round(total_pond, 2),
+            "pct_faltas_real":        pct_real,
+            "pct_faltas_ponderado":   pct_pond}
+
+
+@app.get("/api/personal/{persona_id}/ausentismo")
+def get_ausentismo(persona_id: int, user: dict = Depends(_get_auth_user)):
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM _personal_ausentismo WHERE access_id=? ORDER BY fecha",
+            (persona_id,)
+        ).fetchall()
+        return [_ausen_calc(dict(r)) for r in rows]
+    finally:
+        conn.close()
+
+
+@app.post("/api/personal/{persona_id}/ausentismo")
+async def post_ausentismo(persona_id: int, req: Request, user: dict = Depends(_get_auth_user)):
+    body = await req.json()
+    fecha = str(body.get("fecha") or "").strip()
+    if not fecha:
+        raise HTTPException(400, "fecha requerida (YYYY-MM)")
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO _personal_ausentismo "
+            "(access_id,fecha,dias_laborables,enfermedad,falta_con_aviso,falta_sin_aviso,"
+            "accidente,vacaciones,llegada_tarde,retiro_anticipado) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (persona_id, fecha,
+             int(body.get("dias_laborables") or 0),
+             float(body.get("enfermedad") or 0),
+             float(body.get("falta_con_aviso") or 0),
+             float(body.get("falta_sin_aviso") or 0),
+             float(body.get("accidente") or 0),
+             float(body.get("vacaciones") or 0),
+             int(body.get("llegada_tarde") or 0),
+             int(body.get("retiro_anticipado") or 0))
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM _personal_ausentismo WHERE access_id=? AND fecha=?",
+            (persona_id, fecha)
+        ).fetchone()
+        return _ausen_calc(dict(row))
+    finally:
+        conn.close()
+
+
+@app.put("/api/personal/{persona_id}/ausentismo/{fecha}")
+async def put_ausentismo(persona_id: int, fecha: str, req: Request, user: dict = Depends(_get_auth_user)):
+    body = await req.json()
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT id FROM _personal_ausentismo WHERE access_id=? AND fecha=?",
+            (persona_id, fecha)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Registro no encontrado")
+        conn.execute(
+            "UPDATE _personal_ausentismo SET "
+            "dias_laborables=?,enfermedad=?,falta_con_aviso=?,falta_sin_aviso=?,"
+            "accidente=?,vacaciones=?,llegada_tarde=?,retiro_anticipado=? "
+            "WHERE access_id=? AND fecha=?",
+            (int(body.get("dias_laborables") or 0),
+             float(body.get("enfermedad") or 0),
+             float(body.get("falta_con_aviso") or 0),
+             float(body.get("falta_sin_aviso") or 0),
+             float(body.get("accidente") or 0),
+             float(body.get("vacaciones") or 0),
+             int(body.get("llegada_tarde") or 0),
+             int(body.get("retiro_anticipado") or 0),
+             persona_id, fecha)
+        )
+        conn.commit()
+        updated = conn.execute(
+            "SELECT * FROM _personal_ausentismo WHERE access_id=? AND fecha=?",
+            (persona_id, fecha)
+        ).fetchone()
+        return _ausen_calc(dict(updated))
+    finally:
+        conn.close()
+
+
+@app.delete("/api/personal/{persona_id}/ausentismo/{fecha}")
+def delete_ausentismo(persona_id: int, fecha: str, user: dict = Depends(_get_auth_user)):
+    conn = get_db()
+    try:
+        conn.execute(
+            "DELETE FROM _personal_ausentismo WHERE access_id=? AND fecha=?",
+            (persona_id, fecha)
+        )
+        conn.commit()
+        return {"ok": True}
     finally:
         conn.close()
 
@@ -3263,6 +4402,7 @@ def get_trabajos_meta():
 @app.get("/api/trabajos")
 def get_trabajos(
     año: Optional[int] = Query(None),
+    meses: Optional[int] = Query(None, ge=1, le=24),
     cliente: Optional[str] = Query(None),
     estado: Optional[str] = Query(None),
     search:  List[str]     = Query(default=[]),
@@ -3287,6 +4427,9 @@ def get_trabajos(
         if año:
             where_parts.append("strftime('%Y', p.fechapedido) = ?")
             params.append(str(año))
+        if meses:
+            where_parts.append("date(p.fechapedido) >= date('now', ? || ' months')")
+            params.append(f"-{meses}")
         if cliente:
             where_parts.append("p.códigocliente = ?")
             params.append(cliente)
@@ -3567,7 +4710,7 @@ def serve_index():
     index = FRONTEND / "index.html"
     if not index.exists():
         return JSONResponse({"error": "Frontend no encontrado"}, 404)
-    return FileResponse(index)
+    return FileResponse(index, headers={"Cache-Control": "no-store"})
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -3651,6 +4794,874 @@ def _free_port(port: int) -> None:
             time.sleep(0.1)
     except Exception as e:
         log.warning("Could not free port %d: %s", port, e)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MÓDULO PROVEEDORES ISO 9001
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import unicodedata as _uc
+from fastapi import UploadFile, File, Form
+
+# ── Business logic (portado de business_logic.py de provedores pyton) ─────────
+
+def _pv_normalize_text(value):
+    text = str(value or "").strip().lower()
+    text = "".join(ch for ch in _uc.normalize("NFD", text) if _uc.category(ch) != "Mn")
+    return " ".join(text.replace(".", "").split())
+
+def _pv_normalize_unit(value):
+    raw = str(value or "").strip()
+    lower = raw.lower()
+    if lower in ("kg", "k", "kilo", "kilos"):      return "Kg"
+    if lower in ("tn", "t", "ton", "tonelada", "toneladas"): return "Tn"
+    if lower in ("un", "u", "unidad", "unidades"):  return "Un"
+    if lower in ("l", "lt", "lts", "litro", "litros"): return "L"
+    return raw or "Kg"
+
+def _pv_guess_unit(product_name):
+    name = product_name.lower()
+    if any(w in name for w in ("diluyente","alcohol","liquido","líquido","aceite")): return "L"
+    if any(w in name for w in ("probeta","probetero","cuchara","manguito","kalpur","noyo","pieza")): return "Un"
+    return "Kg"
+
+def _pv_safe_file(value):
+    text = _pv_normalize_text(value).replace(" ", "_")
+    return "".join(ch for ch in text if ch.isalnum() or ch in ("_","-")) or "sin_dato"
+
+def _pv_split_multi(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    parts = []
+    for chunk in raw.replace("\n", ";").split(";"):
+        text = chunk.strip()
+        if text and text not in parts:
+            parts.append(text)
+    return parts
+
+def _pv_parse_num(value):
+    text = str(value or "").strip().replace(",", ".")
+    if not text or text == "-":
+        return 0.0
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+def _pv_parse_date(value):
+    from datetime import date as _date, timedelta as _td
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+        try:
+            from datetime import datetime as _dt
+            return _dt.strptime(text, fmt).date()
+        except ValueError:
+            pass
+    try:
+        serial = float(text)
+        return _date(1899, 12, 30) + _td(days=serial)
+    except ValueError:
+        return None
+
+def _pv_fmt_num(value):
+    if abs(value - int(value)) < 0.000001:
+        return str(int(value))
+    return ("%.2f" % value).rstrip("0").rstrip(".")
+
+def _pv_recalc_quality(provider_rows, psp_rows, today=None):
+    """Recalcula nivel de calidad. provider_rows y psp_rows son dicts."""
+    from datetime import date as _date, timedelta as _td
+    today = today or _date.today()
+    start = today - _td(days=365)
+    next_review = _date(today.year + 1, 1, 1)
+    cond_review = next_review - _td(days=182)
+    updated = []
+    for prov in provider_rows:
+        name = prov["nombre"].strip()
+        groups = set(_pv_split_multi(prov.get("grupos", "")))
+        received = observed = test_qty = 0.0
+        for psp in psp_rows:
+            if _pv_normalize_text(psp["proveedor"]) != _pv_normalize_text(name):
+                continue
+            if groups and psp.get("grupo","") not in groups:
+                continue
+            psp_date = _pv_parse_date(psp["fecha"])
+            if not psp_date or psp_date < start or psp_date > today:
+                continue
+            rec = _pv_parse_num(psp["cant_recibida"])
+            obs = sum(_pv_parse_num(v) for v in _pv_split_multi(psp.get("cant_observada","")))
+            mot = _pv_normalize_text(psp.get("motivo",""))
+            received += rec
+            observed += obs
+            if mot == "prueba":
+                test_qty += obs
+        row = dict(prov)
+        row["cant_recibida"]  = _pv_fmt_num(received)
+        row["cant_observada"] = _pv_fmt_num(observed)
+        row["cant_prueba"]    = _pv_fmt_num(test_qty)
+        if received == test_qty and received != 0:
+            row["nivel"] = "A PRUEBA"
+            row["valoracion"] = "1"
+            row["vencimiento"] = "-"
+        elif received == 0:
+            row["nivel"] = "sin datos en el ultimo año"
+            row["valoracion"] = "#DIV/0!"
+            row["vencimiento"] = "-"
+        else:
+            val = (received - observed) / received
+            pct = _pv_fmt_num(val * 100)
+            row["valoracion"] = _pv_fmt_num(val)
+            if val > 0.7:
+                row["nivel"] = "APROBADO %s%%" % pct
+                row["vencimiento"] = next_review.strftime("%d/%m/%Y")
+            elif val > 0.4:
+                row["nivel"] = "CONDICIONAL %s%%" % pct
+                row["vencimiento"] = cond_review.strftime("%d/%m/%Y")
+            else:
+                row["nivel"] = "RECHAZADO %s%%" % pct
+                row["vencimiento"] = "-"
+        updated.append(row)
+    return updated
+
+
+def _pv_persist_quality(conn, updated_providers):
+    """Escribe los campos calculados de calidad en _prov_proveedores."""
+    for p in updated_providers:
+        conn.execute(
+            "UPDATE _prov_proveedores SET nivel=?, valoracion=?, cant_recibida=?, "
+            "cant_observada=?, cant_prueba=?, vencimiento=? WHERE id=?",
+            (p["nivel"], p["valoracion"], p["cant_recibida"],
+             p["cant_observada"], p["cant_prueba"], p["vencimiento"], p["id"])
+        )
+
+
+def _pv_require_prov(user: dict = Depends(_get_auth_user)) -> dict:
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        secs = [r[0] for r in conn.execute(
+            "SELECT seccion FROM _permisos WHERE legajo=?", (user["legajo"],)
+        ).fetchall()]
+    finally:
+        conn.close()
+    if "proveedores" not in secs and not user["is_admin"]:
+        raise HTTPException(403, "Sin permiso para módulo Proveedores")
+    return user
+
+
+# ── Helpers compartidos ────────────────────────────────────────────────────────
+
+def _pv_all_providers(conn):
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM _prov_proveedores ORDER BY nombre"
+    ).fetchall()]
+
+def _pv_all_psps(conn):
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM _prov_psp ORDER BY fecha DESC"
+    ).fetchall()]
+
+
+# ── Grupos ─────────────────────────────────────────────────────────────────────
+
+@app.get("/api/prov/grupos")
+def prov_get_grupos(user: dict = Depends(_pv_require_prov)):
+    conn = get_db()
+    try:
+        return [dict(r) for r in conn.execute(
+            "SELECT id, nombre FROM _prov_grupos ORDER BY CAST(id AS INTEGER)"
+        ).fetchall()]
+    finally:
+        conn.close()
+
+
+@app.post("/api/prov/grupos")
+async def prov_create_grupo(req: Request, user: dict = Depends(_pv_require_prov)):
+    body = await req.json()
+    gid  = str(body.get("id","")).strip()
+    nombre = str(body.get("nombre","")).strip()
+    if not gid or not nombre:
+        raise HTTPException(400, "id y nombre son requeridos")
+    conn = get_db()
+    try:
+        conn.execute("INSERT INTO _prov_grupos (id, nombre) VALUES (?,?)", (gid, nombre))
+        conn.commit()
+        return {"id": gid, "nombre": nombre}
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, f"Ya existe un grupo con id {gid}")
+    finally:
+        conn.close()
+
+
+@app.put("/api/prov/grupos/{gid}")
+async def prov_update_grupo(gid: str, req: Request, user: dict = Depends(_pv_require_prov)):
+    body = await req.json()
+    nombre = str(body.get("nombre","")).strip()
+    if not nombre:
+        raise HTTPException(400, "nombre es requerido")
+    conn = get_db()
+    try:
+        if not conn.execute("SELECT id FROM _prov_grupos WHERE id=?", (gid,)).fetchone():
+            raise HTTPException(404, "Grupo no encontrado")
+        conn.execute("UPDATE _prov_grupos SET nombre=? WHERE id=?", (nombre, gid))
+        conn.commit()
+        return {"id": gid, "nombre": nombre}
+    finally:
+        conn.close()
+
+
+@app.delete("/api/prov/grupos/{gid}")
+def prov_delete_grupo(gid: str, admin: dict = Depends(_require_admin)):
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM _prov_grupos WHERE id=?", (gid,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+# ── Unidades ───────────────────────────────────────────────────────────────────
+
+@app.get("/api/prov/unidades")
+def prov_get_unidades(user: dict = Depends(_pv_require_prov)):
+    conn = get_db()
+    try:
+        return [dict(r) for r in conn.execute(
+            "SELECT id, descripcion FROM _prov_unidades ORDER BY id"
+        ).fetchall()]
+    finally:
+        conn.close()
+
+
+@app.post("/api/prov/unidades")
+async def prov_create_unidad(req: Request, user: dict = Depends(_pv_require_prov)):
+    body = await req.json()
+    uid  = _pv_normalize_unit(str(body.get("id","")).strip())
+    desc = str(body.get("descripcion","")).strip()
+    if not uid:
+        raise HTTPException(400, "id es requerido")
+    conn = get_db()
+    try:
+        conn.execute("INSERT INTO _prov_unidades (id, descripcion) VALUES (?,?)", (uid, desc))
+        conn.commit()
+        return {"id": uid, "descripcion": desc}
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, f"Ya existe la unidad {uid}")
+    finally:
+        conn.close()
+
+
+@app.delete("/api/prov/unidades/{uid}")
+def prov_delete_unidad(uid: str, admin: dict = Depends(_require_admin)):
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM _prov_unidades WHERE id=?", (uid,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+# ── Proveedores ────────────────────────────────────────────────────────────────
+
+@app.get("/api/prov/proveedores")
+def prov_get_proveedores(
+    eval_date: Optional[str] = Query(None),
+    recalc: bool = Query(False),
+    user: dict = Depends(_pv_require_prov),
+):
+    conn = get_db()
+    try:
+        providers = _pv_all_providers(conn)
+        if recalc:
+            psps = _pv_all_psps(conn)
+            today = None
+            if eval_date:
+                try:
+                    from datetime import date as _date
+                    today = _date.fromisoformat(eval_date)
+                except ValueError:
+                    pass
+            updated = _pv_recalc_quality(providers, psps, today)
+            # Persist only if using today's date (real recalc)
+            if not eval_date:
+                _pv_persist_quality(conn, updated)
+                conn.commit()
+            return updated
+        return providers
+    finally:
+        conn.close()
+
+
+@app.post("/api/prov/proveedores")
+async def prov_create_proveedor(req: Request, user: dict = Depends(_pv_require_prov)):
+    body = await req.json()
+    nombre = str(body.get("nombre","")).strip()
+    if not nombre:
+        raise HTTPException(400, "nombre es requerido")
+    conn = get_db()
+    try:
+        cur = conn.execute(
+            "INSERT INTO _prov_proveedores (nombre, rubros, grupos, observaciones) VALUES (?,?,?,?)",
+            (nombre,
+             str(body.get("rubros","")),
+             str(body.get("grupos","")),
+             str(body.get("observaciones","")))
+        )
+        conn.commit()
+        return {"id": cur.lastrowid, "nombre": nombre}
+    finally:
+        conn.close()
+
+
+@app.put("/api/prov/proveedores/{pid}")
+async def prov_update_proveedor(pid: int, req: Request, user: dict = Depends(_pv_require_prov)):
+    body = await req.json()
+    conn = get_db()
+    try:
+        if not conn.execute("SELECT id FROM _prov_proveedores WHERE id=?", (pid,)).fetchone():
+            raise HTTPException(404, "Proveedor no encontrado")
+        fields = {k: body[k] for k in ("nombre","rubros","grupos","observaciones") if k in body}
+        if not fields:
+            raise HTTPException(400, "Sin campos para actualizar")
+        set_clause = ", ".join(f"{k}=?" for k in fields)
+        conn.execute(f"UPDATE _prov_proveedores SET {set_clause} WHERE id=?",
+                     list(fields.values()) + [pid])
+        conn.commit()
+        return dict(conn.execute("SELECT * FROM _prov_proveedores WHERE id=?", (pid,)).fetchone())
+    finally:
+        conn.close()
+
+
+@app.delete("/api/prov/proveedores/{pid}")
+def prov_delete_proveedor(pid: int, admin: dict = Depends(_require_admin)):
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM _prov_proveedores WHERE id=?", (pid,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@app.get("/api/prov/proveedores/print")
+def prov_print_proveedores(
+    eval_date: Optional[str] = Query(None),
+    solo_aprobados: bool = Query(False),
+    user: dict = Depends(_pv_require_prov),
+):
+    conn = get_db()
+    try:
+        providers = _pv_all_providers(conn)
+        psps      = _pv_all_psps(conn)
+    finally:
+        conn.close()
+    today = None
+    if eval_date:
+        try:
+            from datetime import date as _date
+            today = _date.fromisoformat(eval_date)
+        except ValueError:
+            pass
+    rows = _pv_recalc_quality(providers, psps, today)
+    if solo_aprobados:
+        rows = [r for r in rows if str(r.get("nivel","")).upper().startswith("APROBADO")]
+    from datetime import date as _date
+    eval_str = (today or _date.today()).strftime("%d/%m/%Y")
+
+    def _nivel_color(nivel):
+        n = nivel.lower()
+        if "aprobado" in n:
+            val_part = nivel.replace("APROBADO","").replace("%","").strip()
+            try:
+                if float(val_part) >= 100:
+                    return "#2e7d32", "#e8f5e9"  # badge, row
+            except Exception:
+                pass
+            return "#1b5e20", "#f9fbe7"
+        if "condicional" in n: return "#0d47a1", "#e3f2fd"
+        if "rechazado"   in n: return "#b71c1c", "#ffebee"
+        return "#424242", "#f5f5f5"
+
+    cols = ["nombre","rubros","nivel","vencimiento","cant_recibida","cant_observada","cant_prueba","observaciones"]
+    labels = ["Proveedor","Rubro","Nivel de calidad","Próx. revisión","Cant. recibida","Cant. observada","Cant. prueba","Observaciones"]
+
+    rows_html = ""
+    for r in rows:
+        badge_col, row_col = _nivel_color(r.get("nivel",""))
+        cells = ""
+        for i, c in enumerate(cols):
+            val = r.get(c,"")
+            if c == "nivel":
+                cells += f'<td><span style="background:{badge_col};color:#fff;padding:2px 8px;border-radius:3px;font-size:0.85em">{val}</span></td>'
+            else:
+                cells += f"<td>{val}</td>"
+        rows_html += f'<tr style="background:{row_col}">{cells}</tr>\n'
+
+    html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Proveedores — {eval_str}</title>
+<style>
+@page{{size:A4 landscape;margin:12mm}}
+*{{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important;font-family:Arial,sans-serif;font-size:11px}}
+body{{margin:0;padding:0;background:#fff}}
+.hdr{{background:#263238;color:#fff;padding:8px 12px;margin-bottom:0;border-bottom:4px solid #c62828}}
+.hdr h1{{margin:0;font-size:16px}}
+.hdr p{{margin:2px 0;font-size:10px;opacity:.8}}
+table{{width:100%;border-collapse:collapse}}
+th{{background:#37474f;color:#fff;padding:4px 6px;text-align:left}}
+td{{padding:3px 6px;border-bottom:1px solid #e0e0e0;vertical-align:top}}
+@media print{{*{{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}}}}
+</style></head><body>
+<div class="hdr"><h1>Listado de Proveedores — Nivel de Calidad</h1>
+<p>Período evaluado al: {eval_str} &nbsp;|&nbsp; Generado: {_date.today().strftime("%d/%m/%Y")}{" &nbsp;|&nbsp; Solo aprobados" if solo_aprobados else ""}</p></div>
+<table><thead><tr>{''.join(f"<th>{l}</th>" for l in labels)}</tr></thead>
+<tbody>{rows_html}</tbody></table>
+</body></html>"""
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(html)
+
+
+# ── Productos ──────────────────────────────────────────────────────────────────
+
+@app.get("/api/prov/productos")
+def prov_get_productos(
+    proveedor_id: Optional[int] = Query(None),
+    grupo: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    user: dict = Depends(_pv_require_prov),
+):
+    conn = get_db()
+    try:
+        q = "SELECT * FROM _prov_productos WHERE 1=1"
+        params: list = []
+        if proveedor_id:
+            q += " AND proveedor_id=?"
+            params.append(proveedor_id)
+        if grupo:
+            q += " AND grupo=?"
+            params.append(grupo)
+        if search:
+            q += " AND (nombre LIKE ? OR proveedor_nombre LIKE ? OR grupo LIKE ?)"
+            s = f"%{search}%"
+            params += [s, s, s]
+        q += " ORDER BY nombre"
+        return [dict(r) for r in conn.execute(q, params).fetchall()]
+    finally:
+        conn.close()
+
+
+@app.post("/api/prov/productos")
+async def prov_create_producto(req: Request, user: dict = Depends(_pv_require_prov)):
+    body = await req.json()
+    nombre = str(body.get("nombre","")).strip()
+    if not nombre:
+        raise HTTPException(400, "nombre es requerido")
+    conn = get_db()
+    try:
+        cur = conn.execute(
+            "INSERT INTO _prov_productos (nombre,descripcion,rubro,grupo,proveedor_id,"
+            "proveedor_nombre,cantidad_ref,etp,critico,unidad) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (nombre,
+             str(body.get("descripcion","")),
+             str(body.get("rubro","")),
+             str(body.get("grupo","")),
+             body.get("proveedor_id"),
+             str(body.get("proveedor_nombre","")),
+             str(body.get("cantidad_ref","")),
+             str(body.get("etp","")),
+             1 if body.get("critico") else 0,
+             _pv_normalize_unit(str(body.get("unidad","Kg"))))
+        )
+        conn.commit()
+        return dict(conn.execute("SELECT * FROM _prov_productos WHERE id=?", (cur.lastrowid,)).fetchone())
+    finally:
+        conn.close()
+
+
+@app.put("/api/prov/productos/{pid}")
+async def prov_update_producto(pid: int, req: Request, user: dict = Depends(_pv_require_prov)):
+    body = await req.json()
+    conn = get_db()
+    try:
+        if not conn.execute("SELECT id FROM _prov_productos WHERE id=?", (pid,)).fetchone():
+            raise HTTPException(404, "Producto no encontrado")
+        allowed = ("nombre","descripcion","rubro","grupo","proveedor_id",
+                   "proveedor_nombre","cantidad_ref","etp","critico","unidad")
+        fields = {k: body[k] for k in allowed if k in body}
+        if "unidad" in fields:
+            fields["unidad"] = _pv_normalize_unit(str(fields["unidad"]))
+        if "critico" in fields:
+            fields["critico"] = 1 if fields["critico"] else 0
+        if not fields:
+            raise HTTPException(400, "Sin campos para actualizar")
+        set_clause = ", ".join(f"{k}=?" for k in fields)
+        conn.execute(f"UPDATE _prov_productos SET {set_clause} WHERE id=?",
+                     list(fields.values()) + [pid])
+        conn.commit()
+        return dict(conn.execute("SELECT * FROM _prov_productos WHERE id=?", (pid,)).fetchone())
+    finally:
+        conn.close()
+
+
+@app.delete("/api/prov/productos/{pid}")
+def prov_delete_producto(pid: int, admin: dict = Depends(_require_admin)):
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM _prov_productos WHERE id=?", (pid,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+# ── ETP ────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/prov/etp")
+def prov_get_etp(user: dict = Depends(_pv_require_prov)):
+    conn = get_db()
+    try:
+        return [dict(r) for r in conn.execute(
+            "SELECT codigo,producto,revision,estado,detalle,pdf_path FROM _prov_etp ORDER BY codigo"
+        ).fetchall()]
+    finally:
+        conn.close()
+
+
+@app.post("/api/prov/etp")
+async def prov_create_etp(req: Request, user: dict = Depends(_pv_require_prov)):
+    body = await req.json()
+    codigo = str(body.get("codigo","")).strip()
+    if not codigo:
+        raise HTTPException(400, "codigo es requerido")
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO _prov_etp (codigo,producto,revision,estado,detalle,pdf_path) VALUES (?,?,?,?,?,?)",
+            (codigo,
+             str(body.get("producto","")),
+             str(body.get("revision","")),
+             str(body.get("estado","Vigente")),
+             str(body.get("detalle","")),
+             str(body.get("pdf_path","")))
+        )
+        conn.commit()
+        return dict(conn.execute("SELECT * FROM _prov_etp WHERE codigo=?", (codigo,)).fetchone())
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, f"Ya existe ETP {codigo}")
+    finally:
+        conn.close()
+
+
+@app.put("/api/prov/etp/{codigo}")
+async def prov_update_etp(codigo: str, req: Request, user: dict = Depends(_pv_require_prov)):
+    body = await req.json()
+    conn = get_db()
+    try:
+        if not conn.execute("SELECT codigo FROM _prov_etp WHERE codigo=?", (codigo,)).fetchone():
+            raise HTTPException(404, "ETP no encontrada")
+        allowed = ("producto","revision","estado","detalle","pdf_path")
+        fields = {k: body[k] for k in allowed if k in body}
+        if not fields:
+            raise HTTPException(400, "Sin campos para actualizar")
+        set_clause = ", ".join(f"{k}=?" for k in fields)
+        conn.execute(f"UPDATE _prov_etp SET {set_clause} WHERE codigo=?",
+                     list(fields.values()) + [codigo])
+        conn.commit()
+        return dict(conn.execute("SELECT * FROM _prov_etp WHERE codigo=?", (codigo,)).fetchone())
+    finally:
+        conn.close()
+
+
+@app.delete("/api/prov/etp/{codigo}")
+def prov_delete_etp(codigo: str, admin: dict = Depends(_require_admin)):
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM _prov_etp WHERE codigo=?", (codigo,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@app.get("/api/prov/etp/{codigo}/pdf")
+def prov_etp_pdf(codigo: str, user: dict = Depends(_pv_require_prov)):
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT pdf_path FROM _prov_etp WHERE codigo=?", (codigo,)).fetchone()
+    finally:
+        conn.close()
+    if not row or not row["pdf_path"]:
+        raise HTTPException(404, "PDF no disponible")
+    path = Path(row["pdf_path"])
+    if not path.is_absolute():
+        path = ROOT / "data" / row["pdf_path"]
+    if not path.exists():
+        raise HTTPException(404, "Archivo PDF no encontrado en disco")
+    return FileResponse(str(path), media_type="application/pdf",
+                        filename=path.name)
+
+
+# ── PSP ────────────────────────────────────────────────────────────────────────
+
+def _pv_recalc_and_save(conn):
+    """Recalcula y persiste niveles de todos los proveedores."""
+    providers = _pv_all_providers(conn)
+    psps      = _pv_all_psps(conn)
+    updated   = _pv_recalc_quality(providers, psps)
+    _pv_persist_quality(conn, updated)
+
+
+@app.get("/api/prov/psp")
+def prov_get_psp(
+    proveedor:    Optional[str] = Query(None),
+    producto:     Optional[str] = Query(None),
+    fecha_desde:  Optional[str] = Query(None),
+    fecha_hasta:  Optional[str] = Query(None),
+    limit:        int           = Query(500),
+    user: dict = Depends(_pv_require_prov),
+):
+    conn = get_db()
+    try:
+        q = "SELECT * FROM _prov_psp WHERE 1=1"
+        params: list = []
+        if proveedor:
+            q += " AND lower(proveedor) LIKE lower(?)"
+            params.append(f"%{proveedor}%")
+        if producto:
+            q += " AND lower(producto) LIKE lower(?)"
+            params.append(f"%{producto}%")
+        if fecha_desde:
+            q += " AND fecha >= ?"
+            params.append(fecha_desde)
+        if fecha_hasta:
+            q += " AND fecha <= ?"
+            params.append(fecha_hasta)
+        q += " ORDER BY fecha DESC, id DESC LIMIT ?"
+        params.append(limit)
+        return [dict(r) for r in conn.execute(q, params).fetchall()]
+    finally:
+        conn.close()
+
+
+@app.get("/api/prov/psp/{psp_id}")
+def prov_get_psp_one(psp_id: int, user: dict = Depends(_pv_require_prov)):
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT * FROM _prov_psp WHERE id=?", (psp_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Registro PSP no encontrado")
+        return dict(row)
+    finally:
+        conn.close()
+
+
+@app.post("/api/prov/psp")
+async def prov_create_psp(req: Request, user: dict = Depends(_pv_require_prov)):
+    body = await req.json()
+    producto  = str(body.get("producto","")).strip()
+    proveedor = str(body.get("proveedor","")).strip()
+    fecha     = str(body.get("fecha","")).strip()
+    if not producto or not proveedor or not fecha:
+        raise HTTPException(400, "producto, proveedor y fecha son requeridos")
+    conn = get_db()
+    try:
+        cur = conn.execute(
+            "INSERT INTO _prov_psp (producto,proveedor,grupo,etp,fecha,cant_recibida,unidad,"
+            "cant_observada,motivo,tiene_remito,control_visual,tiene_informe,"
+            "partida,remito,observaciones,archivo_informe,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (producto, proveedor,
+             str(body.get("grupo","")),
+             str(body.get("etp","")),
+             fecha,
+             _pv_parse_num(body.get("cant_recibida",0)),
+             _pv_normalize_unit(str(body.get("unidad","Kg"))),
+             str(body.get("cant_observada","-")),
+             str(body.get("motivo","-")),
+             1 if body.get("tiene_remito", True) else 0,
+             1 if body.get("control_visual", True) else 0,
+             1 if body.get("tiene_informe", False) else 0,
+             str(body.get("partida","")),
+             str(body.get("remito","")),
+             str(body.get("observaciones","")),
+             "",
+             datetime.now().isoformat())
+        )
+        new_id = cur.lastrowid
+        _pv_recalc_and_save(conn)
+        conn.commit()
+        return dict(conn.execute("SELECT * FROM _prov_psp WHERE id=?", (new_id,)).fetchone())
+    finally:
+        conn.close()
+
+
+@app.put("/api/prov/psp/{psp_id}")
+async def prov_update_psp(psp_id: int, req: Request, user: dict = Depends(_pv_require_prov)):
+    body = await req.json()
+    conn = get_db()
+    try:
+        if not conn.execute("SELECT id FROM _prov_psp WHERE id=?", (psp_id,)).fetchone():
+            raise HTTPException(404, "Registro PSP no encontrado")
+        allowed = ("producto","proveedor","grupo","etp","fecha","cant_recibida","unidad",
+                   "cant_observada","motivo","tiene_remito","control_visual","tiene_informe",
+                   "partida","remito","observaciones")
+        fields: dict = {}
+        for k in allowed:
+            if k not in body:
+                continue
+            if k == "unidad":
+                fields[k] = _pv_normalize_unit(str(body[k]))
+            elif k == "cant_recibida":
+                fields[k] = _pv_parse_num(body[k])
+            elif k in ("tiene_remito","control_visual","tiene_informe"):
+                fields[k] = 1 if body[k] else 0
+            else:
+                fields[k] = str(body[k])
+        if not fields:
+            raise HTTPException(400, "Sin campos para actualizar")
+        set_clause = ", ".join(f"{k}=?" for k in fields)
+        conn.execute(f"UPDATE _prov_psp SET {set_clause} WHERE id=?",
+                     list(fields.values()) + [psp_id])
+        _pv_recalc_and_save(conn)
+        conn.commit()
+        return dict(conn.execute("SELECT * FROM _prov_psp WHERE id=?", (psp_id,)).fetchone())
+    finally:
+        conn.close()
+
+
+@app.delete("/api/prov/psp/{psp_id}")
+def prov_delete_psp(psp_id: int, user: dict = Depends(_pv_require_prov)):
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT archivo_informe FROM _prov_psp WHERE id=?", (psp_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Registro PSP no encontrado")
+        if row["archivo_informe"]:
+            try:
+                (INFORMES_PSP / row["archivo_informe"]).unlink(missing_ok=True)
+            except Exception:
+                pass
+        conn.execute("DELETE FROM _prov_psp WHERE id=?", (psp_id,))
+        _pv_recalc_and_save(conn)
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@app.post("/api/prov/psp/{psp_id}/informe")
+async def prov_upload_informe(
+    psp_id: int,
+    file: UploadFile = File(...),
+    partida: str = Form(""),
+    user: dict = Depends(_pv_require_prov),
+):
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT producto, proveedor FROM _prov_psp WHERE id=?", (psp_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Registro PSP no encontrado")
+        content = await file.read()
+        if len(content) > 20 * 1024 * 1024:
+            raise HTTPException(413, "Archivo demasiado grande (máximo 20 MB)")
+        ext = Path(file.filename or "archivo.bin").suffix.lower() or ".bin"
+        safe_prov = _pv_safe_file(row["proveedor"])
+        safe_prod = _pv_safe_file(row["producto"])
+        safe_part = _pv_safe_file(partida or str(psp_id))
+        dest_dir  = INFORMES_PSP / safe_prov / safe_prod
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        filename  = f"{safe_part}{ext}"
+        dest_path = dest_dir / filename
+        dest_path.write_bytes(content)
+        rel_path  = f"{safe_prov}/{safe_prod}/{filename}"
+        conn.execute(
+            "UPDATE _prov_psp SET tiene_informe=1, partida=?, archivo_informe=? WHERE id=?",
+            (partida or row[0], rel_path, psp_id)
+        )
+        conn.commit()
+        return {"ok": True, "archivo_informe": rel_path}
+    finally:
+        conn.close()
+
+
+@app.get("/api/prov/psp/{psp_id}/informe")
+def prov_download_informe(psp_id: int, user: dict = Depends(_pv_require_prov)):
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT archivo_informe FROM _prov_psp WHERE id=?", (psp_id,)).fetchone()
+    finally:
+        conn.close()
+    if not row or not row["archivo_informe"]:
+        raise HTTPException(404, "Sin informe adjunto")
+    path = INFORMES_PSP / row["archivo_informe"]
+    if not path.exists():
+        raise HTTPException(404, "Archivo no encontrado en disco")
+    import mimetypes
+    mt = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+    return FileResponse(str(path), media_type=mt, filename=path.name)
+
+
+@app.delete("/api/prov/psp/{psp_id}/informe")
+def prov_delete_informe(psp_id: int, user: dict = Depends(_pv_require_prov)):
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT archivo_informe FROM _prov_psp WHERE id=?", (psp_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Registro PSP no encontrado")
+        if row["archivo_informe"]:
+            p = INFORMES_PSP / row["archivo_informe"]
+            if p.exists():
+                p.unlink(missing_ok=True)
+        conn.execute("UPDATE _prov_psp SET tiene_informe=0, archivo_informe='' WHERE id=?", (psp_id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+# ── Relaciones (validación de integridad) ──────────────────────────────────────
+
+@app.get("/api/prov/relaciones")
+def prov_get_relaciones(user: dict = Depends(_pv_require_prov)):
+    conn = get_db()
+    try:
+        providers = {
+            str(r["id"]): r["nombre"]
+            for r in conn.execute("SELECT id, nombre FROM _prov_proveedores").fetchall()
+        }
+        grupos = {
+            r["id"]: r["nombre"]
+            for r in conn.execute("SELECT id, nombre FROM _prov_grupos").fetchall()
+        }
+        productos = [dict(r) for r in conn.execute("SELECT * FROM _prov_productos").fetchall()]
+    finally:
+        conn.close()
+
+    issues = []
+    for p in productos:
+        pid = p.get("proveedor_id")
+        pnombre = p.get("proveedor_nombre","")
+        if not pid:
+            issues.append({"nivel":"Error","producto":p["nombre"],"detalle":"Sin proveedor asignado"})
+            continue
+        if str(pid) not in providers:
+            issues.append({"nivel":"Error","producto":p["nombre"],
+                           "proveedor_id":pid,
+                           "detalle":f"Proveedor id={pid} no existe"})
+        elif pnombre and _pv_normalize_text(pnombre) != _pv_normalize_text(providers[str(pid)]):
+            issues.append({"nivel":"Aviso","producto":p["nombre"],
+                           "proveedor_id":pid,
+                           "detalle":f"Nombre proveedor no coincide: '{pnombre}' vs '{providers[str(pid)]}'"})
+        grupo = p.get("grupo","")
+        if grupo and grupo not in grupos:
+            issues.append({"nivel":"Aviso","producto":p["nombre"],
+                           "detalle":f"Grupo '{grupo}' no existe en tabla de grupos"})
+    return {"issues": issues, "total": len(issues)}
 
 
 if __name__ == "__main__":
