@@ -519,14 +519,12 @@ def sync_group(
     exports_dir: Path = EXPORTS_DIR,
     db_path: Path = DB_PATH,
     on_progress=None,
-    full_refresh: bool = False,
 ) -> dict:
     """Sincroniza solo las tablas del grupo especificado."""
     group_tables = set(SYNC_GROUPS.get(group_name, []))
     if not group_tables:
         raise ValueError(f"Grupo desconocido: '{group_name}'")
-    return sync_all(exports_dir, db_path, on_progress=on_progress,
-                     tables=group_tables, full_refresh=full_refresh)
+    return sync_all(exports_dir, db_path, on_progress=on_progress, tables=group_tables)
 
 
 if __name__ == "__main__":

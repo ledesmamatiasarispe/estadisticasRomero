@@ -202,7 +202,7 @@ async def run_sync(full_refresh: bool = False):
         sync_state["groups"][group]["last_sync"] = sync_state["last_sync"]
 
 
-async def run_sync_group(group_name: str, full_refresh: bool = False):
+async def run_sync_group(group_name: str):
     """Sincroniza solo el grupo especificado: PS1 filtrado → sync_group()."""
     import sync as sync_module
 
@@ -216,14 +216,13 @@ async def run_sync_group(group_name: str, full_refresh: bool = False):
 
     sync_state["status"]   = "syncing"
     sync_state["error"]    = None
-    mode_sfx = " (completo)" if full_refresh else ""
-    sync_state["progress"] = {"done": 0, "total": 0, "phase": f"Exportando grupo '{group_name}'{mode_sfx}..."}
-    log.info("Sync grupo '%s' (full_refresh=%s): %d tablas", group_name, full_refresh, len(group_tables))
+    sync_state["progress"] = {"done": 0, "total": 0, "phase": f"Exportando grupo '{group_name}'..."}
+    log.info("Sync grupo '%s': %d tablas", group_name, len(group_tables))
 
     loop = asyncio.get_event_loop()
 
-    # 0. Actualizar watermarks solo para las tablas incrementales del grupo (omitido en full_refresh)
-    if not full_refresh and DB_PATH.exists():
+    # 0. Actualizar watermarks solo para las tablas incrementales del grupo
+    if DB_PATH.exists():
         try:
             _wm_conn = sqlite3.connect(DB_PATH)
             sync_module.write_group_watermarks(_wm_conn, EXPORTS, group_name)
@@ -235,14 +234,14 @@ async def run_sync_group(group_name: str, full_refresh: bool = False):
     tables_str = ";".join(group_tables)
 
     def _run_ps_group():
-        args = [PS32, "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                "-File", str(PS_SCRIPT),
-                "-OutputDir", str(EXPORTS),
-                "-DbPath", r"M:\bases\2011\datos\datosunificado2010.accdb",
-                "-Tables", tables_str]
-        if full_refresh:
-            args.append("-FullRefresh")
-        return subprocess.run(args, capture_output=False)
+        return subprocess.run(
+            [PS32, "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-File", str(PS_SCRIPT),
+             "-OutputDir", str(EXPORTS),
+             "-DbPath", r"M:\bases\2011\datos\datosunificado2010.accdb",
+             "-Tables", tables_str],
+            capture_output=False,
+        )
 
     result = await loop.run_in_executor(None, _run_ps_group)
     if result.returncode != 0:
@@ -253,15 +252,14 @@ async def run_sync_group(group_name: str, full_refresh: bool = False):
         return
 
     # 2. CSV → SQLite (solo tablas del grupo)
-    sync_state["progress"] = {"done": 0, "total": 0, "phase": f"Importando grupo '{group_name}'{mode_sfx}..."}
+    sync_state["progress"] = {"done": 0, "total": 0, "phase": f"Importando grupo '{group_name}'..."}
 
     def _on_progress(done: int, total: int):
         sync_state["progress"] = {"done": done, "total": total,
-                                   "phase": f"Importando '{group_name}'{mode_sfx}..."}
+                                   "phase": f"Importando '{group_name}'..."}
 
     def _run_import():
-        return sync_module.sync_group(group_name, EXPORTS, DB_PATH,
-                                       on_progress=_on_progress, full_refresh=full_refresh)
+        return sync_module.sync_group(group_name, EXPORTS, DB_PATH, on_progress=_on_progress)
 
     try:
         summary = await loop.run_in_executor(None, _run_import)
@@ -558,7 +556,6 @@ def _seed_lookups():
         ("5",  "Gris"),
         ("8",  "Nodular"),
         ("12", "Perlítico"),
-        ("13", "Nodular Perlítico Estaño"),
     ]
     try:
         for cod, nombre in _tipos_material_fixes:
@@ -740,18 +737,16 @@ async def trigger_full_sync():
 
 
 @app.post("/api/sync/group/{group_name}")
-async def trigger_group_sync(group_name: str, full_refresh: bool = Query(False)):
-    """Fuerza el sync manual de un grupo específico (en_curso, movimientos, resoluciones, maestros).
-    full_refresh=true re-descarga todas las tablas del grupo ignorando watermarks."""
+async def trigger_group_sync(group_name: str):
+    """Fuerza el sync manual de un grupo específico (en_curso, movimientos, resoluciones, maestros)."""
     import sync as sync_module
     if group_name not in sync_module.SYNC_GROUPS:
         raise HTTPException(404, f"Grupo '{group_name}' desconocido. "
                                   f"Grupos válidos: {list(sync_module.SYNC_GROUPS.keys())}")
     if sync_state["status"] == "syncing":
         raise HTTPException(409, "Sync ya en progreso")
-    asyncio.create_task(run_sync_group(group_name, full_refresh=full_refresh))
-    mode = "completo" if full_refresh else "incremental"
-    return {"message": f"Sync {mode} del grupo '{group_name}' iniciado",
+    asyncio.create_task(run_sync_group(group_name))
+    return {"message": f"Sync del grupo '{group_name}' iniciado",
             "tables": sync_module.SYNC_GROUPS[group_name]}
 
 
@@ -1431,57 +1426,96 @@ async def put_kiosk_config(request: Request):
         conn.close()
 
 
+def _calc_tendencia_anual(conn: sqlite3.Connection, año_desde: int, año_hasta: int) -> list[dict]:
+    # Delivery trend via Pedidos.fechapedido (fechacargaot is NULL on ~85% of rows)
+    trend_rows = conn.execute("""
+        SELECT strftime('%Y', p.fechapedido) as año,
+               COALESCE(SUM(t.cantidadentregada), 0) as entregadas,
+               COALESCE(SUM(t.cantidadrechazada), 0) as rechazadas,
+               ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadentregada * np.pesoestablecido ELSE 0 END), 1) as kg_entregadas,
+               ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadrechazada * np.pesoestablecido ELSE 0 END), 1) as kg_rechazadas
+        FROM Trabajos t
+        JOIN ItemDetallePedido idp ON t.iditempedido = idp.iditempedido
+        JOIN Pedidos p ON idp.idpedido = p.idpedido
+        LEFT JOIN NombreDePiezas np ON idp.idpieza = np.id
+        WHERE p.fechapedido >= ? AND p.fechapedido < ? AND t.cantidadentregada > 0
+        GROUP BY año ORDER BY año
+    """, (f"{año_desde}-01-01", f"{año_hasta + 1}-01-01")).fetchall()
+
+    # Returns by year (with kg via PesosDePiezas → NombreDePiezas)
+    dev_rows = conn.execute("""
+        SELECT CAST(id.año AS TEXT) as año,
+               COALESCE(SUM(id."cantidaddevolución"), 0) as devueltas,
+               ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN id."cantidaddevolución" * np.pesoestablecido ELSE 0 END), 1) as kg_devueltas
+        FROM "ItemDevolución" id
+        JOIN PesosDePiezas pp ON id.códpieza = pp.códpieza
+        JOIN NombreDePiezas np ON pp.nombredepiezasid_ = np.id
+        WHERE id.año >= ? AND id.año <= ?
+        GROUP BY id.año ORDER BY id.año
+    """, (año_desde, año_hasta)).fetchall()
+    dev_map = {r["año"]: dict(r) for r in dev_rows}
+
+    tendencia = []
+    for r in trend_rows:
+        dv = dev_map.get(r["año"], {})
+        entregadas = r["entregadas"]
+        devueltas = dv.get("devueltas", 0)
+        kg_entregadas = r["kg_entregadas"] or 0.0
+        kg_devueltas = dv.get("kg_devueltas", 0.0)
+        tendencia.append({
+            "año": r["año"],
+            "entregadas": entregadas,
+            "rechazadas": r["rechazadas"],
+            "devueltas": devueltas,
+            "neta": entregadas - devueltas,
+            "kg_entregadas": kg_entregadas,
+            "kg_rechazadas": r["kg_rechazadas"] or 0.0,
+            "kg_devueltas":  kg_devueltas,
+            "kg_neta": round(kg_entregadas - kg_devueltas, 1),
+        })
+    return tendencia
+
+
+def _calc_tendencia_mensual(conn: sqlite3.Connection, año_desde: int, año_hasta: int) -> list[dict]:
+    rows = conn.execute("""
+        SELECT strftime('%Y', p.fechapedido) AS año,
+               CAST(strftime('%m', p.fechapedido) AS INTEGER) AS mes,
+               COALESCE(SUM(t.cantidadentregada), 0) AS entregadas,
+               COALESCE(SUM(t.cantidadrechazada), 0) AS rechazadas,
+               ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadentregada * np.pesoestablecido ELSE 0 END), 1) AS kg_entregadas,
+               ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadrechazada * np.pesoestablecido ELSE 0 END), 1) AS kg_rechazadas
+        FROM Trabajos t
+        JOIN ItemDetallePedido idp ON t.iditempedido = idp.iditempedido
+        JOIN Pedidos p ON idp.idpedido = p.idpedido
+        LEFT JOIN NombreDePiezas np ON idp.idpieza = np.id
+        WHERE p.fechapedido >= ? AND p.fechapedido < ? AND t.cantidadentregada > 0
+        GROUP BY año, mes ORDER BY año, mes
+    """, (f"{año_desde}-01-01", f"{año_hasta + 1}-01-01")).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _año_range_defaults(desde: Optional[int], hasta: Optional[int]) -> tuple[int, int]:
+    año_actual = datetime.now().year
+    hasta = hasta if hasta is not None else año_actual
+    desde = desde if desde is not None else hasta - 4
+    if desde > hasta:
+        desde, hasta = hasta, desde
+    return desde, hasta
+
+
 @app.get("/api/analytics/overview")
-def analytics_overview():
+def analytics_overview(desde: Optional[int] = Query(None), hasta: Optional[int] = Query(None)):
     conn = get_db()
     try:
         año_actual = datetime.now().year
+        rango_desde, rango_hasta = _año_range_defaults(desde, hasta)
+        tendencia = _calc_tendencia_anual(conn, rango_desde, rango_hasta)
 
-        # 5-year delivery trend via Pedidos.fechapedido (fechacargaot is NULL on ~85% of rows)
-        trend_rows = conn.execute("""
-            SELECT strftime('%Y', p.fechapedido) as año,
-                   COALESCE(SUM(t.cantidadentregada), 0) as entregadas,
-                   COALESCE(SUM(t.cantidadrechazada), 0) as rechazadas,
-                   ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadentregada * np.pesoestablecido ELSE 0 END), 1) as kg_entregadas,
-                   ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadrechazada * np.pesoestablecido ELSE 0 END), 1) as kg_rechazadas
-            FROM Trabajos t
-            JOIN ItemDetallePedido idp ON t.iditempedido = idp.iditempedido
-            JOIN Pedidos p ON idp.idpedido = p.idpedido
-            LEFT JOIN NombreDePiezas np ON idp.idpieza = np.id
-            WHERE p.fechapedido >= ? AND t.cantidadentregada > 0
-            GROUP BY año ORDER BY año
-        """, (f"{año_actual - 4}-01-01",)).fetchall()
-
-        # Returns by year (with kg via PesosDePiezas → NombreDePiezas)
-        dev_rows = conn.execute("""
-            SELECT CAST(id.año AS TEXT) as año,
-                   COALESCE(SUM(id."cantidaddevolución"), 0) as devueltas,
-                   ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN id."cantidaddevolución" * np.pesoestablecido ELSE 0 END), 1) as kg_devueltas
-            FROM "ItemDevolución" id
-            JOIN PesosDePiezas pp ON id.códpieza = pp.códpieza
-            JOIN NombreDePiezas np ON pp.nombredepiezasid_ = np.id
-            WHERE id.año >= ?
-            GROUP BY id.año ORDER BY id.año
-        """, (año_actual - 4,)).fetchall()
-        dev_map = {r["año"]: dict(r) for r in dev_rows}
-
-        tendencia = []
+        # KPIs del año en curso: independientes del rango elegido para el gráfico de tendencia
         año_ent = año_dev = 0
-        for r in trend_rows:
-            dv = dev_map.get(r["año"], {})
-            dev = dv.get("devueltas", 0)
-            tendencia.append({
-                "año": r["año"],
-                "entregadas": r["entregadas"],
-                "rechazadas": r["rechazadas"],
-                "devueltas": dev,
-                "kg_entregadas": r["kg_entregadas"] or 0.0,
-                "kg_rechazadas": r["kg_rechazadas"] or 0.0,
-                "kg_devueltas":  dv.get("kg_devueltas", 0.0),
-            })
-            if r["año"] == str(año_actual):
-                año_ent = r["entregadas"]
-                año_dev = dev
+        for r in _calc_tendencia_anual(conn, año_actual, año_actual):
+            año_ent = r["entregadas"]
+            año_dev = r["devueltas"]
 
         # Top 10 clients (last 2 years) — via ItemDetallePedido join
         top = conn.execute("""
@@ -1508,6 +1542,8 @@ def analytics_overview():
             "devueltas_año": año_dev,
             "tasa_devolucion": tasa,
             "tendencia": tendencia,
+            "tendencia_desde": rango_desde,
+            "tendencia_hasta": rango_hasta,
             "top_clientes": [dict(r) for r in top],
             "n_tablas": n_tablas,
         }
@@ -1516,25 +1552,88 @@ def analytics_overview():
 
 
 @app.get("/api/analytics/tendencia_mensual")
-def analytics_tendencia_mensual():
+def analytics_tendencia_mensual(desde: Optional[int] = Query(None), hasta: Optional[int] = Query(None)):
+    conn = get_db()
+    try:
+        rango_desde, rango_hasta = _año_range_defaults(desde, hasta)
+        return _calc_tendencia_mensual(conn, rango_desde, rango_hasta)
+    finally:
+        conn.close()
+
+
+@app.get("/api/analytics/tendencia/anos")
+def analytics_tendencia_anos():
     conn = get_db()
     try:
         año_actual = datetime.now().year
         rows = conn.execute("""
-            SELECT strftime('%Y', p.fechapedido) AS año,
-                   CAST(strftime('%m', p.fechapedido) AS INTEGER) AS mes,
-                   COALESCE(SUM(t.cantidadentregada), 0) AS entregadas,
-                   COALESCE(SUM(t.cantidadrechazada), 0) AS rechazadas,
-                   ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadentregada * np.pesoestablecido ELSE 0 END), 1) AS kg_entregadas,
-                   ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadrechazada * np.pesoestablecido ELSE 0 END), 1) AS kg_rechazadas
-            FROM Trabajos t
-            JOIN ItemDetallePedido idp ON t.iditempedido = idp.iditempedido
-            JOIN Pedidos p ON idp.idpedido = p.idpedido
-            LEFT JOIN NombreDePiezas np ON idp.idpieza = np.id
-            WHERE p.fechapedido >= ? AND t.cantidadentregada > 0
-            GROUP BY año, mes ORDER BY año, mes
-        """, (f"{año_actual - 4}-01-01",)).fetchall()
-        return [dict(r) for r in rows]
+            SELECT DISTINCT CAST(strftime('%Y', fechapedido) AS INTEGER) as y
+            FROM Pedidos
+            WHERE fechapedido IS NOT NULL
+              AND CAST(strftime('%Y', fechapedido) AS INTEGER) BETWEEN 1990 AND ?
+            ORDER BY y
+        """, (año_actual,)).fetchall()
+        return {"años": [r["y"] for r in rows], "año_actual": año_actual}
+    finally:
+        conn.close()
+
+
+_MESES_ES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+             "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+
+
+@app.get("/api/analytics/tendencia/export")
+def analytics_tendencia_export(
+    modo: str = Query("anual", pattern="^(anual|mensual)$"),
+    desde: Optional[int] = Query(None),
+    hasta: Optional[int] = Query(None),
+):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+    import io
+
+    conn = get_db()
+    try:
+        rango_desde, rango_hasta = _año_range_defaults(desde, hasta)
+        rango_txt = str(rango_desde) if rango_desde == rango_hasta else f"{rango_desde}-{rango_hasta}"
+        wb = Workbook()
+        ws = wb.active
+
+        if modo == "mensual":
+            ws.title = "Tendencia mensual"
+            ws.append(["Año", "Mes", "Entregadas", "Rechazadas", "Kg entregadas", "Kg rechazadas"])
+            for r in _calc_tendencia_mensual(conn, rango_desde, rango_hasta):
+                ws.append([
+                    int(r["año"]), _MESES_ES[r["mes"] - 1],
+                    r["entregadas"], r["rechazadas"],
+                    r["kg_entregadas"] or 0.0, r["kg_rechazadas"] or 0.0,
+                ])
+            filename = f"tendencia_mensual_{rango_txt}.xlsx"
+        else:
+            ws.title = "Tendencia anual"
+            ws.append(["Año", "Entregadas", "Rechazadas", "Devueltas", "Entregadas - Devueltas",
+                       "Kg entregadas", "Kg rechazadas", "Kg devueltas", "Kg entregadas - Kg devueltas"])
+            for r in _calc_tendencia_anual(conn, rango_desde, rango_hasta):
+                ws.append([
+                    int(r["año"]), r["entregadas"], r["rechazadas"], r["devueltas"], r["neta"],
+                    r["kg_entregadas"], r["kg_rechazadas"], r["kg_devueltas"], r["kg_neta"],
+                ])
+            filename = f"tendencia_anual_{rango_txt}.xlsx"
+
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
+        for col_cells in ws.columns:
+            width = max((len(str(c.value)) for c in col_cells if c.value is not None), default=10)
+            ws.column_dimensions[col_cells[0].column_letter].width = max(10, width + 2)
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return StreamingResponse(
+            buf,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
     finally:
         conn.close()
 

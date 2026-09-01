@@ -728,8 +728,6 @@ const S = {
   _pendingScroll: 0,
   dashView: 'pedido',
   dashMeses: 6,
-  filtroProgramadas: true,
-  _dashSort: {},
   _dashRows: {},
   _probetaAlertas: [],
 };
@@ -1237,52 +1235,10 @@ async function triggerSync() {
 }
 
 // ── Dashboard ──────────────────────────────────────────────────────────────────
-
-// Ordenamiento por columna en las listas Vencidos / Próximos / Entregados.
-function _dashSortRows(rows, key, getters) {
-  const spec = S._dashSort[key];
-  if (!spec || !spec.col || !getters[spec.col]) return rows;
-  const getter = getters[spec.col];
-  const dir = spec.dir === 'desc' ? -1 : 1;
-  return [...rows].sort((a, b) => {
-    let va = getter(a), vb = getter(b);
-    if (va == null) va = '';
-    if (vb == null) vb = '';
-    if (typeof va === 'string') va = va.toLowerCase();
-    if (typeof vb === 'string') vb = vb.toLowerCase();
-    if (va < vb) return -1 * dir;
-    if (va > vb) return 1 * dir;
-    return 0;
-  });
-}
-
-function _dashSortToggle(key, col) {
-  const cur = S._dashSort[key] || {};
-  S._dashSort[key] = (cur.col === col)
-    ? { col, dir: cur.dir === 'asc' ? 'desc' : 'asc' }
-    : { col, dir: 'asc' };
-  _renderDashTable(key, 'dash-' + key, '');
-}
-
-function _sortTh(key, col, label, extraStyle) {
-  const spec = S._dashSort[key];
-  const arrow = (spec && spec.col === col) ? (spec.dir === 'asc' ? ' &#9650;' : ' &#9660;') : '';
-  return '<th style="cursor:pointer;user-select:none;' + (extraStyle || '') + '" onclick="_dashSortToggle(\'' + key + '\',\'' + col + '\')">' + label + arrow + '</th>';
-}
-
-function _renderVencTbl(rows, elId, emptyMsg, key) {
+function _renderVencTbl(rows, elId, emptyMsg) {
   const el = document.getElementById(elId);
   if (!el) return;
   if (!rows || !rows.length) { el.innerHTML = '<div class="empty">' + emptyMsg + '</div>'; return; }
-  rows = _dashSortRows(rows, key, {
-    ot:       r => r.ot_id || 0,
-    pedido:   r => r.cliente_nombre || '',
-    pieza:    r => r.nombrepieza || '',
-    cantidad: r => r.cantidadpedida || 0,
-    fecha:    r => r.fecha_entrega || '',
-    dias:     r => r.dias != null ? r.dias : 0,
-    probeta:  r => r.pide_probeta_traccion ? 1 : 0,
-  });
   let tbody = '';
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
@@ -1329,25 +1285,17 @@ function _renderVencTbl(rows, elId, emptyMsg, key) {
       + '</tr>';
   }
   el.innerHTML = '<div class="tbl-wrap"><table>'
-    + '<thead><tr>' + _sortTh(key, 'ot', 'Últ. OT') + _sortTh(key, 'pedido', 'Pedido / Cliente') + _sortTh(key, 'pieza', 'Pieza')
-    + _sortTh(key, 'cantidad', 'Cantidad pedida / neta', 'text-align:right') + _sortTh(key, 'fecha', 'Fecha')
-    + _sortTh(key, 'dias', 'Días', 'text-align:right')
-    + _sortTh(key, 'probeta', 'Probeta', 'text-align:center')
+    + '<thead><tr><th>&#218;lt. OT</th><th>Pedido / Cliente</th><th>Pieza</th>'
+    + '<th style="text-align:right">Cantidad pedida / neta</th><th>Fecha</th>'
+    + '<th style="text-align:right">D&#237;as</th>'
+    + '<th style="text-align:center">Probeta</th>'
     + '</tr></thead><tbody>' + tbody + '</tbody></table></div>';
 }
 
-function _renderEntregadosTbl(rows, elId, key) {
+function _renderEntregadosTbl(rows, elId) {
   const el = document.getElementById(elId);
   if (!el) return;
   if (!rows || !rows.length) { el.innerHTML = '<div class="empty">Sin entregas en los últimos 90 días</div>'; return; }
-  rows = _dashSortRows(rows, key, {
-    ot:       r => r.ot_id || 0,
-    pedido:   r => r.cliente_nombre || '',
-    pieza:    r => r.nombrepieza || '',
-    cantidad: r => r.tot_entregada || 0,
-    fecha:    r => r.fecha_entrega || '',
-    probeta:  r => r.pide_probeta_traccion ? 1 : 0,
-  });
   let tbody = '';
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
@@ -1376,10 +1324,10 @@ function _renderEntregadosTbl(rows, elId, key) {
       + '</tr>';
   }
   el.innerHTML = '<div class="tbl-wrap"><table>'
-    + '<thead><tr>' + _sortTh(key, 'ot', 'Últ. OT') + _sortTh(key, 'pedido', 'Pedido / Cliente') + _sortTh(key, 'pieza', 'Pieza')
-    + _sortTh(key, 'cantidad', 'Entregadas / Pedidas', 'text-align:right')
-    + _sortTh(key, 'fecha', 'Fecha')
-    + _sortTh(key, 'probeta', 'Probeta', 'text-align:center')
+    + '<thead><tr><th>&#218;lt. OT</th><th>Pedido / Cliente</th><th>Pieza</th>'
+    + '<th style="text-align:right">Entregadas / Pedidas</th>'
+    + '<th>Fecha</th>'
+    + '<th style="text-align:center">Probeta</th>'
     + '</tr></thead><tbody>' + tbody + '</tbody></table></div>';
 }
 
@@ -1389,6 +1337,8 @@ let _trendMode = 'barras';
 let _dashTendencia = null;
 let _dashKgMode = false;
 let _trendMensualData = null;
+let _trendDesde = null;
+let _trendHasta = null;
 const _MESES = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
 const _TEND_COLORS = ['#546e7a','#1976d2','#e67e22','#16a085','#a78bfa'];
 const _dashOpen = {};
@@ -1534,16 +1484,8 @@ function _renderVencTblByPedido(rows, elId, emptyMsg, key) {
     if (r.pide_probeta_traccion) g.tiene_probeta = true;
     if (r.dias != null && r.dias < g.dias) { g.dias = r.dias; g.fecha_entrega = r.fecha_entrega; }
   }
-  const groups = _dashSortRows([...map.values()], key, {
-    pedido:   g => g.cliente_nombre || '',
-    piezas:   g => g.piezas.join(', '),
-    cantidad: g => g.tot_pedida || 0,
-    fecha:    g => g.fecha_entrega || '',
-    dias:     g => g.dias != null ? g.dias : 0,
-    probeta:  g => g.tiene_probeta ? 1 : 0,
-  });
   let tbody = '';
-  for (const g of groups) {
+  for (const g of map.values()) {
     _dashGroups[key+'-'+g.idpedido] = g.items;
     const dias = g.dias != null ? g.dias : 0;
     const cls = dias >= 0
@@ -1577,10 +1519,10 @@ function _renderVencTblByPedido(rows, elId, emptyMsg, key) {
       + '</tr>';
   }
   el.innerHTML = '<div class="tbl-wrap"><table>'
-    + '<thead><tr>' + _sortTh(key, 'pedido', 'Pedido / Cliente') + _sortTh(key, 'piezas', 'Piezas')
-    + _sortTh(key, 'cantidad', 'Cant. ped / neta', 'text-align:right')
-    + _sortTh(key, 'fecha', 'Fecha urgente') + _sortTh(key, 'dias', 'Días', 'text-align:right')
-    + _sortTh(key, 'probeta', 'Probeta', 'text-align:center')
+    + '<thead><tr><th>Pedido / Cliente</th><th>Piezas</th>'
+    + '<th style="text-align:right">Cant. ped / neta</th>'
+    + '<th>Fecha urgente</th><th style="text-align:right">D&#237;as</th>'
+    + '<th style="text-align:center">Probeta</th>'
     + '</tr></thead><tbody>' + tbody + '</tbody></table></div>';
 }
 
@@ -1604,15 +1546,8 @@ function _renderEntregadosTblByPedido(rows, elId, key) {
     g.tot_entregada += r.tot_entregada   || 0;
     if (r.pide_probeta_traccion) g.tiene_probeta = true;
   }
-  const groups = _dashSortRows([...map.values()], key, {
-    pedido:   g => g.cliente_nombre || '',
-    piezas:   g => g.piezas.join(', '),
-    cantidad: g => g.tot_entregada || 0,
-    fecha:    g => g.fecha_entrega || '',
-    probeta:  g => g.tiene_probeta ? 1 : 0,
-  });
   let tbody = '';
-  for (const g of groups) {
+  for (const g of map.values()) {
     _dashGroups[key+'-'+g.idpedido] = g.items;
     const completo = g.tot_entregada >= g.tot_pedida;
     const cls = completo ? 'ent-completo' : 'ent-parcial';
@@ -1634,24 +1569,21 @@ function _renderEntregadosTblByPedido(rows, elId, key) {
       + '</tr>';
   }
   el.innerHTML = '<div class="tbl-wrap"><table>'
-    + '<thead><tr>' + _sortTh(key, 'pedido', 'Pedido / Cliente') + _sortTh(key, 'piezas', 'Piezas')
-    + _sortTh(key, 'cantidad', 'Entregadas / Pedidas', 'text-align:right') + _sortTh(key, 'fecha', 'Fecha')
-    + _sortTh(key, 'probeta', 'Probeta', 'text-align:center')
+    + '<thead><tr><th>Pedido / Cliente</th><th>Piezas</th>'
+    + '<th style="text-align:right">Entregadas / Pedidas</th><th>Fecha</th>'
+    + '<th style="text-align:center">Probeta</th>'
     + '</tr></thead><tbody>' + tbody + '</tbody></table></div>';
 }
 
 function _renderDashTable(key, elId, emptyMsg) {
-  let rows = S._dashRows[key];
+  const rows = S._dashRows[key];
   if (!rows) return;
-  if (key === 'proximos' && S.filtroProgramadas) {
-    rows = rows.filter(r => r.ot_estado === 'Programado');
-  }
   if (S.dashView === 'pedido') {
     if (key === 'entregados') _renderEntregadosTblByPedido(rows, elId, key);
     else _renderVencTblByPedido(rows, elId, emptyMsg || '', key);
   } else {
-    if (key === 'entregados') _renderEntregadosTbl(rows, elId, key);
-    else _renderVencTbl(rows, elId, emptyMsg || '', key);
+    if (key === 'entregados') _renderEntregadosTbl(rows, elId);
+    else _renderVencTbl(rows, elId, emptyMsg || '');
   }
 }
 
@@ -1667,9 +1599,6 @@ function changeDashMeses(val) {
   S.dashMeses = parseInt(val);
   const lbl = $id('dash-meses-lbl');
   if (lbl) lbl.textContent = _dashMesesLabel(S.dashMeses);
-  if ($id('chart-pend-fundir-tr')) {
-    _renderPendienteFundirChart('chart-pend-fundir-tr', 'pend-fundir-sub-tr', S.dashMeses);
-  }
   [
     { id: 'dash-vencidos',   url: '/api/dashboard/vencidos?meses='   + S.dashMeses, key: 'vencidos',   empty: 'Sin pedidos vencidos' },
     { id: 'dash-proximos',   url: '/api/dashboard/proximos',                        key: 'proximos',   empty: 'Sin pedidos próximos a vencer' },
@@ -1681,11 +1610,6 @@ function changeDashMeses(val) {
       .then(r => { S._dashRows[s.key] = r; _renderDashTable(s.key, s.id, s.empty); })
       .catch(() => { const e2 = $id(s.id); if (e2) e2.innerHTML = '<div class="empty">No se pudo cargar</div>'; });
   });
-}
-
-function toggleFiltroProgramadas(val) {
-  S.filtroProgramadas = val;
-  _renderDashTable('proximos', 'dash-proximos', 'Sin pedidos por vencer en los próximos 30 días');
 }
 
 const _PRINT_DASH_META = {
@@ -1773,7 +1697,7 @@ async function showDashboard() {
   try { d = await api('/api/analytics/overview'); }
   catch(e) { setMain('<div class="loading">Error al cargar datos. Esperá que termine el sync.</div>'); return; }
 
-  const { año_actual, entregadas_año, devueltas_año, tasa_devolucion, tendencia, top_clientes, n_tablas } = d;
+  const { año_actual, entregadas_año, devueltas_año, tasa_devolucion, tendencia, tendencia_desde, tendencia_hasta, top_clientes, n_tablas } = d;
 
   setMain(`
     <div class="sec-title">Dashboard</div>
@@ -1802,11 +1726,30 @@ async function showDashboard() {
 
     <div class="grid-2">
       <div class="card">
-        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-          <span>Tendencia 5 a&#241;os</span>
-          <div style="display:flex;gap:6px">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+          <span>Tendencia <span id="trend-range-label">5 a&#241;os</span></span>
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <select id="trend-desde" onchange="_onTrendRangeChange()"
+              style="font-size:11px;padding:3px 6px;background:var(--card);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer"></select>
+            <span style="font-size:11px;color:var(--muted)">a</span>
+            <select id="trend-hasta" onchange="_onTrendRangeChange()"
+              style="font-size:11px;padding:3px 6px;background:var(--card);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer"></select>
+            <select id="trend-curva-metric" onchange="_renderTrendCurvas()"
+              style="display:none;font-size:11px;padding:3px 6px;background:var(--card);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer">
+              <option value="entregadas">Entregadas</option>
+              <option value="rechazadas">Rechazadas</option>
+            </select>
             <button class="page-btn" id="trend-kg-btn" style="font-size:11px;padding:3px 9px" onclick="_toggleDashKg()">Ver kg</button>
             <button class="page-btn" id="trend-mode-btn" style="font-size:11px;padding:3px 9px" onclick="_switchTrendMode()">📈 Curvas</button>
+            <div style="position:relative">
+              <button class="page-btn" id="trend-export-btn" style="font-size:11px;padding:3px 9px" onclick="_toggleTrendExportMenu(event)">⬇️ Exportar</button>
+              <div id="trend-export-menu" style="display:none;position:absolute;top:100%;right:0;margin-top:4px;z-index:50;
+                background:var(--surface2);border:1px solid var(--border);border-radius:6px;
+                box-shadow:0 4px 12px rgba(0,0,0,.18);overflow:hidden;min-width:140px">
+                <div class="tend-dd-item" style="padding:8px 12px;font-size:12px;cursor:pointer" onclick="_exportTrend('anual')">Por año</div>
+                <div class="tend-dd-item" style="padding:8px 12px;font-size:12px;cursor:pointer" onclick="_exportTrend('mensual')">Por mes</div>
+              </div>
+            </div>
           </div>
         </div>
         <div id="trend-drill-wrap"><div class="chart-box"><canvas id="chart-trend"></canvas></div></div>
@@ -1892,10 +1835,57 @@ async function showDashboard() {
   _trendMode = 'barras';
   _trendMensualData = null;
   _dashKgMode = false;
+  _trendDesde = tendencia_desde;
+  _trendHasta = tendencia_hasta;
+  _updateTrendRangeLabel();
   _renderTrendBarras();
+  _initTrendRangeSelects();
 
   _pendFundirKgMode = false;
   _renderPendienteFundirChart('chart-pend-fundir-dash', 'pend-fundir-sub');
+}
+
+async function _initTrendRangeSelects() {
+  let data;
+  try { data = await api('/api/analytics/tendencia/anos'); } catch(_) { return; }
+  const años = data.años || [];
+  const desdeSel = $id('trend-desde');
+  const hastaSel = $id('trend-hasta');
+  if (!años.length || !desdeSel || !hastaSel) return;
+  const opts = años.map(y => `<option value="${y}">${y}</option>`).join('');
+  desdeSel.innerHTML = opts;
+  hastaSel.innerHTML = opts;
+  desdeSel.value = _trendDesde;
+  hastaSel.value = _trendHasta;
+}
+
+function _updateTrendRangeLabel() {
+  const lbl = $id('trend-range-label');
+  if (!lbl || _trendDesde == null || _trendHasta == null) return;
+  lbl.textContent = _trendDesde === _trendHasta ? String(_trendDesde) : `${_trendDesde}–${_trendHasta}`;
+}
+
+async function _onTrendRangeChange() {
+  let desde = Number($id('trend-desde').value);
+  let hasta = Number($id('trend-hasta').value);
+  if (desde > hasta) {
+    [desde, hasta] = [hasta, desde];
+    $id('trend-desde').value = desde;
+    $id('trend-hasta').value = hasta;
+  }
+  _trendDesde = desde;
+  _trendHasta = hasta;
+  _updateTrendRangeLabel();
+  let d;
+  try { d = await api(`/api/analytics/overview?desde=${desde}&hasta=${hasta}`); } catch(_) { return; }
+  _dashTendencia = d.tendencia;
+  _trendMensualData = null;
+  if (_trendMode === 'curvas') {
+    try { _trendMensualData = await api(`/api/analytics/tendencia_mensual?desde=${desde}&hasta=${hasta}`); } catch(_) { return; }
+    _renderTrendCurvas();
+  } else {
+    _renderTrendBarras();
+  }
 }
 
 function _toggleDashKg() {
@@ -1927,7 +1917,7 @@ function _renderTrendBarras() {
     if (!els.length) return;
     const año = _dashTendencia[els[0].index].año;
     if (!_trendMensualData) {
-      try { _trendMensualData = await api('/api/analytics/tendencia_mensual'); } catch(_) { return; }
+      try { _trendMensualData = await api(`/api/analytics/tendencia_mensual?desde=${_trendDesde}&hasta=${_trendHasta}`); } catch(_) { return; }
     }
     _drillMes('trend-drill-wrap', año, _trendMensualData, _renderTrendBarras,
       { useKg: _dashKgMode, entKey: 'kg_entregadas', rechKey: 'kg_rechazadas' });
@@ -1940,10 +1930,12 @@ function _renderTrendBarras() {
         { label: 'Entregadas'+sfx, data: _dashTendencia.map(t=>t.kg_entregadas||0), backgroundColor: '#66bb6abb', borderRadius: 4 },
         { label: 'Rechazadas'+sfx, data: _dashTendencia.map(t=>t.kg_rechazadas||0), backgroundColor: '#ef5350bb', borderRadius: 4 },
         { label: 'Devueltas'+sfx,  data: _dashTendencia.map(t=>t.kg_devueltas ||0), backgroundColor: '#a78bfabb', borderRadius: 4 },
+        { label: 'Entregadas - Devueltas'+sfx, data: _dashTendencia.map(t=>t.kg_neta||0), backgroundColor: '#42a5f5bb', borderRadius: 4 },
       ] : [
         { label: 'Entregadas', data: _dashTendencia.map(t=>t.entregadas), backgroundColor: '#66bb6abb', borderRadius: 4 },
         { label: 'Rechazadas', data: _dashTendencia.map(t=>t.rechazadas), backgroundColor: '#ef5350bb', borderRadius: 4 },
         { label: 'Devueltas',  data: _dashTendencia.map(t=>t.devueltas),  backgroundColor: '#a78bfabb', borderRadius: 4 },
+        { label: 'Entregadas - Devueltas', data: _dashTendencia.map(t=>t.neta), backgroundColor: '#42a5f5bb', borderRadius: 4 },
       ],
     },
     options: opts,
@@ -1964,10 +1956,14 @@ function _renderTrendCurvas() {
   }
 
   // Agrupar datos por año usando la métrica seleccionada
+  const metricSel = $id('trend-curva-metric');
+  const metric = metricSel ? metricSel.value : 'entregadas';
+  const metricLabel = metric === 'rechazadas' ? 'Rechazadas' : 'Entregadas';
+  const metricKey = useKg ? (metric === 'rechazadas' ? 'kg_rechazadas' : 'kg_entregadas') : metric;
   const byYear = {};
   for (const r of _trendMensualData) {
     if (!byYear[r.año]) byYear[r.año] = {};
-    byYear[r.año][r.mes] = useKg ? (r.kg_entregadas || 0) : r.entregadas;
+    byYear[r.año][r.mes] = r[metricKey] || 0;
   }
   const years = Object.keys(byYear).sort();
 
@@ -2004,7 +2000,7 @@ function _renderTrendCurvas() {
 
   // Gráfico mensual
   const opts1 = baseOpts();
-  opts1.scales.y.title = { display: true, text: useKg ? 'kg / mes' : 'Piezas / mes', color: '#8b949e', font: { size: 11 } };
+  opts1.scales.y.title = { display: true, text: `${metricLabel} — ${useKg ? 'kg / mes' : 'piezas / mes'}`, color: '#8b949e', font: { size: 11 } };
   S.charts.trend = new Chart(canvas, {
     type: 'line',
     data: { labels: _MESES, datasets: _mkDatasets(false) },
@@ -2017,7 +2013,7 @@ function _renderTrendCurvas() {
   if (canvasAcum && box) {
     box.style.display = '';
     const opts2 = baseOpts();
-    opts2.scales.y.title = { display: true, text: useKg ? 'kg acumulados' : 'Piezas acumuladas', color: '#8b949e', font: { size: 11 } };
+    opts2.scales.y.title = { display: true, text: `${metricLabel} — ${useKg ? 'kg acumulados' : 'piezas acumuladas'}`, color: '#8b949e', font: { size: 11 } };
     S.charts.trendAcum = new Chart(canvasAcum, {
       type: 'line',
       data: { labels: _MESES, datasets: _mkDatasets(true) },
@@ -2029,14 +2025,16 @@ function _renderTrendCurvas() {
 async function _switchTrendMode() {
   const btn = $id('trend-mode-btn');
   const kgBtn = $id('trend-kg-btn');
+  const metricSel = $id('trend-curva-metric');
   _trendMode = _trendMode === 'barras' ? 'curvas' : 'barras';
   const _trendBtnLabel = () => _trendMode === 'curvas' ? '📊 Barras' : '📈 Curvas';
   if (btn) btn.innerHTML = _trendBtnLabel();
+  if (metricSel) metricSel.style.display = _trendMode === 'curvas' ? '' : 'none';
   if (_trendMode === 'curvas') {
     if (!_trendMensualData) {
       try {
         if (btn) { btn.disabled = true; btn.innerHTML = '…'; }
-        _trendMensualData = await api('/api/analytics/tendencia_mensual');
+        _trendMensualData = await api(`/api/analytics/tendencia_mensual?desde=${_trendDesde}&hasta=${_trendHasta}`);
       } catch(e) {
         _trendMode = 'barras';
         if (btn) { btn.disabled = false; btn.innerHTML = _trendBtnLabel(); }
@@ -2049,6 +2047,28 @@ async function _switchTrendMode() {
   } else {
     _renderTrendBarras();
   }
+}
+
+function _toggleTrendExportMenu(ev) {
+  ev.stopPropagation();
+  const menu = $id('trend-export-menu');
+  if (!menu) return;
+  const opening = menu.style.display === 'none';
+  menu.style.display = opening ? 'block' : 'none';
+  if (opening) setTimeout(() => document.addEventListener('click', _closeTrendExportMenu), 0);
+}
+function _closeTrendExportMenu() {
+  const menu = $id('trend-export-menu');
+  if (menu) menu.style.display = 'none';
+  document.removeEventListener('click', _closeTrendExportMenu);
+}
+function _exportTrend(modo) {
+  _closeTrendExportMenu();
+  const rango = _trendDesde === _trendHasta ? String(_trendDesde) : `${_trendDesde}-${_trendHasta}`;
+  const a = document.createElement('a');
+  a.href = `/api/analytics/tendencia/export?modo=${modo}&desde=${_trendDesde}&hasta=${_trendHasta}`;
+  a.download = (modo === 'mensual' ? 'tendencia_mensual_' : 'tendencia_anual_') + rango + '.xlsx';
+  a.click();
 }
 
 // ── Probeta Tracción ──────────────────────────────────────────────────────────
@@ -5454,52 +5474,6 @@ async function showExplorer() {
   } catch(e) {}
 }
 
-const SYNC_GROUP_META = {
-  en_curso:     { label: 'OTs en curso',               desc: 'Trabajos, Horas por fecha, Fundici\xf3n por fecha, Fundiciones' },
-  movimientos:  { label: 'Pedidos y Remitos',          desc: 'Pedidos, \xcdtems de pedido, Remitos, Devoluciones' },
-  resoluciones: { label: 'Resoluciones',               desc: 'Rechazos, Reparaciones, Devoluciones, Impresiones' },
-  maestros:     { label: 'Clientes, Piezas y Modelos', desc: 'Clientes, Piezas, Modelos, Responsables, Precios' },
-};
-
-async function renderSyncGroups() {
-  const el = $id('sync-groups-list');
-  if (!el) return;
-  let s;
-  try { s = await api('/api/sync/status'); }
-  catch (e) { el.innerHTML = '<div class="empty">No se pudo cargar</div>'; return; }
-  const groups = s.groups || {};
-  el.innerHTML = Object.keys(SYNC_GROUP_META).map((name, i, arr) => {
-    const meta = SYNC_GROUP_META[name];
-    const g = groups[name] || {};
-    const last = g.last_sync ? g.last_sync.slice(0, 16).replace('T', ' ') : 'Nunca';
-    const border = i < arr.length - 1 ? 'border-bottom:1px solid var(--border);' : '';
-    return `
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 0;${border}flex-wrap:wrap">
-        <div>
-          <div style="font-weight:600;font-size:13px">${meta.label}</div>
-          <div style="font-size:11px;color:var(--muted)">${meta.desc}</div>
-          <div style="font-size:11px;color:var(--muted);margin-top:2px">&#218;ltimo sync: ${last} &middot; ${g.tables_ok || 0} tablas</div>
-        </div>
-        <div style="display:flex;gap:6px;flex-shrink:0">
-          <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="syncGroup('${name}', false)">Incremental</button>
-          <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="syncGroup('${name}', true)">Completo</button>
-        </div>
-      </div>`;
-  }).join('');
-}
-
-async function syncGroup(name, full) {
-  if (full) {
-    const label = (SYNC_GROUP_META[name] || {}).label || name;
-    if (!confirm('¿Re-descargar TODAS las tablas de "' + label + '" desde Access? Puede tardar varios minutos.')) return;
-  }
-  try {
-    await fetch('/api/sync/group/' + name + (full ? '?full_refresh=true' : ''), { method: 'POST' });
-    pollSync();
-    setTimeout(renderSyncGroups, 1500);
-  } catch (e) { alert('No se pudo iniciar el sync.'); }
-}
-
 // Hierarchy definition: display_names from Access.
 // Node = string (leaf) | { n: string, ch: Node[] } (parent with children)
 const EXP_TREE = [
@@ -6791,11 +6765,6 @@ async function showTrabajos() {
     </div>
 
     <div class="card" style="margin-bottom:14px">
-      <div class="card-title">Sincronizaci&#243;n por grupo</div>
-      <div id="sync-groups-list"><div class="loading" style="padding:8px 0">Cargando...</div></div>
-    </div>
-
-    <div class="card" style="margin-bottom:14px">
       <div class="card-title" style="display:flex;align-items:baseline;justify-content:space-between;gap:8px">
         <span>Pendiente de fundir por material</span>
         <div style="display:flex;align-items:baseline;gap:10px">
@@ -6815,13 +6784,7 @@ async function showTrabajos() {
     </div>
 
     <div class="card" style="margin-bottom:14px">
-      <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
-        <span>Pr&#243;ximos vencimientos &mdash; 30 d&#237;as</span>
-        <label style="display:flex;align-items:center;gap:6px;font-size:11px;font-weight:400;color:var(--muted);cursor:pointer">
-          <input type="checkbox" id="chk-filtro-programadas" onchange="toggleFiltroProgramadas(this.checked)" ${S.filtroProgramadas ? 'checked' : ''}>
-          Filtrar "programadas"
-        </label>
-      </div>
+      <div class="card-title">Pr&#243;ximos vencimientos &mdash; 30 d&#237;as</div>
       <div style="display:flex;gap:12px;font-size:11px;margin-bottom:10px;flex-wrap:wrap">
         <span style="display:flex;align-items:center;gap:5px"><span style="width:12px;height:12px;border-radius:2px;background:rgba(79,140,247,.35);display:inline-block"></span>&#8804; 30 d</span>
         <span style="display:flex;align-items:center;gap:5px"><span style="width:12px;height:12px;border-radius:2px;background:rgba(255,167,38,.45);display:inline-block"></span>&#8804; 15 d</span>
@@ -6862,7 +6825,6 @@ async function showTrabajos() {
   `);
   chipRender('tr');
   loadPipeline();
-  renderSyncGroups();
   _pendFundirKgMode = false;
   _renderPendienteFundirChart('chart-pend-fundir-tr', 'pend-fundir-sub-tr', S.dashMeses);
   await loadTrabajos();
