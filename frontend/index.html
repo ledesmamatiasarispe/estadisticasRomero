@@ -639,6 +639,10 @@ tr:last-child td { border-bottom: none; }
       <div style="border-top:1px solid var(--border);margin-top:6px;padding-top:8px">
         <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px">Por estado de OT</div>
         <div id="pd-estados-list" style="max-height:180px;overflow-y:auto"></div>
+        <label style="display:flex;align-items:center;gap:8px;padding:8px 0 2px;cursor:pointer;font-size:12px;color:var(--muted)">
+          <input type="checkbox" id="pd-chk-separar-estados" checked> Una lista separada por cada estado tildado
+        </label>
+        <div style="font-size:11px;color:var(--muted);padding-left:24px">Si se destilda: una sola tabla con todos juntos, ordenada por fecha de entrega.</div>
       </div>
       <button class="page-btn" style="width:100%;margin-top:12px;padding:9px;font-size:13px" onclick="_printDashSelected()">&#128438; Imprimir seleccionadas</button>
     </div>
@@ -1652,10 +1656,12 @@ function _printDashSectionHtml(key, first) {
   return `<h1 style="${pageBreak}">${meta.title}</h1>${clone.outerHTML}`;
 }
 
-async function _printEstadoSectionHtml(codigo, first) {
+function _printEstadoLabel(codigo) {
   const meta = ((_trabajosMeta && _trabajosMeta.estados) || []).find(e => e.codigo === codigo);
-  const label = meta ? meta.label : codigo;
+  return meta ? meta.label : codigo;
+}
 
+async function _fetchTrabajosPorEstado(codigo) {
   let rows = [], page = 1, pages = 1;
   do {
     let d;
@@ -1665,38 +1671,65 @@ async function _printEstadoSectionHtml(codigo, first) {
     pages = d.pages || 1;
     page++;
   } while (page <= pages && rows.length < 2000);
+  return rows;
+}
 
+function _printTrabajosTableHtml(rows, { conEstado } = {}) {
   const body = rows.length
     ? rows.map(r => `
         <tr>
           <td><code>${String(r.iditemtrabajo).padStart(6, '0')}</code></td>
+          ${conEstado ? `<td>${r.estado_label || r.estadotrabajo || '—'}</td>` : ''}
           <td>${r.cliente_nombre || r.codigo_cliente || '—'}</td>
           <td>${r.nombrepieza || '—'}</td>
           <td>${r.fechaprevista ? r.fechaprevista.slice(0, 10) : '—'}</td>
           <td style="text-align:right">${r.cantidadproducida ?? '—'}</td>
           <td style="text-align:right">${r.cantidadentregada ?? '—'}</td>
         </tr>`).join('')
-    : '<tr><td colspan="6">Sin OTs en este estado</td></tr>';
-
-  const pageBreak = first ? '' : 'page-break-before:always;';
-  return `<h1 style="${pageBreak}">OTs — ${label}</h1>
-    <table>
-      <thead><tr><th>N&#176; OT</th><th>Cliente</th><th>Pieza</th><th>F. Entrega</th><th style="text-align:right">Prod.</th><th style="text-align:right">Entreg.</th></tr></thead>
+    : `<tr><td colspan="${conEstado ? 7 : 6}">Sin OTs</td></tr>`;
+  return `<table>
+      <thead><tr>
+        <th>N&#176; OT</th>${conEstado ? '<th>Estado</th>' : ''}<th>Cliente</th><th>Pieza</th>
+        <th>F. Entrega</th><th style="text-align:right">Prod.</th><th style="text-align:right">Entreg.</th>
+      </tr></thead>
       <tbody>${body}</tbody>
     </table>`;
+}
+
+async function _printEstadoSectionHtml(codigo, first) {
+  const rows = await _fetchTrabajosPorEstado(codigo);
+  const pageBreak = first ? '' : 'page-break-before:always;';
+  return `<h1 style="${pageBreak}">OTs — ${_printEstadoLabel(codigo)}</h1>${_printTrabajosTableHtml(rows, { conEstado: false })}`;
+}
+
+async function _printEstadosCombinedSectionHtml(codigos, first) {
+  let rows = [];
+  for (const cod of codigos) {
+    rows = rows.concat((await _fetchTrabajosPorEstado(cod)).map(r => ({ ...r, estado_label: r.estado_label || _printEstadoLabel(cod) })));
+  }
+  rows.sort((a, b) => (a.fechaprevista || '').localeCompare(b.fechaprevista || ''));
+  const pageBreak = first ? '' : 'page-break-before:always;';
+  return `<h1 style="${pageBreak}">OTs — estados seleccionados (por fecha de entrega)</h1>${_printTrabajosTableHtml(rows, { conEstado: true })}`;
 }
 
 async function _printDashSelected() {
   const selected = Object.keys(_PRINT_DASH_META)
     .filter(k => ($id('pd-chk-' + k) || {}).checked);
   const estadosSel = Array.from(document.querySelectorAll('.pd-chk-estado:checked')).map(el => el.value);
+  const separarEstados = ($id('pd-chk-separar-estados') || {}).checked !== false;
   if (!selected.length && !estadosSel.length) { alert('Elegí al menos una lista para imprimir.'); return; }
 
   const now = new Date().toLocaleString('es-AR');
   const sections = [];
   selected.forEach(k => sections.push(_printDashSectionHtml(k, sections.length === 0)));
-  for (const cod of estadosSel) {
-    sections.push(await _printEstadoSectionHtml(cod, sections.length === 0));
+  if (estadosSel.length) {
+    if (separarEstados) {
+      for (const cod of estadosSel) {
+        sections.push(await _printEstadoSectionHtml(cod, sections.length === 0));
+      }
+    } else {
+      sections.push(await _printEstadosCombinedSectionHtml(estadosSel, sections.length === 0));
+    }
   }
   const sectionsHtml = sections.join('');
 
