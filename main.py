@@ -1210,7 +1210,7 @@ def dashboard_vencidos(meses: int = 2):
         rows = conn.execute(
             _PROXIMOS_SELECT +
             "  AND date(idp.fechadeentrega) BETWEEN date('now', ? || ' months') AND date('now', '-1 days')"
-            " ORDER BY idp.fechadeentrega DESC LIMIT 50",
+            " ORDER BY idp.fechadeentrega ASC LIMIT 50",
             (f"-{meses}",)
         ).fetchall()
         return _resolve_ot_estados(rows, conn)
