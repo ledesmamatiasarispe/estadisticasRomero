@@ -397,6 +397,11 @@ tr:last-child td { border-bottom: none; }
   background: rgba(0,0,0,.7); align-items: flex-start; justify-content: center; padding-top: 100px;
 }
 #print-dash-modal.open { display: flex; }
+#sin-peso-modal {
+  display: none; position: fixed; inset: 0; z-index: 2000;
+  background: rgba(0,0,0,.7); align-items: flex-start; justify-content: center; padding-top: 60px;
+}
+#sin-peso-modal.open { display: flex; }
 .probeta-mbox {
   background: var(--surface); border: 1px solid rgba(167,107,250,.5);
   border-radius: 10px; width: 900px; max-width: calc(100vw - 32px);
@@ -645,6 +650,19 @@ tr:last-child td { border-bottom: none; }
         <div style="font-size:11px;color:var(--muted);padding-left:24px">Si se destilda: una sola tabla con todos juntos, ordenada por fecha de entrega.</div>
       </div>
       <button class="page-btn" style="width:100%;margin-top:12px;padding:9px;font-size:13px" onclick="_printDashSelected()">&#128438; Imprimir seleccionadas</button>
+    </div>
+  </div>
+</div>
+
+<div id="sin-peso-modal" onclick="if(event.target===this)closeSinPesoModal()">
+  <div class="probeta-mbox">
+    <div class="probeta-mhdr">
+      <span style="font-size:20px">&#9888;</span>
+      <h3>Piezas pendientes de fundir sin peso cargado</h3>
+      <button class="probeta-mclose" onclick="closeSinPesoModal()">&#10005;</button>
+    </div>
+    <div class="probeta-mbody" id="sin-peso-modal-body">
+      <div class="loading">Cargando...</div>
     </div>
   </div>
 </div>
@@ -1019,6 +1037,55 @@ function _drawPendienteFundirChart(canvasId, subtitleId, data) {
     },
     options: opts,
   });
+}
+
+async function openSinPesoModal() {
+  const modal = $id('sin-peso-modal');
+  if (modal) modal.classList.add('open');
+  const body = $id('sin-peso-modal-body');
+  if (!body) return;
+  body.innerHTML = '<div class="loading">Cargando...</div>';
+
+  let rows;
+  try { rows = await api('/api/dashboard/pendiente_fundir/sin_peso?meses=' + S.dashMeses); }
+  catch (e) { body.innerHTML = '<div class="empty">No se pudo cargar</div>'; return; }
+
+  if (!rows.length) { body.innerHTML = '<div class="empty">No hay piezas pendientes de fundir sin peso cargado &#127881;</div>'; return; }
+
+  const totalPzs = rows.reduce((s, r) => s + (r.piezas_pendientes || 0), 0);
+  body.innerHTML = `
+    <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+      ${fmt(rows.length)} pieza${rows.length !== 1 ? 's' : ''} distinta${rows.length !== 1 ? 's' : ''}
+      &middot; ${fmt(totalPzs)} unidades pendientes sin poder calcular su kg
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th></th><th>Pieza</th><th>C&#243;digo</th><th>Material</th>
+          <th style="text-align:right">OTs</th><th style="text-align:right">Pendientes</th>
+        </tr></thead>
+        <tbody>${rows.map(r => `
+          <tr class="tr-link" onclick="closeSinPesoModal();go('pieza',${r.pieza_id})">
+            <td style="width:44px">
+              ${r.foto
+                ? `<img src="/api/fotos/modelos/${encodeURIComponent(r.foto)}" alt=""
+                     style="width:40px;height:40px;object-fit:cover;border-radius:4px;display:block"
+                     onerror="this.outerHTML='<span style=&quot;font-size:20px;opacity:.3&quot;>&#128247;</span>'">`
+                : '<span style="font-size:20px;opacity:.3">&#128247;</span>'}
+            </td>
+            <td>${r.nombre || '—'}</td>
+            <td><code style="font-size:12px">${r.codigo_pieza || '—'}</code></td>
+            <td>${r.material || '—'}</td>
+            <td style="text-align:right">${fmt(r.ots)}</td>
+            <td style="text-align:right;font-weight:600">${fmt(r.piezas_pendientes)}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+function closeSinPesoModal() {
+  const modal = $id('sin-peso-modal');
+  if (modal) modal.classList.remove('open');
 }
 
 let _drillMesBack = null;
@@ -1890,6 +1957,9 @@ async function showDashboard() {
         </div>
       </div>
       <div class="chart-box"><canvas id="chart-pend-fundir-dash"></canvas></div>
+      <div style="text-align:right;margin-top:8px">
+        <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="openSinPesoModal()">&#9888; Ver piezas sin peso</button>
+      </div>
     </div>
 
     <div id="probeta-bar" onclick="openProbetaModal()">
@@ -6876,6 +6946,9 @@ async function showTrabajos() {
         </div>
       </div>
       <div class="chart-box"><canvas id="chart-pend-fundir-tr"></canvas></div>
+      <div style="text-align:right;margin-top:8px">
+        <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="openSinPesoModal()">&#9888; Ver piezas sin peso</button>
+      </div>
     </div>
 
     <div class="card" style="margin-bottom:14px">

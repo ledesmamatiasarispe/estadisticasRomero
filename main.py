@@ -1291,6 +1291,55 @@ def dashboard_pendiente_fundir(meses: int = 6):
         conn.close()
 
 
+@app.get("/api/dashboard/pendiente_fundir/sin_peso")
+def dashboard_pendiente_fundir_sin_peso(meses: int = 6):
+    """Piezas pendientes de fundir sin peso cargado, para ubicarlas y pesarlas.
+
+    A diferencia de dashboard_pendiente_fundir (agrupado por material vía
+    PesosDePiezas.nombredepiezasid_, que da NULL cuando el Trabajo no tiene
+    idpesopieza asignado), acá la identidad de la pieza sale de
+    ItemDetallePedido.idpieza — el único vínculo que sigue existiendo aunque
+    la OT nunca haya llegado a apuntar a una fila de PesosDePiezas.
+    """
+    meses = max(1, min(meses, 60))
+    conn = get_db()
+    try:
+        rows = conn.execute("""
+            SELECT
+                np.id                                       AS pieza_id,
+                np.nombrepieza                              AS nombre,
+                np."códigopiezapuestoporcliente"            AS codigo_pieza,
+                COALESCE(tm.sobrenombrematerial, t."códdeagregados") AS material,
+                COUNT(DISTINCT t.iditemtrabajo)              AS ots,
+                SUM(t.cantidad - COALESCE(t.cantidadfundida, 0)) AS piezas_pendientes,
+                (SELECT fdm.enlacefotomodelo
+                 FROM PiezasPorModelo ppm2
+                 JOIN FotosDeModelos fdm
+                   ON fdm."códigomodelo" = ppm2."códmodelo"
+                  AND fdm.habilitada = 'True'
+                 WHERE ppm2."códpieza" = np.id
+                 LIMIT 1)                                    AS foto
+            FROM Trabajos t
+            JOIN ItemDetallePedido idp ON idp.iditempedido = t.iditempedido
+            JOIN Pedidos p             ON p.idpedido = idp.idpedido
+            LEFT JOIN TiposMaterial tm ON tm."códmaterial" = CAST(t."códdeagregados" AS TEXT)
+            LEFT JOIN PesosDePiezas pp ON pp.códpieza = t.idpesopieza
+            LEFT JOIN NombreDePiezas np ON np.id = idp.idpieza
+            WHERE upper(t.estadotrabajo) NOT IN ('K','D','A','B')
+              AND upper(p.estadopedido)  NOT IN ('K','D')
+              AND upper(idp.estadoitem)  NOT IN ('K','D')
+              AND COALESCE(t.cantidadfundida, 0) < t.cantidad
+              AND t."códdeagregados" NOT IN ('--', '4', 'Ar', 'ar', 'AR')
+              AND COALESCE(t.fechacargaot, p.fechapedido) >= date('now', ? || ' months')
+              AND pp.pesopieza IS NULL
+            GROUP BY np.id, material
+            ORDER BY piezas_pendientes DESC
+        """, (f"-{meses}",)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 @app.post("/api/piezas/{pieza_id}/probeta_traccion")
 def toggle_probeta_traccion(pieza_id: int, activar: bool = True):
     """Activa o desactiva el flag pide_probeta_traccion para una pieza."""
