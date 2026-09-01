@@ -1652,6 +1652,7 @@ const _dashGroups = {};
 const _pedClickTimers = {};
 let _trendMode = 'barras';
 let _dashTendencia = null;
+let _trendProyeccion = null;   // {programado:{ots,piezas}, fundido:{ots,piezas}} para la barra del año actual
 let _dashKgMode = false;
 let _trendMensualData = null;
 let _trendDesde = null;
@@ -2199,6 +2200,23 @@ async function showDashboard() {
   _trendDesde = tendencia_desde;
   _trendHasta = tendencia_hasta;
   _updateTrendRangeLabel();
+
+  // Proyección sobre la barra de Entregadas del año actual: cuánto se sumaría
+  // si se entrega todo lo Programado (nada producido todavía, cant_pedida es
+  // lo que faltaría fundir) y todo lo ya Fundido (producidas, lo que ya existe
+  // esperando pasar a entrega).
+  _trendProyeccion = null;
+  api('/api/trabajos/pipeline').then(p => {
+    const porEstado = Object.fromEntries((p.estados || []).map(e => [e.estado, e]));
+    const prog = porEstado['P'] || { n_ots: 0, cant_pedida: 0 };
+    const fund = porEstado['F'] || { n_ots: 0, cant_pedida: 0, producidas: 0 };
+    _trendProyeccion = {
+      programado: { ots: prog.n_ots, piezas: prog.cant_pedida },
+      fundido:    { ots: fund.n_ots, piezas: fund.producidas || fund.cant_pedida },
+    };
+    if (_trendMode === 'barras') _renderTrendBarras();
+  }).catch(() => {});
+
   _renderTrendBarras();
   _initTrendRangeSelects();
 
@@ -2249,6 +2267,38 @@ async function _onTrendRangeChange() {
   }
 }
 
+// Encima de la barra "Entregadas" del año actual: cuánto sumaría si se
+// entrega todo lo que ya está Programado o Fundido -- para poder estimar
+// dónde quedaría el año si se funde/entrega todo el pipeline actual.
+const _trendProyeccionPlugin = {
+  id: 'trendProyeccion',
+  afterDatasetsDraw(chart, args, opts) {
+    if (!opts || !opts.proyeccion) return;
+    const { proyeccion, tendencia } = opts;
+    const añoActual = String(new Date().getFullYear());
+    const idx = tendencia.findIndex(t => t.año === añoActual);
+    if (idx < 0) return;
+    const meta = chart.getDatasetMeta(0); // dataset "Entregadas"
+    const bar = meta && meta.data[idx];
+    if (!bar) return;
+    const { programado, fundido } = proyeccion;
+    const entregadasActual = tendencia[idx].entregadas || 0;
+    const proyectado = entregadasActual + (programado.piezas || 0) + (fundido.piezas || 0);
+    const ctx = chart.ctx;
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillStyle = '#8b929e';
+    ctx.font = '700 10px system-ui, -apple-system, sans-serif';
+    ctx.fillText('+' + fmt(programado.piezas) + ' prog. · +' + fmt(fundido.piezas) + ' fund.', bar.x, bar.y - 14);
+    ctx.fillStyle = '#ffa726';
+    ctx.font = '700 11px system-ui, -apple-system, sans-serif';
+    ctx.fillText('→ ' + fmt(proyectado) + ' proy.', bar.x, bar.y - 2);
+    ctx.restore();
+  },
+};
+Chart.register(_trendProyeccionPlugin);
+
 function _toggleDashKg() {
   _dashKgMode = !_dashKgMode;
   if (_trendMode === 'curvas') _renderTrendCurvas();
@@ -2273,6 +2323,10 @@ function _renderTrendBarras() {
 
   const canvas = $id('chart-trend'); if (!canvas) return;
   const opts = chartDefaults();
+  opts.layout = { padding: { top: 30 } }; // lugar para la proyección arriba de la barra del año actual
+  opts.plugins.trendProyeccion = (!useKg && _trendProyeccion)
+    ? { proyeccion: _trendProyeccion, tendencia: _dashTendencia }
+    : null;
   opts.onHover = (e, els) => { try { e.native.target.style.cursor = els.length ? 'pointer' : 'default'; } catch(_){} };
   opts.onClick = async (evt, els) => {
     if (!els.length) return;
