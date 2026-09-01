@@ -28,8 +28,15 @@ FRONTEND   = ROOT / "frontend"
 PS32       = r"C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
 PS_SCRIPT  = ROOT / "sync_access.ps1"
 
-# Carpeta con fotos de modelos — actualizar cuando se encuentre la ruta en M:
-FOTOS_MODELOS_PATH: str = r"M:\ArchivosCompartidosResguardo\ArchivosCompartidos NO BORRAR\FotosDigitales\FotosdB\Modelos"
+# Carpetas con fotos de modelos, en orden de prioridad -- las fotos de FotosDeModelos
+# quedaron repartidas entre estas dos redes compartidas con el tiempo (833 nombres se
+# repiten en las dos, pero cada una tiene ~3500 que la otra no tiene), así que hay que
+# buscar el archivo en todas antes de darlo por no encontrado.
+FOTOS_MODELOS_PATHS: list[str] = [
+    r"M:\ArchivosCompartidosResguardo\ArchivosCompartidos NO BORRAR\FotosDigitales\FotosdB\Modelos",
+    r"M:\Bases\FotosDigitales",
+    r"M:\ArchivosCompartidosResguardo\ArchivosCompartidos NO BORRAR\FotosDigitales\FotosdB\Modelos retirados - Entregados",
+]
 INFORMES_PSP = ROOT / "data" / "informes_psp"
 INFORMES_PSP.mkdir(parents=True, exist_ok=True)
 
@@ -37,19 +44,34 @@ _fotos_ok: Optional[bool] = None
 _fotos_ok_ts: float = 0.0
 
 def _fotos_disponibles() -> bool:
-    """Check M: drive availability with 2s timeout; result cached 30s."""
+    """Check that at least one photo folder is reachable, with 2s timeout; cached 30s."""
     global _fotos_ok, _fotos_ok_ts
     now = _time.monotonic()
     if _fotos_ok is not None and (now - _fotos_ok_ts) < 30:
         return bool(_fotos_ok)
     try:
-        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
-            result = ex.submit(os.path.isdir, FOTOS_MODELOS_PATH).result(timeout=2)
+        with _cf.ThreadPoolExecutor(max_workers=len(FOTOS_MODELOS_PATHS)) as ex:
+            futures = [ex.submit(os.path.isdir, p) for p in FOTOS_MODELOS_PATHS]
+            result = any(f.result(timeout=2) for f in futures)
         _fotos_ok = bool(result)
     except Exception:
         _fotos_ok = False
     _fotos_ok_ts = _time.monotonic()
     return bool(_fotos_ok)
+
+
+def _buscar_foto_modelo(filename: str) -> Optional[Path]:
+    """Primera carpeta de FOTOS_MODELOS_PATHS que tenga este archivo, o None."""
+    for carpeta in FOTOS_MODELOS_PATHS:
+        candidato = Path(carpeta) / filename
+        try:
+            with _cf.ThreadPoolExecutor(max_workers=1) as ex:
+                existe = ex.submit(candidato.exists).result(timeout=2)
+        except Exception:
+            existe = False
+        if existe:
+            return candidato
+    return None
 
 _MESES_ES = ['', 'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun',
              'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic']
@@ -3579,7 +3601,7 @@ def get_modelo_detail(modelo_id: int):
             "movimientos": [dict(r) for r in movimientos],
             "fotos": [dict(r) for r in fotos],
             "fotos_count": len(fotos),
-            "fotos_disponibles": bool(FOTOS_MODELOS_PATH),
+            "fotos_disponibles": bool(FOTOS_MODELOS_PATHS),
             "raw": _raw(conn, "Modelos", "códigomodelo", modelo_id),
         }
     finally:
@@ -3645,15 +3667,13 @@ def get_modelos_for_pieza(pieza_id: int):
 
 @app.get("/api/fotos/modelos/{filename}")
 def get_foto_modelo(filename: str):
-    if not FOTOS_MODELOS_PATH or not _fotos_disponibles():
+    if not FOTOS_MODELOS_PATHS or not _fotos_disponibles():
         raise HTTPException(503, "Fotos de modelos no disponibles")
-    foto_path = Path(FOTOS_MODELOS_PATH) / filename
     try:
-        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
-            exists = ex.submit(foto_path.exists).result(timeout=2)
+        foto_path = _buscar_foto_modelo(filename)
     except Exception:
         raise HTTPException(503, "Fotos de modelos no disponibles")
-    if not exists:
+    if foto_path is None:
         raise HTTPException(404, f"Foto '{filename}' no encontrada")
     return FileResponse(str(foto_path))
 
