@@ -1126,12 +1126,10 @@ table{border-collapse:collapse;width:100%;font-size:12px}
 th{text-align:left;padding:6px 8px;background:#f2f2f2;border-bottom:2px solid #ccc;font-size:10px;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}
 td{padding:6px 8px;border-bottom:1px solid #eee;vertical-align:middle}
 code{font-family:ui-monospace,monospace}
+tfoot td{border-top:1px solid #000;border-bottom:none;padding-top:8px}
 @media print{
   body{padding:0}
-  @page{
-    margin:15mm; size:A4;
-    @bottom-right{ content:"Página " counter(page) " / " counter(pages); font-size:11px; color:#000; }
-  }
+  @page{margin:15mm;size:A4}
 }
 </style></head><body>
 <h1>&#9888; Piezas pendientes de fundir sin peso cargado</h1>
@@ -1141,6 +1139,7 @@ code{font-family:ui-monospace,monospace}
     <th></th><th></th><th>Pieza</th><th>C&#243;digo</th><th>Material</th>
     <th style="text-align:right">Pendientes</th><th>Visto desde</th><th>Peso medido (kg)</th>
   </tr></thead>
+  <tfoot><tr><td colspan="8" class="print-date">Impreso: ${now}</td></tr></tfoot>
   <tbody>${body}</tbody>
 </table>
 </body></html>`);
@@ -1817,7 +1816,7 @@ function closePrintDashModal() {
   if (modal) modal.classList.remove('open');
 }
 
-function _printDashSectionHtml(key, first, estadosFiltro) {
+function _printDashSectionHtml(key, hoja, totalHojas, now, estadosFiltro) {
   const meta = _PRINT_DASH_META[key];
   if (!meta) return '';
   const contentEl = $id(meta.elId);
@@ -1831,8 +1830,19 @@ function _printDashSectionHtml(key, first, estadosFiltro) {
     });
     titulo += ' — ' + estadosFiltro.join(', ');
   }
-  const pageBreak = first ? '' : 'page-break-before:always;';
-  return `<h1 style="${pageBreak}">${titulo}</h1>${clone.outerHTML}`;
+  // counter(page)/counter(pages) de @page no anda en Chrome sin activar un flag
+  // experimental, así que en vez de un número de página real (imposible de saber
+  // sin eso) numeramos las listas -- y el <tfoot> repite la fecha en cada hoja
+  // física que ocupe la tabla, eso sí anda siempre.
+  const tabla = clone.querySelector('table');
+  if (tabla) {
+    const cols = tabla.querySelectorAll('thead th').length || 1;
+    const tfoot = document.createElement('tfoot');
+    tfoot.innerHTML = `<tr><td colspan="${cols}" class="print-date">Impreso: ${now}</td></tr>`;
+    tabla.appendChild(tfoot);
+  }
+  const pageBreak = hoja > 1 ? 'page-break-before:always;' : '';
+  return `<h1 style="${pageBreak}">${titulo} <span style="font-weight:400;font-size:12px;color:#888">— Hoja ${hoja} de ${totalHojas}</span></h1>${clone.outerHTML}`;
 }
 
 async function _printDashSelected() {
@@ -1842,8 +1852,7 @@ async function _printDashSelected() {
   if (!selected.length) { alert('Elegí al menos una lista para imprimir.'); return; }
 
   const now = new Date().toLocaleString('es-AR');
-  const sections = [];
-  selected.forEach(k => sections.push(_printDashSectionHtml(k, sections.length === 0, estadosSel)));
+  const sections = selected.map((k, i) => _printDashSectionHtml(k, i + 1, selected.length, now, estadosSel));
   const sectionsHtml = sections.join('');
 
   const w = window.open('', '_blank', 'width=940,height=720,scrollbars=yes');
@@ -1871,15 +1880,12 @@ td{padding:5px 8px;border-bottom:1px solid #eee;vertical-align:middle}
 .ent-parcial  { background-color: rgba(255,167,38,.14); }
 .prob-tag{display:inline-flex;align-items:center;gap:4px;background:rgba(124,77,255,.12);border:1px solid rgba(124,77,255,.4);border-radius:4px;padding:1px 6px;font-size:10px;color:#5e35b1;white-space:nowrap}
 code{font-family:ui-monospace,monospace}
+tfoot td{border-top:1px solid #000;border-bottom:none;padding-top:8px}
 @media print{
   body{padding:0}
-  @page{
-    margin:15mm; size:A4;
-    @bottom-right{ content:"Página " counter(page) " / " counter(pages); font-size:11px; color:#000; }
-  }
+  @page{margin:15mm;size:A4}
 }
 </style></head><body>
-<div class="period"><span class="print-date">Impreso: ${now}</span></div>
 ${sectionsHtml}
 </body></html>`);
   w.document.close();
