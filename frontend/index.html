@@ -1039,6 +1039,8 @@ function _drawPendienteFundirChart(canvasId, subtitleId, data) {
   });
 }
 
+let _sinPesoRows = [];
+
 async function openSinPesoModal() {
   const modal = $id('sin-peso-modal');
   if (modal) modal.classList.add('open');
@@ -1050,13 +1052,17 @@ async function openSinPesoModal() {
   try { rows = await api('/api/dashboard/pendiente_fundir/sin_peso?meses=' + S.dashMeses); }
   catch (e) { body.innerHTML = '<div class="empty">No se pudo cargar</div>'; return; }
 
+  _sinPesoRows = rows;
   if (!rows.length) { body.innerHTML = '<div class="empty">No hay piezas pendientes de fundir sin peso cargado &#127881;</div>'; return; }
 
   const totalPzs = rows.reduce((s, r) => s + (r.piezas_pendientes || 0), 0);
   body.innerHTML = `
-    <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
-      ${fmt(rows.length)} pieza${rows.length !== 1 ? 's' : ''} distinta${rows.length !== 1 ? 's' : ''}
-      &middot; ${fmt(totalPzs)} unidades pendientes sin poder calcular su kg
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px">
+      <div style="font-size:12px;color:var(--muted)">
+        ${fmt(rows.length)} pieza${rows.length !== 1 ? 's' : ''} distinta${rows.length !== 1 ? 's' : ''}
+        &middot; ${fmt(totalPzs)} unidades pendientes sin poder calcular su kg
+      </div>
+      <button class="page-btn" style="font-size:11px;padding:4px 10px;flex-shrink:0" onclick="_imprimirSinPeso()">&#128438; Imprimir</button>
     </div>
     <div class="tbl-wrap">
       <table>
@@ -1083,6 +1089,58 @@ async function openSinPesoModal() {
         </tbody>
       </table>
     </div>`;
+}
+
+function _imprimirSinPeso() {
+  const rows = _sinPesoRows;
+  if (!rows.length) return;
+  const now = new Date().toLocaleString('es-AR');
+
+  const body = rows.map(r => `
+    <tr>
+      <td style="width:64px">
+        ${r.foto ? `<img src="/api/fotos/modelos/${encodeURIComponent(r.foto)}" alt=""
+             style="width:56px;height:56px;object-fit:cover;border-radius:4px;display:block"
+             onerror="this.style.display='none'">` : ''}
+      </td>
+      <td style="font-size:22px;text-align:center">&#9744;</td>
+      <td><strong>${r.nombre || '—'}</strong></td>
+      <td><code>${r.codigo_pieza || '—'}</code></td>
+      <td>${r.material || '—'}</td>
+      <td style="text-align:right">${fmt(r.piezas_pendientes)}</td>
+      <td>${r.visto_desde || '—'}</td>
+      <td style="min-width:120px"></td>
+    </tr>`).join('');
+
+  const w = window.open('', '_blank', 'width=940,height=720,scrollbars=yes');
+  if (!w) { alert('Permitir ventanas emergentes para usar esta función.'); return; }
+  w.document.open();
+  w.document.write(`<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<title>Piezas pendientes de pesar</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;font-size:12px;color:#111;background:#fff;padding:24px 28px}
+h1{font-size:17px;font-weight:700;color:#333;margin-bottom:3px}
+.period{font-size:11px;color:#888;margin-bottom:20px}
+table{border-collapse:collapse;width:100%;font-size:12px}
+th{text-align:left;padding:6px 8px;background:#f2f2f2;border-bottom:2px solid #ccc;font-size:10px;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}
+td{padding:6px 8px;border-bottom:1px solid #eee;vertical-align:middle}
+code{font-family:ui-monospace,monospace}
+@media print{body{padding:0}@page{margin:15mm;size:A4}}
+</style></head><body>
+<h1>&#9888; Piezas pendientes de fundir sin peso cargado</h1>
+<div class="period">Impreso: ${now} &middot; ${fmt(rows.length)} piezas &mdash; marcar al pesar cada una</div>
+<table>
+  <thead><tr>
+    <th></th><th></th><th>Pieza</th><th>C&#243;digo</th><th>Material</th>
+    <th style="text-align:right">Pendientes</th><th>Visto desde</th><th>Peso medido (kg)</th>
+  </tr></thead>
+  <tbody>${body}</tbody>
+</table>
+</body></html>`);
+  w.document.close();
+  setTimeout(() => w.print(), 500);
 }
 function closeSinPesoModal() {
   const modal = $id('sin-peso-modal');
