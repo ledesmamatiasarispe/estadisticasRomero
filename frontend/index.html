@@ -979,6 +979,20 @@ function _togglePendFundirKg() {
   }
 }
 
+// "Nice number" para el paso mayor de la regla: ~6 marcas mayores prolijas
+// (1/2/5 × potencia de 10) sobre el maximo actual, con 5 subdivisiones menores
+// por cada una -- asi el paso depende del total en vez de ser fijo.
+function _reglaPasos(maxVal) {
+  if (!maxVal || maxVal <= 0) return { major: 1, minor: 0.2, subdiv: 5 };
+  const rough = maxVal / 6;
+  const mag = Math.pow(10, Math.floor(Math.log10(rough)));
+  const norm = rough / mag;
+  const niceNorm = norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10;
+  const major = niceNorm * mag;
+  const subdiv = 5;
+  return { major, minor: major / subdiv, subdiv };
+}
+
 function _drawPendienteFundirChart(canvasId, subtitleId, data) {
   const canvas = $id(canvasId);
   if (!canvas) return;
@@ -1000,9 +1014,29 @@ function _drawPendienteFundirChart(canvasId, subtitleId, data) {
   const kgBtn = $id('pend-fundir-kg-btn');
   if (kgBtn) kgBtn.textContent = useKg ? 'Ver en piezas' : 'Ver en kg';
 
+  const valores = data.map(d => useKg ? (d.kg_pendientes || 0) : d.ots);
+  const { major, minor, subdiv } = _reglaPasos(Math.max(...valores, 0));
+  const esMayor = (val) => Math.round(val / minor) % subdiv === 0;
+
   const opts = chartDefaults();
   opts.indexAxis = 'y';
   opts.plugins.legend.display = false;
+  // Eje tipo regla: paso mayor "prolijo" (1/2/5×10^n) segun el maximo actual, con
+  // 5 subdivisiones menores mas finas y sin etiqueta -- las marcas mayores, mas
+  // oscuras y con el numero, son las que se leen de un vistazo.
+  opts.scales.x = {
+    min: 0,
+    ticks: {
+      stepSize: minor,
+      color: (ctx) => esMayor(ctx.tick.value) ? '#c9d1d9' : '#484f58',
+      font: (ctx) => esMayor(ctx.tick.value) ? { size: 11, weight: '700' } : { size: 9 },
+      callback: (val) => esMayor(val) ? fmt(Math.round(val)) : '',
+    },
+    grid: {
+      color: (ctx) => esMayor(ctx.tick.value) ? '#3d4450' : '#21262d',
+      lineWidth: (ctx) => esMayor(ctx.tick.value) ? 1.5 : 1,
+    },
+  };
   opts.plugins.tooltip = { callbacks: {
     title: (items) => data[items[0].dataIndex].material,
     label: (ctx) => {
@@ -1025,7 +1059,7 @@ function _drawPendienteFundirChart(canvasId, subtitleId, data) {
     data: {
       labels: data.map(d => d.codigo + ((useKg && d.piezas_sin_peso) ? ' ⚠' : '')),
       datasets: [{
-        data: data.map(d => useKg ? (d.kg_pendientes || 0) : d.ots),
+        data: valores,
         backgroundColor: data.map(d => {
           if (!useKg || !d.piezas_sin_peso) return '#42a5f5bb';
           return d.piezas_sin_peso >= d.piezas_pendientes ? '#ef5350bb' : '#ffa726bb';
@@ -1151,49 +1185,16 @@ function closeSinPesoModal() {
   if (modal) modal.classList.remove('open');
 }
 
-async function _imprimirPendienteFundir() {
-  let rows;
-  try { rows = await api('/api/dashboard/pendiente_fundir/detalle?meses=' + S.dashMeses); }
-  catch (e) { alert('No se pudo cargar la lista.'); return; }
-  if (!rows.length) { alert('No hay OTs pendientes de fundir en este período.'); return; }
-
-  const porMaterial = new Map();
-  for (const r of rows) {
-    if (!porMaterial.has(r.material)) porMaterial.set(r.material, []);
-    porMaterial.get(r.material).push(r);
-  }
-  const materiales = Array.from(porMaterial.keys());
+function _imprimirPendienteFundir() {
+  const ids = _pendFundirIds;
+  const canvas = ids && $id(ids.canvasId);
+  if (!canvas) { alert('Esperá a que termine de cargar el gráfico.'); return; }
+  const sub = ids.subtitleId ? $id(ids.subtitleId) : null;
+  const subtitle = sub ? sub.textContent : '';
   const now = new Date().toLocaleString('es-AR');
+  const imgData = canvas.toDataURL('image/png');
 
-  const secciones = materiales.map((mat, i) => {
-    const filas = porMaterial.get(mat);
-    const totalPend = filas.reduce((s, r) => s + (r.pendientes || 0), 0);
-    const totalKg   = filas.reduce((s, r) => s + (r.kg_pendientes || 0), 0);
-    const body = filas.map(r => `
-      <tr>
-        <td><code>${String(r.iditemtrabajo).padStart(6, '0')}</code></td>
-        <td>${r.nombrepieza || '—'}</td>
-        <td><code>${r.codigo_pieza || '—'}</code></td>
-        <td>${r.cliente_nombre || '—'}</td>
-        <td>${r.fechaprevista ? r.fechaprevista.slice(0, 10) : '—'}</td>
-        <td>${r.estado_label || r.estadotrabajo || '—'}</td>
-        <td style="text-align:right">${fmt(r.pendientes)}</td>
-        <td style="text-align:right">${r.kg_pendientes != null ? fmtKg(r.kg_pendientes) : '—'}</td>
-      </tr>`).join('');
-    const pageBreak = i > 0 ? 'page-break-before:always;' : '';
-    return `<h1 style="${pageBreak}">Pendiente de fundir — ${mat} <span style="font-weight:400;font-size:12px;color:#888">— Hoja ${i + 1} de ${materiales.length}</span></h1>
-      <div class="period">${fmt(filas.length)} OT${filas.length !== 1 ? 's' : ''} &middot; ${fmt(totalPend)} piezas &middot; ${fmtKg(totalKg)}</div>
-      <table>
-        <thead><tr>
-          <th>N&#176; OT</th><th>Pieza</th><th>C&#243;digo</th><th>Cliente</th>
-          <th>F. Entrega</th><th>Estado</th><th style="text-align:right">Pendientes</th><th style="text-align:right">Kg</th>
-        </tr></thead>
-        <tfoot><tr><td colspan="8" class="print-date">Impreso: ${now}</td></tr></tfoot>
-        <tbody>${body}</tbody>
-      </table>`;
-  }).join('');
-
-  const w = window.open('', '_blank', 'width=940,height=720,scrollbars=yes');
+  const w = window.open('', '_blank', 'width=900,height=700,scrollbars=yes');
   if (!w) { alert('Permitir ventanas emergentes para usar esta función.'); return; }
   w.document.open();
   w.document.write(`<!DOCTYPE html>
@@ -1201,18 +1202,16 @@ async function _imprimirPendienteFundir() {
 <title>Pendiente de fundir por material</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:system-ui,-apple-system,sans-serif;font-size:12px;color:#111;background:#fff;padding:24px 28px}
+body{font-family:system-ui,-apple-system,sans-serif;color:#111;background:#fff;padding:24px 28px}
 h1{font-size:17px;font-weight:700;color:#333;margin-bottom:3px}
-.period{font-size:11px;color:#888;margin-bottom:12px}
+.period{font-size:11px;color:#888;margin-bottom:16px}
 .print-date{font-size:16px;color:#000;font-weight:700}
-table{border-collapse:collapse;width:100%;font-size:12px}
-th{text-align:left;padding:6px 8px;background:#f2f2f2;border-bottom:2px solid #ccc;font-size:10px;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}
-td{padding:6px 8px;border-bottom:1px solid #eee;vertical-align:middle}
-tfoot td{border-top:1px solid #000;border-bottom:none;padding-top:8px}
-code{font-family:ui-monospace,monospace}
+img{width:100%;display:block;background:#0d1117;border-radius:6px;padding:12px}
 @media print{body{padding:0}@page{margin:15mm;size:A4}}
 </style></head><body>
-${secciones}
+<h1>Pendiente de fundir por material</h1>
+<div class="period"><span class="print-date">Impreso: ${now}</span>${subtitle ? ' &middot; ' + subtitle : ''}</div>
+<img src="${imgData}" alt="Pendiente de fundir por material">
 </body></html>`);
   w.document.close();
   setTimeout(() => w.print(), 500);
