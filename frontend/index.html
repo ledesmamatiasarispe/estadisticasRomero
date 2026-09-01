@@ -2335,6 +2335,18 @@ function _renderTrendBarras() {
   opts.plugins.trendProyeccion = (!useKg && _trendProyeccion)
     ? { proyeccion: _trendProyeccion, tendencia: _dashTendencia }
     : null;
+  // En la barra Entregadas del año actual, el tooltip suma la proyección
+  // (Programadas) en vez de mostrar solo "Entregadas: X" por defecto.
+  const añoActualTT = String(new Date().getFullYear());
+  opts.plugins.tooltip = { callbacks: { label: (ctx) => {
+    const label = ctx.dataset.label || '';
+    const val = ctx.parsed.y;
+    if (ctx.datasetIndex === 0 && !useKg && _trendProyeccion && _dashTendencia[ctx.dataIndex].año === añoActualTT) {
+      const totalProg = val + _trendProyeccion.programado.piezas;
+      return label + ': ' + fmt(val) + ' + Programadas: ' + fmt(_trendProyeccion.programado.piezas) + ' = ' + fmt(totalProg);
+    }
+    return label + ': ' + (useKg ? fmtKg(val) : fmt(val));
+  } } };
   opts.onHover = (e, els) => { try { e.native.target.style.cursor = els.length ? 'pointer' : 'default'; } catch(_){} };
   opts.onClick = async (evt, els) => {
     if (!els.length) return;
