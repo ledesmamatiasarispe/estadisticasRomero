@@ -1249,6 +1249,23 @@ def dashboard_entregados(meses: int = 6):
         conn.close()
 
 
+# PesosDePiezas tiene, por pieza, varias filas (una por variante de moldeo) y
+# Trabajos.idpesopieza apunta a UNA variante puntual -- que en muchos casos quedó
+# sin asignar aunque la pieza sí tenga peso cargado en otras variantes (ver
+# dashboard_pendiente_fundir_sin_peso). -1 aparece como valor centinela de
+# "todavía no pesado" en algunas filas viejas, por eso el filtro > 0 en vez de
+# IS NOT NULL. Ambos endpoints resuelven primero por la variante exacta de la OT
+# y recién si esa no existe caen al promedio de las variantes válidas de la pieza.
+_CTE_PIEZAS_PESO = """
+    WITH piezas_peso AS (
+        SELECT nombredepiezasid_ AS pieza_id, AVG(pesopieza) AS peso_promedio
+        FROM PesosDePiezas
+        WHERE pesopieza > 0
+        GROUP BY nombredepiezasid_
+    )
+"""
+
+
 @app.get("/api/dashboard/pendiente_fundir")
 def dashboard_pendiente_fundir(meses: int = 6):
     """Piezas pendientes de fundir (OTs activas con cantidad aún no fundida), agrupadas por material."""
@@ -1256,33 +1273,43 @@ def dashboard_pendiente_fundir(meses: int = 6):
     conn = get_db()
     try:
         # Antigüedad de la OT: fechacargaot es NULL en ~93% de las OTs activas pendientes de
-        # fundir (a diferencia de datos históricos ya cerrados), así que igual que en
+        # fundir (a diferencia de datos históricos ya cerradas), así que igual que en
         # analytics_top_defectos/analytics_top_piezas usamos p.fechapedido como respaldo.
-        rows = conn.execute("""
+        rows = conn.execute(_CTE_PIEZAS_PESO + """
+            , base AS (
+                SELECT
+                    t."códdeagregados" AS codigo,
+                    COALESCE(tm.sobrenombrematerial, t."códdeagregados") AS material,
+                    (t.cantidad - COALESCE(t.cantidadfundida, 0)) AS pendientes,
+                    np.nombrepieza AS nombrepieza,
+                    COALESCE(np.coefcompl, 1) AS coefcompl,
+                    CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END AS peso_efectivo
+                FROM Trabajos t
+                JOIN ItemDetallePedido idp ON idp.iditempedido = t.iditempedido
+                JOIN Pedidos p             ON p.idpedido = idp.idpedido
+                LEFT JOIN TiposMaterial tm ON tm."códmaterial" = CAST(t."códdeagregados" AS TEXT)
+                LEFT JOIN NombreDePiezas np ON np.id = idp.idpieza
+                LEFT JOIN PesosDePiezas pp  ON pp.códpieza = t.idpesopieza
+                LEFT JOIN piezas_peso pz    ON pz.pieza_id = np.id
+                WHERE upper(t.estadotrabajo) NOT IN ('K','D','A','B')
+                  AND upper(p.estadopedido)  NOT IN ('K','D')
+                  AND upper(idp.estadoitem)  NOT IN ('K','D')
+                  AND COALESCE(t.cantidadfundida, 0) < t.cantidad
+                  AND t."códdeagregados" NOT IN ('--', '4', 'Ar', 'ar', 'AR')
+                  AND COALESCE(t.fechacargaot, p.fechapedido) >= date('now', ? || ' months')
+            )
             SELECT
-                t."códdeagregados" AS codigo,
-                COALESCE(tm.sobrenombrematerial, t."códdeagregados") AS material,
+                codigo,
+                material,
                 COUNT(*) AS ots,
-                SUM(t.cantidad - COALESCE(t.cantidadfundida, 0)) AS piezas_pendientes,
-                ROUND(SUM((t.cantidad - COALESCE(t.cantidadfundida, 0)) *
-                    CASE WHEN np.nombrepieza LIKE '%(AD)' THEN pp.pesopieza * 2
-                         WHEN np.nombrepieza LIKE '%(TR)' THEN pp.pesopieza * 3
-                         ELSE pp.pesopieza END * COALESCE(np.coefcompl, 1)), 2) AS kg_pendientes,
-                SUM(CASE WHEN pp.pesopieza IS NULL THEN 1 ELSE 0 END) AS ots_sin_peso,
-                SUM(CASE WHEN pp.pesopieza IS NULL
-                    THEN (t.cantidad - COALESCE(t.cantidadfundida, 0)) ELSE 0 END) AS piezas_sin_peso
-            FROM Trabajos t
-            JOIN ItemDetallePedido idp ON idp.iditempedido = t.iditempedido
-            JOIN Pedidos p             ON p.idpedido = idp.idpedido
-            LEFT JOIN TiposMaterial tm ON tm."códmaterial" = CAST(t."códdeagregados" AS TEXT)
-            LEFT JOIN PesosDePiezas pp ON pp.códpieza = t.idpesopieza
-            LEFT JOIN NombreDePiezas np ON np.id = pp.nombredepiezasid_
-            WHERE upper(t.estadotrabajo) NOT IN ('K','D','A','B')
-              AND upper(p.estadopedido)  NOT IN ('K','D')
-              AND upper(idp.estadoitem)  NOT IN ('K','D')
-              AND COALESCE(t.cantidadfundida, 0) < t.cantidad
-              AND t."códdeagregados" NOT IN ('--', '4', 'Ar', 'ar', 'AR')
-              AND COALESCE(t.fechacargaot, p.fechapedido) >= date('now', ? || ' months')
+                SUM(pendientes) AS piezas_pendientes,
+                ROUND(SUM(pendientes *
+                    CASE WHEN nombrepieza LIKE '%(AD)' THEN peso_efectivo * 2
+                         WHEN nombrepieza LIKE '%(TR)' THEN peso_efectivo * 3
+                         ELSE peso_efectivo END * coefcompl), 2) AS kg_pendientes,
+                SUM(CASE WHEN peso_efectivo IS NULL THEN 1 ELSE 0 END) AS ots_sin_peso,
+                SUM(CASE WHEN peso_efectivo IS NULL THEN pendientes ELSE 0 END) AS piezas_sin_peso
+            FROM base
             GROUP BY codigo
             ORDER BY ots DESC
         """, (f"-{meses}",)).fetchall()
@@ -1293,18 +1320,14 @@ def dashboard_pendiente_fundir(meses: int = 6):
 
 @app.get("/api/dashboard/pendiente_fundir/sin_peso")
 def dashboard_pendiente_fundir_sin_peso(meses: int = 6):
-    """Piezas pendientes de fundir sin peso cargado, para ubicarlas y pesarlas.
-
-    A diferencia de dashboard_pendiente_fundir (agrupado por material vía
-    PesosDePiezas.nombredepiezasid_, que da NULL cuando el Trabajo no tiene
-    idpesopieza asignado), acá la identidad de la pieza sale de
-    ItemDetallePedido.idpieza — el único vínculo que sigue existiendo aunque
-    la OT nunca haya llegado a apuntar a una fila de PesosDePiezas.
-    """
+    """Piezas pendientes de fundir que no tienen NINGUNA variante con peso valido
+    cargado en PesosDePiezas (a diferencia del kg_pendientes de arriba, que ya
+    contempla el promedio de otras variantes de la misma pieza como respaldo) --
+    estas son las que hay que ubicar y pesar de verdad."""
     meses = max(1, min(meses, 60))
     conn = get_db()
     try:
-        rows = conn.execute("""
+        rows = conn.execute(_CTE_PIEZAS_PESO + """
             SELECT
                 np.id                                       AS pieza_id,
                 np.nombrepieza                              AS nombre,
@@ -1323,15 +1346,15 @@ def dashboard_pendiente_fundir_sin_peso(meses: int = 6):
             JOIN ItemDetallePedido idp ON idp.iditempedido = t.iditempedido
             JOIN Pedidos p             ON p.idpedido = idp.idpedido
             LEFT JOIN TiposMaterial tm ON tm."códmaterial" = CAST(t."códdeagregados" AS TEXT)
-            LEFT JOIN PesosDePiezas pp ON pp.códpieza = t.idpesopieza
             LEFT JOIN NombreDePiezas np ON np.id = idp.idpieza
+            LEFT JOIN piezas_peso pz   ON pz.pieza_id = np.id
             WHERE upper(t.estadotrabajo) NOT IN ('K','D','A','B')
               AND upper(p.estadopedido)  NOT IN ('K','D')
               AND upper(idp.estadoitem)  NOT IN ('K','D')
               AND COALESCE(t.cantidadfundida, 0) < t.cantidad
               AND t."códdeagregados" NOT IN ('--', '4', 'Ar', 'ar', 'AR')
               AND COALESCE(t.fechacargaot, p.fechapedido) >= date('now', ? || ' months')
-              AND pp.pesopieza IS NULL
+              AND pz.peso_promedio IS NULL
             GROUP BY np.id, material
             ORDER BY piezas_pendientes DESC
         """, (f"-{meses}",)).fetchall()
