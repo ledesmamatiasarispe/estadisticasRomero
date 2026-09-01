@@ -1000,7 +1000,7 @@ const _reglaBarraPlugin = {
   id: 'reglaBarra',
   afterDatasetsDraw(chart, args, opts) {
     if (!opts || !opts.minor) return;
-    const { minor, subdiv, etiquetas } = opts;
+    const { minor, subdiv, etiquetas, print } = opts;
     const meta = chart.getDatasetMeta(0);
     if (!meta || !meta.data.length) return;
     const values = chart.data.datasets[0].data;
@@ -1029,8 +1029,8 @@ const _reglaBarraPlugin = {
       // Total al final de la barra -- en la imagen impresa no hay tooltip para
       // ver el valor exacto al pasar el mouse, asi que queda siempre a la vista.
       if (etiquetas && etiquetas[i] != null) {
-        ctx.fillStyle = '#c9d1d9';
-        ctx.font = '700 11px system-ui, -apple-system, sans-serif';
+        ctx.fillStyle = print ? '#000' : '#c9d1d9';
+        ctx.font = (print ? '700 15px' : '700 11px') + ' system-ui, -apple-system, sans-serif';
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
         ctx.fillText(String(etiquetas[i]), xEnd + 6, bar.y);
@@ -1040,6 +1040,80 @@ const _reglaBarraPlugin = {
   },
 };
 Chart.register(_reglaBarraPlugin);
+
+// Config compartida entre el grafico interactivo (tema oscuro, en pantalla) y
+// el que se genera aparte para imprimir (fondo blanco, letra mas grande) --
+// print:true cambia colores/tamaños, nunca la logica de los pasos de la regla.
+function _pendFundirChartConfig(data, useKg, print) {
+  const valores = data.map(d => useKg ? (d.kg_pendientes || 0) : d.ots);
+  const etiquetas = data.map(d => useKg ? fmtKg(d.kg_pendientes) : fmt(d.ots) + ' OT' + (d.ots !== 1 ? 's' : ''));
+  const { major, minor, subdiv } = _reglaPasos(Math.max(...valores, 0));
+  const esMayor = (val) => Math.round(val / minor) % subdiv === 0;
+
+  const opts = chartDefaults();
+  opts.indexAxis = 'y';
+  opts.plugins.legend.display = false;
+  opts.layout = { padding: { right: print ? 76 : 56 } }; // lugar para el numero total al final de cada barra
+  opts.plugins.reglaBarra = { minor, subdiv, etiquetas, print };
+  if (print) { opts.animation = false; opts.responsive = false; }
+  // Eje tipo regla: paso mayor "prolijo" (1/2/5×10^n) segun el maximo actual, con
+  // 5 subdivisiones menores mas finas y sin etiqueta -- las marcas mayores, mas
+  // oscuras y con el numero, son las que se leen de un vistazo.
+  // Chart.js llama font/color en una fase interna de medicion de ancho del eje
+  // (_maxDigits) donde ctx.tick todavia no existe -- sin el chequeo esto tira
+  // undefined.value y rompe el build entero, dejando el canvas vacio.
+  opts.scales.x = {
+    min: 0,
+    ticks: {
+      stepSize: minor,
+      color: (ctx) => (ctx.tick && esMayor(ctx.tick.value)) ? (print ? '#000' : '#c9d1d9') : (print ? '#666' : '#484f58'),
+      font: (ctx) => (ctx.tick && esMayor(ctx.tick.value)) ? { size: print ? 13 : 11, weight: '700' } : { size: print ? 11 : 9 },
+      callback: (val) => esMayor(val) ? fmt(Math.round(val)) : '',
+    },
+    grid: {
+      color: (ctx) => (ctx.tick && esMayor(ctx.tick.value)) ? (print ? '#999' : '#3d4450') : (print ? '#ddd' : '#21262d'),
+      lineWidth: (ctx) => (ctx.tick && esMayor(ctx.tick.value)) ? 1.5 : 1,
+    },
+  };
+  if (print) {
+    opts.scales.y = {
+      ticks: { color: '#000', font: { size: 14, weight: '700' } },
+      grid: { color: '#eee' },
+    };
+  }
+  opts.plugins.tooltip = { callbacks: {
+    title: (items) => data[items[0].dataIndex].material,
+    label: (ctx) => {
+      const d = data[ctx.dataIndex];
+      return useKg
+        ? fmt(d.piezas_pendientes) + ' piezas · ' + fmtKg(d.kg_pendientes)
+        : ctx.raw + ' OT' + (ctx.raw !== 1 ? 's' : '') + ' · ' + fmt(d.piezas_pendientes) + ' piezas';
+    },
+    afterLabel: (ctx) => {
+      const d = data[ctx.dataIndex];
+      if (!useKg || !d.piezas_sin_peso) return undefined;
+      return d.piezas_sin_peso >= d.piezas_pendientes
+        ? '⚠ Sin ninguna pieza con peso cargado — kg desconocido'
+        : '⚠ ' + fmt(d.piezas_sin_peso) + ' de ' + fmt(d.piezas_pendientes) + ' piezas sin peso cargado — kg incompleto';
+    }
+  } };
+
+  return {
+    type: 'bar',
+    data: {
+      labels: data.map(d => d.codigo + ((useKg && d.piezas_sin_peso) ? ' ⚠' : '')),
+      datasets: [{
+        data: valores,
+        backgroundColor: data.map(d => {
+          if (!useKg || !d.piezas_sin_peso) return '#42a5f5bb';
+          return d.piezas_sin_peso >= d.piezas_pendientes ? '#ef5350bb' : '#ffa726bb';
+        }),
+        borderRadius: 4,
+      }],
+    },
+    options: opts,
+  };
+}
 
 function _drawPendienteFundirChart(canvasId, subtitleId, data) {
   const canvas = $id(canvasId);
@@ -1062,67 +1136,8 @@ function _drawPendienteFundirChart(canvasId, subtitleId, data) {
   const kgBtn = $id('pend-fundir-kg-btn');
   if (kgBtn) kgBtn.textContent = useKg ? 'Ver en piezas' : 'Ver en kg';
 
-  const valores = data.map(d => useKg ? (d.kg_pendientes || 0) : d.ots);
-  const etiquetas = data.map(d => useKg ? fmtKg(d.kg_pendientes) : fmt(d.ots) + ' OT' + (d.ots !== 1 ? 's' : ''));
-  const { major, minor, subdiv } = _reglaPasos(Math.max(...valores, 0));
-  const esMayor = (val) => Math.round(val / minor) % subdiv === 0;
-
-  const opts = chartDefaults();
-  opts.indexAxis = 'y';
-  opts.plugins.legend.display = false;
-  opts.layout = { padding: { right: 56 } }; // lugar para el numero total al final de cada barra
-  opts.plugins.reglaBarra = { minor, subdiv, etiquetas };
-  // Eje tipo regla: paso mayor "prolijo" (1/2/5×10^n) segun el maximo actual, con
-  // 5 subdivisiones menores mas finas y sin etiqueta -- las marcas mayores, mas
-  // oscuras y con el numero, son las que se leen de un vistazo.
-  // Chart.js llama font/color en una fase interna de medicion de ancho del eje
-  // (_maxDigits) donde ctx.tick todavia no existe -- sin el chequeo esto tira
-  // undefined.value y rompe el build entero, dejando el canvas vacio.
-  opts.scales.x = {
-    min: 0,
-    ticks: {
-      stepSize: minor,
-      color: (ctx) => (ctx.tick && esMayor(ctx.tick.value)) ? '#c9d1d9' : '#484f58',
-      font: (ctx) => (ctx.tick && esMayor(ctx.tick.value)) ? { size: 11, weight: '700' } : { size: 9 },
-      callback: (val) => esMayor(val) ? fmt(Math.round(val)) : '',
-    },
-    grid: {
-      color: (ctx) => (ctx.tick && esMayor(ctx.tick.value)) ? '#3d4450' : '#21262d',
-      lineWidth: (ctx) => (ctx.tick && esMayor(ctx.tick.value)) ? 1.5 : 1,
-    },
-  };
-  opts.plugins.tooltip = { callbacks: {
-    title: (items) => data[items[0].dataIndex].material,
-    label: (ctx) => {
-      const d = data[ctx.dataIndex];
-      return useKg
-        ? fmt(d.piezas_pendientes) + ' piezas · ' + fmtKg(d.kg_pendientes)
-        : ctx.raw + ' OT' + (ctx.raw !== 1 ? 's' : '') + ' · ' + fmt(d.piezas_pendientes) + ' piezas';
-    },
-    afterLabel: (ctx) => {
-      const d = data[ctx.dataIndex];
-      if (!useKg || !d.piezas_sin_peso) return undefined;
-      return d.piezas_sin_peso >= d.piezas_pendientes
-        ? '⚠ Sin ninguna pieza con peso cargado — kg desconocido'
-        : '⚠ ' + fmt(d.piezas_sin_peso) + ' de ' + fmt(d.piezas_pendientes) + ' piezas sin peso cargado — kg incompleto';
-    }
-  } };
   if (_pendFundirCharts[canvasId]) { _pendFundirCharts[canvasId].destroy(); _pendFundirCharts[canvasId] = null; }
-  _pendFundirCharts[canvasId] = new Chart(canvas, {
-    type: 'bar',
-    data: {
-      labels: data.map(d => d.codigo + ((useKg && d.piezas_sin_peso) ? ' ⚠' : '')),
-      datasets: [{
-        data: valores,
-        backgroundColor: data.map(d => {
-          if (!useKg || !d.piezas_sin_peso) return '#42a5f5bb';
-          return d.piezas_sin_peso >= d.piezas_pendientes ? '#ef5350bb' : '#ffa726bb';
-        }),
-        borderRadius: 4,
-      }],
-    },
-    options: opts,
-  });
+  _pendFundirCharts[canvasId] = new Chart(canvas, _pendFundirChartConfig(data, useKg, false));
 }
 
 let _sinPesoRows = [];
@@ -1241,12 +1256,21 @@ function closeSinPesoModal() {
 
 function _imprimirPendienteFundir() {
   const ids = _pendFundirIds;
-  const canvas = ids && $id(ids.canvasId);
-  if (!canvas) { alert('Esperá a que termine de cargar el gráfico.'); return; }
+  const data = _pendFundirData;
+  if (!ids || !data || !data.length) { alert('Esperá a que termine de cargar el gráfico.'); return; }
   const sub = ids.subtitleId ? $id(ids.subtitleId) : null;
   const subtitle = sub ? sub.textContent : '';
   const now = new Date().toLocaleString('es-AR');
-  const imgData = canvas.toDataURL('image/png');
+
+  // Grafico aparte para imprimir (fondo blanco, letra mas grande) en vez del
+  // canvas de pantalla -- ese usa colores pensados para el tema oscuro de la
+  // app y quedarian invisibles sobre una hoja blanca.
+  const printCanvas = document.createElement('canvas');
+  printCanvas.width = 1600;
+  printCanvas.height = 800;
+  const printChart = new Chart(printCanvas, _pendFundirChartConfig(data, _pendFundirKgMode, true));
+  const imgData = printCanvas.toDataURL('image/png');
+  printChart.destroy();
 
   const w = window.open('', '_blank', 'width=900,height=700,scrollbars=yes');
   if (!w) { alert('Permitir ventanas emergentes para usar esta función.'); return; }
@@ -1260,7 +1284,7 @@ body{font-family:system-ui,-apple-system,sans-serif;color:#111;background:#fff;p
 h1{font-size:17px;font-weight:700;color:#333;margin-bottom:3px}
 .period{font-size:11px;color:#888;margin-bottom:16px}
 .print-date{font-size:16px;color:#000;font-weight:700}
-img{width:100%;display:block;background:#0d1117;border-radius:6px;padding:12px}
+img{width:100%;display:block;background:#fff;border:1px solid #ddd;border-radius:6px;padding:12px}
 @media print{body{padding:0}@page{margin:15mm;size:A4 landscape}}
 </style></head><body>
 <h1>Pendiente de fundir por material</h1>
