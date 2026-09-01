@@ -643,12 +643,9 @@ tr:last-child td { border-bottom: none; }
         <input type="checkbox" id="pd-chk-entregados" checked> &#10003; Entregados
       </label>
       <div style="border-top:1px solid var(--border);margin-top:6px;padding-top:8px">
-        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px">Por estado de OT</div>
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px">Filtrar por estado de OT (opcional)</div>
         <div id="pd-estados-list" style="max-height:180px;overflow-y:auto"></div>
-        <label style="display:flex;align-items:center;gap:8px;padding:8px 0 2px;cursor:pointer;font-size:12px;color:var(--muted)">
-          <input type="checkbox" id="pd-chk-separar-estados" checked> Una lista separada por cada estado tildado
-        </label>
-        <div style="font-size:11px;color:var(--muted);padding-left:24px">Si se destilda: una sola tabla con todos juntos, ordenada por fecha de entrega.</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">Si tild&#225;s alguno, las 3 listas de arriba imprimen s&#243;lo esas OTs &mdash; no arman una lista aparte.</div>
       </div>
       <button class="page-btn" style="width:100%;margin-top:12px;padding:9px;font-size:13px" onclick="_printDashSelected()">&#128438; Imprimir seleccionadas</button>
     </div>
@@ -1124,14 +1121,21 @@ function _imprimirSinPeso() {
 body{font-family:system-ui,-apple-system,sans-serif;font-size:12px;color:#111;background:#fff;padding:24px 28px}
 h1{font-size:17px;font-weight:700;color:#333;margin-bottom:3px}
 .period{font-size:11px;color:#888;margin-bottom:20px}
+.print-date{font-size:16px;color:#000;font-weight:700}
 table{border-collapse:collapse;width:100%;font-size:12px}
 th{text-align:left;padding:6px 8px;background:#f2f2f2;border-bottom:2px solid #ccc;font-size:10px;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}
 td{padding:6px 8px;border-bottom:1px solid #eee;vertical-align:middle}
 code{font-family:ui-monospace,monospace}
-@media print{body{padding:0}@page{margin:15mm;size:A4}}
+@media print{
+  body{padding:0}
+  @page{
+    margin:15mm; size:A4;
+    @bottom-right{ content:"Página " counter(page) " / " counter(pages); font-size:11px; color:#000; }
+  }
+}
 </style></head><body>
 <h1>&#9888; Piezas pendientes de fundir sin peso cargado</h1>
-<div class="period">Impreso: ${now} &middot; ${fmt(rows.length)} piezas &mdash; marcar al pesar cada una</div>
+<div class="period"><span class="print-date">Impreso: ${now}</span> &middot; ${fmt(rows.length)} piezas &mdash; marcar al pesar cada una</div>
 <table>
   <thead><tr>
     <th></th><th></th><th>Pieza</th><th>C&#243;digo</th><th>Material</th>
@@ -1442,7 +1446,7 @@ function _renderVencTbl(rows, elId, emptyMsg) {
     const rowClick = r.ot_id ? 'go(\'trabajo\',' + r.ot_id + ')' : 'go(\'pedido\',' + r.idpedido + ')';
     const probTag = r.pide_probeta_traccion ? '<span class="prob-tag">&#128300; Probeta</span>' : '';
     const groupStart = (i > 0 && rows[i - 1].idpedido !== r.idpedido) ? ' ped-group-start' : '';
-    tbody += '<tr class="tr-link ' + cls + prodOk + groupStart + '" onclick="' + rowClick + '">'
+    tbody += '<tr class="tr-link ' + cls + prodOk + groupStart + '" data-ot-estado="' + (r.ot_estado || '') + '" onclick="' + rowClick + '">'
       + '<td>' + otMain + '</td>'
       + '<td>' + pedLink + '<div style="font-size:11px;color:var(--muted)">' + (r.cliente_nombre || '—') + '</div></td>'
       + '<td style="font-size:12px">' + (r.nombrepieza || '—') + codPieza + '</td>'
@@ -1483,7 +1487,7 @@ function _renderEntregadosTbl(rows, elId) {
     const rowClick = r.ot_id ? 'go(\'trabajo\',' + r.ot_id + ')' : 'go(\'pedido\',' + r.idpedido + ')';
     const probTagE = r.pide_probeta_traccion ? '<span class="prob-tag">&#128300; Probeta</span>' : '';
     const groupStart = (i > 0 && rows[i - 1].idpedido !== r.idpedido) ? ' ped-group-start' : '';
-    tbody += '<tr class="tr-link ' + cls + groupStart + '" onclick="' + rowClick + '">'
+    tbody += '<tr class="tr-link ' + cls + groupStart + '" data-ot-estado="' + (r.ot_estado || '') + '" onclick="' + rowClick + '">'
       + '<td>' + otMain + '</td>'
       + '<td>' + pedLink + '<div style="font-size:11px;color:var(--muted)">' + (r.cliente_nombre || '—') + '</div></td>'
       + '<td style="font-size:12px">' + (r.nombrepieza || '—') + codPieza + '</td>'
@@ -1793,11 +1797,17 @@ function openPrintDashModal() {
   if (modal) modal.classList.add('open');
   const list = $id('pd-estados-list');
   if (list) {
-    const estados = (_trabajosMeta && _trabajosMeta.estados) || [];
-    list.innerHTML = estados.length
-      ? estados.map(e => `
+    // Varios códigos comparten label (ej. 'K' y 'k' son los dos "Cumplido Auto"),
+    // así que el filtro se ofrece por label -- es lo que ot_estado trae en las
+    // filas de Vencidos/Próximos/Entregados, no el código de una letra.
+    const porLabel = new Map();
+    for (const e of (_trabajosMeta && _trabajosMeta.estados) || []) {
+      porLabel.set(e.label, (porLabel.get(e.label) || 0) + e.count);
+    }
+    list.innerHTML = porLabel.size
+      ? Array.from(porLabel, ([label, count]) => `
         <label style="display:flex;align-items:center;gap:8px;padding:6px 0;cursor:pointer;font-size:13px">
-          <input type="checkbox" class="pd-chk-estado" value="${e.codigo}"> ${e.label} (${fmt(e.count)})
+          <input type="checkbox" class="pd-chk-estado" value="${label}"> ${label} (${fmt(count)})
         </label>`).join('')
       : '<div style="font-size:12px;color:var(--muted);padding:6px 0">Sin datos de estados — abrí la pestaña Trabajos primero.</div>';
   }
@@ -1807,99 +1817,33 @@ function closePrintDashModal() {
   if (modal) modal.classList.remove('open');
 }
 
-function _printDashSectionHtml(key, first) {
+function _printDashSectionHtml(key, first, estadosFiltro) {
   const meta = _PRINT_DASH_META[key];
   if (!meta) return '';
   const contentEl = $id(meta.elId);
   if (!contentEl) return '';
   const clone = contentEl.cloneNode(true);
   clone.querySelectorAll('input,button').forEach(el => el.remove());
-  const pageBreak = first ? '' : 'page-break-before:always;';
-  return `<h1 style="${pageBreak}">${meta.title}</h1>${clone.outerHTML}`;
-}
-
-function _printEstadoLabel(codigo) {
-  const meta = ((_trabajosMeta && _trabajosMeta.estados) || []).find(e => e.codigo === codigo);
-  return meta ? meta.label : codigo;
-}
-
-async function _fetchTrabajosPorEstado(codigo) {
-  let rows = [], page = 1, pages = 1;
-  do {
-    let d;
-    try { d = await api('/api/trabajos?estado=' + encodeURIComponent(codigo) + '&page=' + page + '&page_size=200'); }
-    catch (e) { break; }
-    rows = rows.concat(d.rows || []);
-    pages = d.pages || 1;
-    page++;
-  } while (page <= pages && rows.length < 2000);
-  return rows;
-}
-
-function _printTrabajosTableHtml(rows, { conEstado } = {}) {
-  const body = rows.length
-    ? rows.map(r => `
-        <tr>
-          <td><code>${String(r.iditemtrabajo).padStart(6, '0')}</code></td>
-          ${conEstado ? `<td>${r.estado_label || r.estadotrabajo || '—'}</td>` : ''}
-          <td>${r.cliente_nombre || r.codigo_cliente || '—'}</td>
-          <td>${r.nombrepieza || '—'}</td>
-          <td>${r.fechaprevista ? r.fechaprevista.slice(0, 10) : '—'}</td>
-          <td style="text-align:right">${r.cantidadproducida ?? '—'}</td>
-          <td style="text-align:right">${r.cantidadentregada ?? '—'}</td>
-        </tr>`).join('')
-    : `<tr><td colspan="${conEstado ? 7 : 6}">Sin OTs</td></tr>`;
-  // table-layout:fixed + colgroup: sin esto, cada tabla ajusta el ancho de sus
-  // columnas al contenido propio y dos estados con nombres de pieza/cliente de
-  // largo distinto terminan con proporciones de columna distintas al imprimir.
-  const cols = conEstado
-    ? ['9%', '12%', '20%', '31%', '11%', '8.5%', '8.5%']
-    : ['10%', '24%', '38%', '12%', '8%', '8%'];
-  return `<table style="table-layout:fixed">
-      <colgroup>${cols.map(w => `<col style="width:${w}">`).join('')}</colgroup>
-      <thead><tr>
-        <th>N&#176; OT</th>${conEstado ? '<th>Estado</th>' : ''}<th>Cliente</th><th>Pieza</th>
-        <th>F. Entrega</th><th style="text-align:right">Prod.</th><th style="text-align:right">Entreg.</th>
-      </tr></thead>
-      <tbody>${body}</tbody>
-    </table>`;
-}
-
-async function _printEstadoSectionHtml(codigo, first) {
-  const rows = await _fetchTrabajosPorEstado(codigo);
-  const pageBreak = first ? '' : 'page-break-before:always;';
-  return `<h1 style="${pageBreak}">OTs — ${_printEstadoLabel(codigo)}</h1>${_printTrabajosTableHtml(rows, { conEstado: false })}`;
-}
-
-async function _printEstadosCombinedSectionHtml(codigos, first) {
-  let rows = [];
-  for (const cod of codigos) {
-    rows = rows.concat((await _fetchTrabajosPorEstado(cod)).map(r => ({ ...r, estado_label: r.estado_label || _printEstadoLabel(cod) })));
+  let titulo = meta.title;
+  if (estadosFiltro && estadosFiltro.length) {
+    clone.querySelectorAll('tbody tr[data-ot-estado]').forEach(tr => {
+      if (!estadosFiltro.includes(tr.getAttribute('data-ot-estado'))) tr.remove();
+    });
+    titulo += ' — ' + estadosFiltro.join(', ');
   }
-  rows.sort((a, b) => (a.fechaprevista || '').localeCompare(b.fechaprevista || ''));
   const pageBreak = first ? '' : 'page-break-before:always;';
-  return `<h1 style="${pageBreak}">OTs — estados seleccionados (por fecha de entrega)</h1>${_printTrabajosTableHtml(rows, { conEstado: true })}`;
+  return `<h1 style="${pageBreak}">${titulo}</h1>${clone.outerHTML}`;
 }
 
 async function _printDashSelected() {
   const selected = Object.keys(_PRINT_DASH_META)
     .filter(k => ($id('pd-chk-' + k) || {}).checked);
   const estadosSel = Array.from(document.querySelectorAll('.pd-chk-estado:checked')).map(el => el.value);
-  const separarEstados = ($id('pd-chk-separar-estados') || {}).checked !== false;
-  if (!selected.length && !estadosSel.length) { alert('Elegí al menos una lista para imprimir.'); return; }
+  if (!selected.length) { alert('Elegí al menos una lista para imprimir.'); return; }
 
   const now = new Date().toLocaleString('es-AR');
   const sections = [];
-  selected.forEach(k => sections.push(_printDashSectionHtml(k, sections.length === 0)));
-  if (estadosSel.length) {
-    if (separarEstados) {
-      for (const cod of estadosSel) {
-        sections.push(await _printEstadoSectionHtml(cod, sections.length === 0));
-      }
-    } else {
-      sections.push(await _printEstadosCombinedSectionHtml(estadosSel, sections.length === 0));
-    }
-  }
+  selected.forEach(k => sections.push(_printDashSectionHtml(k, sections.length === 0, estadosSel)));
   const sectionsHtml = sections.join('');
 
   const w = window.open('', '_blank', 'width=940,height=720,scrollbars=yes');
@@ -1914,6 +1858,7 @@ async function _printDashSelected() {
 body{font-family:system-ui,-apple-system,sans-serif;font-size:12px;color:#111;background:#fff;padding:24px 28px}
 h1{font-size:17px;font-weight:700;color:#333;margin-bottom:3px}
 .period{font-size:11px;color:#888;margin-bottom:20px}
+.print-date{font-size:16px;color:#000;font-weight:700}
 table{border-collapse:collapse;width:100%;margin-bottom:16px;font-size:12px}
 th{text-align:left;padding:5px 8px;background:#f2f2f2;border-bottom:2px solid #ccc;font-size:10px;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}
 td{padding:5px 8px;border-bottom:1px solid #eee;vertical-align:middle}
@@ -1926,9 +1871,15 @@ td{padding:5px 8px;border-bottom:1px solid #eee;vertical-align:middle}
 .ent-parcial  { background-color: rgba(255,167,38,.14); }
 .prob-tag{display:inline-flex;align-items:center;gap:4px;background:rgba(124,77,255,.12);border:1px solid rgba(124,77,255,.4);border-radius:4px;padding:1px 6px;font-size:10px;color:#5e35b1;white-space:nowrap}
 code{font-family:ui-monospace,monospace}
-@media print{body{padding:0}@page{margin:15mm;size:A4}}
+@media print{
+  body{padding:0}
+  @page{
+    margin:15mm; size:A4;
+    @bottom-right{ content:"Página " counter(page) " / " counter(pages); font-size:11px; color:#000; }
+  }
+}
 </style></head><body>
-<div class="period">Impreso: ${now}</div>
+<div class="period"><span class="print-date">Impreso: ${now}</span></div>
 ${sectionsHtml}
 </body></html>`);
   w.document.close();
