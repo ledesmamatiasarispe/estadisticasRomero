@@ -1151,6 +1151,73 @@ function closeSinPesoModal() {
   if (modal) modal.classList.remove('open');
 }
 
+async function _imprimirPendienteFundir() {
+  let rows;
+  try { rows = await api('/api/dashboard/pendiente_fundir/detalle?meses=' + S.dashMeses); }
+  catch (e) { alert('No se pudo cargar la lista.'); return; }
+  if (!rows.length) { alert('No hay OTs pendientes de fundir en este período.'); return; }
+
+  const porMaterial = new Map();
+  for (const r of rows) {
+    if (!porMaterial.has(r.material)) porMaterial.set(r.material, []);
+    porMaterial.get(r.material).push(r);
+  }
+  const materiales = Array.from(porMaterial.keys());
+  const now = new Date().toLocaleString('es-AR');
+
+  const secciones = materiales.map((mat, i) => {
+    const filas = porMaterial.get(mat);
+    const totalPend = filas.reduce((s, r) => s + (r.pendientes || 0), 0);
+    const totalKg   = filas.reduce((s, r) => s + (r.kg_pendientes || 0), 0);
+    const body = filas.map(r => `
+      <tr>
+        <td><code>${String(r.iditemtrabajo).padStart(6, '0')}</code></td>
+        <td>${r.nombrepieza || '—'}</td>
+        <td><code>${r.codigo_pieza || '—'}</code></td>
+        <td>${r.cliente_nombre || '—'}</td>
+        <td>${r.fechaprevista ? r.fechaprevista.slice(0, 10) : '—'}</td>
+        <td>${r.estado_label || r.estadotrabajo || '—'}</td>
+        <td style="text-align:right">${fmt(r.pendientes)}</td>
+        <td style="text-align:right">${r.kg_pendientes != null ? fmtKg(r.kg_pendientes) : '—'}</td>
+      </tr>`).join('');
+    const pageBreak = i > 0 ? 'page-break-before:always;' : '';
+    return `<h1 style="${pageBreak}">Pendiente de fundir — ${mat} <span style="font-weight:400;font-size:12px;color:#888">— Hoja ${i + 1} de ${materiales.length}</span></h1>
+      <div class="period">${fmt(filas.length)} OT${filas.length !== 1 ? 's' : ''} &middot; ${fmt(totalPend)} piezas &middot; ${fmtKg(totalKg)}</div>
+      <table>
+        <thead><tr>
+          <th>N&#176; OT</th><th>Pieza</th><th>C&#243;digo</th><th>Cliente</th>
+          <th>F. Entrega</th><th>Estado</th><th style="text-align:right">Pendientes</th><th style="text-align:right">Kg</th>
+        </tr></thead>
+        <tfoot><tr><td colspan="8" class="print-date">Impreso: ${now}</td></tr></tfoot>
+        <tbody>${body}</tbody>
+      </table>`;
+  }).join('');
+
+  const w = window.open('', '_blank', 'width=940,height=720,scrollbars=yes');
+  if (!w) { alert('Permitir ventanas emergentes para usar esta función.'); return; }
+  w.document.open();
+  w.document.write(`<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<title>Pendiente de fundir por material</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;font-size:12px;color:#111;background:#fff;padding:24px 28px}
+h1{font-size:17px;font-weight:700;color:#333;margin-bottom:3px}
+.period{font-size:11px;color:#888;margin-bottom:12px}
+.print-date{font-size:16px;color:#000;font-weight:700}
+table{border-collapse:collapse;width:100%;font-size:12px}
+th{text-align:left;padding:6px 8px;background:#f2f2f2;border-bottom:2px solid #ccc;font-size:10px;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}
+td{padding:6px 8px;border-bottom:1px solid #eee;vertical-align:middle}
+tfoot td{border-top:1px solid #000;border-bottom:none;padding-top:8px}
+code{font-family:ui-monospace,monospace}
+@media print{body{padding:0}@page{margin:15mm;size:A4}}
+</style></head><body>
+${secciones}
+</body></html>`);
+  w.document.close();
+  setTimeout(() => w.print(), 500);
+}
+
 let _drillMesBack = null;
 let _pzData    = {};   // {piezaId: d}
 let _pzCharts  = {};   // {piezaId: Chart}
@@ -2000,7 +2067,8 @@ async function showDashboard() {
         </div>
       </div>
       <div class="chart-box"><canvas id="chart-pend-fundir-dash"></canvas></div>
-      <div style="text-align:right;margin-top:8px">
+      <div style="text-align:right;margin-top:8px;display:flex;justify-content:flex-end;gap:8px">
+        <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="_imprimirPendienteFundir()">&#128438; Imprimir</button>
         <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="openSinPesoModal()">&#9888; Ver piezas sin peso</button>
       </div>
     </div>
@@ -6989,7 +7057,8 @@ async function showTrabajos() {
         </div>
       </div>
       <div class="chart-box"><canvas id="chart-pend-fundir-tr"></canvas></div>
-      <div style="text-align:right;margin-top:8px">
+      <div style="text-align:right;margin-top:8px;display:flex;justify-content:flex-end;gap:8px">
+        <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="_imprimirPendienteFundir()">&#128438; Imprimir</button>
         <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="openSinPesoModal()">&#9888; Ver piezas sin peso</button>
       </div>
     </div>

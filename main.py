@@ -1340,6 +1340,59 @@ def dashboard_pendiente_fundir(meses: int = 6):
         conn.close()
 
 
+@app.get("/api/dashboard/pendiente_fundir/detalle")
+def dashboard_pendiente_fundir_detalle(meses: int = 6):
+    """El detalle OT por OT detrás de dashboard_pendiente_fundir -- mismo filtro y
+    mismo peso_efectivo (variante puntual o promedio de la pieza), pero sin agrupar
+    por material. Pensado para imprimir: ver qué OTs concretas hay que fundir por
+    material, incluido su estado (Programado, Inicial, etc.)."""
+    meses = max(1, min(meses, 60))
+    conn = get_db()
+    try:
+        rows = conn.execute(_CTE_PIEZAS_PESO + """
+            SELECT
+                t.iditemtrabajo AS iditemtrabajo,
+                t."códdeagregados" AS codigo_material,
+                COALESCE(tm.sobrenombrematerial, t."códdeagregados") AS material,
+                np.nombrepieza AS nombrepieza,
+                np."códigopiezapuestoporcliente" AS codigo_pieza,
+                COALESCE(c.nombrefantasía, c.nombrecliente) AS cliente_nombre,
+                t.fechaprevista AS fechaprevista,
+                t.estadotrabajo AS estadotrabajo,
+                (t.cantidad - COALESCE(t.cantidadfundida, 0)) AS pendientes,
+                ROUND((t.cantidad - COALESCE(t.cantidadfundida, 0)) *
+                    CASE WHEN np.nombrepieza LIKE '%(AD)' THEN (CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END) * 2
+                         WHEN np.nombrepieza LIKE '%(TR)' THEN (CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END) * 3
+                         ELSE (CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END) END
+                    * COALESCE(np.coefcompl, 1), 2) AS kg_pendientes
+            FROM Trabajos t
+            JOIN ItemDetallePedido idp ON idp.iditempedido = t.iditempedido
+            JOIN Pedidos p             ON p.idpedido = idp.idpedido
+            LEFT JOIN TiposMaterial tm ON tm."códmaterial" = CAST(t."códdeagregados" AS TEXT)
+            LEFT JOIN NombreDePiezas np ON np.id = idp.idpieza
+            LEFT JOIN Clientes c        ON c."códigocliente" = p."códigocliente"
+            LEFT JOIN PesosDePiezas pp  ON pp.códpieza = t.idpesopieza
+            LEFT JOIN piezas_peso pz    ON pz.pieza_id = np.id
+            WHERE upper(t.estadotrabajo) NOT IN ('K','D','A','B')
+              AND upper(p.estadopedido)  NOT IN ('K','D')
+              AND upper(idp.estadoitem)  NOT IN ('K','D')
+              AND COALESCE(t.cantidadfundida, 0) < t.cantidad
+              AND t."códdeagregados" NOT IN ('--', '4', 'Ar', 'ar', 'AR')
+              AND COALESCE(t.fechacargaot, p.fechapedido) >= date('now', ? || ' months')
+            ORDER BY codigo_material, t.fechaprevista ASC
+        """, (f"-{meses}",)).fetchall()
+        est = _est_map(conn)
+        result = []
+        for r in rows:
+            d = dict(r)
+            code = d.get("estadotrabajo") or ""
+            d["estado_label"] = est.get(code, code) if code else None
+            result.append(d)
+        return result
+    finally:
+        conn.close()
+
+
 @app.get("/api/dashboard/pendiente_fundir/sin_peso")
 def dashboard_pendiente_fundir_sin_peso(meses: int = 6):
     """Piezas pendientes de fundir que no tienen NINGUNA variante con peso valido
