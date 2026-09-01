@@ -993,6 +993,54 @@ function _reglaPasos(maxVal) {
   return { major, minor: major / subdiv, subdiv };
 }
 
+// Dibuja las marcas de la regla ENCIMA de cada barra (no solo en el fondo del
+// eje, que las barras tapan) -- una linea vertical por cada paso menor dentro
+// del relleno de la barra, mas oscura/gruesa en cada paso mayor.
+const _reglaBarraPlugin = {
+  id: 'reglaBarra',
+  afterDatasetsDraw(chart, args, opts) {
+    if (!opts || !opts.minor) return;
+    const { minor, subdiv, etiquetas } = opts;
+    const meta = chart.getDatasetMeta(0);
+    if (!meta || !meta.data.length) return;
+    const values = chart.data.datasets[0].data;
+    const xScale = chart.scales.x;
+    const x0 = xScale.getPixelForValue(0);
+    const ctx = chart.ctx;
+    ctx.save();
+    meta.data.forEach((bar, i) => {
+      const v = values[i] || 0;
+      if (v <= 0) return;
+      const top = bar.y - bar.height / 2 + 1;
+      const bottom = bar.y + bar.height / 2 - 1;
+      const xEnd = xScale.getPixelForValue(v);
+      for (let n = 1; n * minor < v; n++) {
+        const tickVal = n * minor;
+        const px = xScale.getPixelForValue(tickVal);
+        if (px <= x0 || px >= xEnd) continue;
+        const esMayor = Math.round(tickVal / minor) % subdiv === 0;
+        ctx.strokeStyle = esMayor ? 'rgba(13,17,23,.55)' : 'rgba(13,17,23,.22)';
+        ctx.lineWidth = esMayor ? 1.5 : 1;
+        ctx.beginPath();
+        ctx.moveTo(px, top);
+        ctx.lineTo(px, bottom);
+        ctx.stroke();
+      }
+      // Total al final de la barra -- en la imagen impresa no hay tooltip para
+      // ver el valor exacto al pasar el mouse, asi que queda siempre a la vista.
+      if (etiquetas && etiquetas[i] != null) {
+        ctx.fillStyle = '#c9d1d9';
+        ctx.font = '700 11px system-ui, -apple-system, sans-serif';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(etiquetas[i]), xEnd + 6, bar.y);
+      }
+    });
+    ctx.restore();
+  },
+};
+Chart.register(_reglaBarraPlugin);
+
 function _drawPendienteFundirChart(canvasId, subtitleId, data) {
   const canvas = $id(canvasId);
   if (!canvas) return;
@@ -1015,12 +1063,15 @@ function _drawPendienteFundirChart(canvasId, subtitleId, data) {
   if (kgBtn) kgBtn.textContent = useKg ? 'Ver en piezas' : 'Ver en kg';
 
   const valores = data.map(d => useKg ? (d.kg_pendientes || 0) : d.ots);
+  const etiquetas = data.map(d => useKg ? fmtKg(d.kg_pendientes) : fmt(d.ots) + ' OT' + (d.ots !== 1 ? 's' : ''));
   const { major, minor, subdiv } = _reglaPasos(Math.max(...valores, 0));
   const esMayor = (val) => Math.round(val / minor) % subdiv === 0;
 
   const opts = chartDefaults();
   opts.indexAxis = 'y';
   opts.plugins.legend.display = false;
+  opts.layout = { padding: { right: 56 } }; // lugar para el numero total al final de cada barra
+  opts.plugins.reglaBarra = { minor, subdiv, etiquetas };
   // Eje tipo regla: paso mayor "prolijo" (1/2/5×10^n) segun el maximo actual, con
   // 5 subdivisiones menores mas finas y sin etiqueta -- las marcas mayores, mas
   // oscuras y con el numero, son las que se leen de un vistazo.
@@ -1210,7 +1261,7 @@ h1{font-size:17px;font-weight:700;color:#333;margin-bottom:3px}
 .period{font-size:11px;color:#888;margin-bottom:16px}
 .print-date{font-size:16px;color:#000;font-weight:700}
 img{width:100%;display:block;background:#0d1117;border-radius:6px;padding:12px}
-@media print{body{padding:0}@page{margin:15mm;size:A4}}
+@media print{body{padding:0}@page{margin:15mm;size:A4 landscape}}
 </style></head><body>
 <h1>Pendiente de fundir por material</h1>
 <div class="period"><span class="print-date">Impreso: ${now}</span>${subtitle ? ' &middot; ' + subtitle : ''}</div>
