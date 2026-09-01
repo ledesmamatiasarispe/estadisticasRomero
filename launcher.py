@@ -104,8 +104,43 @@ def _download_update(sha):
         return False
 
 
+def _local_git_has_unpublished_work():
+    """True if ROOT is a git checkout with uncommitted changes or commits not on
+    origin/master — cases where overwriting tracked files from the GitHub zip
+    would silently destroy local work the auto-updater knows nothing about."""
+    if not (ROOT / ".git").exists():
+        return False
+    try:
+        # --untracked-files=no: un archivo suelto sin trackear (ej. una copia local
+        # de la base) no corre riesgo con el overwrite del zip y no debe bloquear
+        # la actualizacion; solo importan los cambios sobre archivos versionados.
+        dirty = subprocess.run(
+            ["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if dirty.returncode == 0 and dirty.stdout.strip():
+            return True
+
+        subprocess.run(["git", "-C", str(ROOT), "fetch", "origin", "master"],
+                        capture_output=True, text=True, timeout=20)
+        ahead = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-list", "--count", "origin/master..HEAD"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if ahead.returncode == 0 and ahead.stdout.strip() not in ("", "0"):
+            return True
+    except Exception:
+        return False
+    return False
+
+
 def auto_update():
     print("Verificando actualizaciones...")
+    if _local_git_has_unpublished_work():
+        print("  Hay cambios locales (git) sin pushear a origin/master.")
+        print("  Se omite la actualizacion automatica para no pisarlos.")
+        return False
+
     remote = _remote_sha()
     if remote is None:
         print("  Sin conexion, usando version local.")
