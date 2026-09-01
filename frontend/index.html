@@ -2068,7 +2068,7 @@ async function showDashboard() {
       <div class="kpi-card">
         <div class="kpi-label">Entregadas ${año_actual}</div>
         <div class="kpi-value c-blue">${fmt(entregadas_año)}</div>
-        <div class="kpi-sub">piezas</div>
+        <div class="kpi-sub" id="kpi-entregadas-sub">piezas</div>
       </div>
       <div class="kpi-card tr-link" onclick="go('rechazos')" style="cursor:pointer">
         <div class="kpi-label">Rechazos &amp; Devoluciones &#8599;</div>
@@ -2214,6 +2214,11 @@ async function showDashboard() {
       programado: { ots: prog.n_ots, piezas: prog.cant_pedida },
       fundido:    { ots: fund.n_ots, piezas: fund.producidas || fund.cant_pedida },
     };
+    const subEl = $id('kpi-entregadas-sub');
+    if (subEl) {
+      const totalProg = entregadas_año + _trendProyeccion.programado.piezas;
+      subEl.textContent = 'Entregadas: ' + fmt(entregadas_año) + ' + Programadas: ' + fmt(_trendProyeccion.programado.piezas) + ' = ' + fmt(totalProg);
+    }
     if (_trendMode === 'barras') _renderTrendBarras();
   }).catch(() => {});
 
