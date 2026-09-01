@@ -1062,7 +1062,7 @@ async function openSinPesoModal() {
       <table>
         <thead><tr>
           <th></th><th>Pieza</th><th>C&#243;digo</th><th>Material</th>
-          <th style="text-align:right">OTs</th><th style="text-align:right">Pendientes</th>
+          <th style="text-align:right">OTs</th><th style="text-align:right">Pendientes</th><th>Visto desde</th>
         </tr></thead>
         <tbody>${rows.map(r => `
           <tr class="tr-link" onclick="closeSinPesoModal();go('pieza',${r.pieza_id})">
@@ -1078,6 +1078,7 @@ async function openSinPesoModal() {
             <td>${r.material || '—'}</td>
             <td style="text-align:right">${fmt(r.ots)}</td>
             <td style="text-align:right;font-weight:600">${fmt(r.piezas_pendientes)}</td>
+            <td style="font-size:11px;color:var(--muted)">${r.visto_desde || '—'}</td>
           </tr>`).join('')}
         </tbody>
       </table>

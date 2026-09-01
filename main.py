@@ -1345,7 +1345,13 @@ def dashboard_pendiente_fundir_sin_peso(meses: int = 6):
     """Piezas pendientes de fundir que no tienen NINGUNA variante con peso valido
     cargado en PesosDePiezas (a diferencia del kg_pendientes de arriba, que ya
     contempla el promedio de otras variantes de la misma pieza como respaldo) --
-    estas son las que hay que ubicar y pesar de verdad."""
+    estas son las que hay que ubicar y pesar de verdad.
+
+    De paso registra cada pieza en _piezas_sin_peso (primera_vez/ultima_vez/
+    ultima_ot_id) para poder ver hace cuanto viene siendo un problema, no solo
+    el estado de hoy -- la tabla ya existia (huerfana, sin ningun codigo que la
+    llenara) con exactamente esa forma, asi que se reutiliza en vez de crear
+    una nueva."""
     meses = max(1, min(meses, 60))
     conn = get_db()
     try:
@@ -1357,6 +1363,7 @@ def dashboard_pendiente_fundir_sin_peso(meses: int = 6):
                 COALESCE(tm.sobrenombrematerial, t."códdeagregados") AS material,
                 COUNT(DISTINCT t.iditemtrabajo)              AS ots,
                 SUM(t.cantidad - COALESCE(t.cantidadfundida, 0)) AS piezas_pendientes,
+                MAX(t.iditemtrabajo)                         AS ultima_ot_id,
                 (SELECT fdm.enlacefotomodelo
                  FROM PiezasPorModelo ppm2
                  JOIN FotosDeModelos fdm
@@ -1380,7 +1387,31 @@ def dashboard_pendiente_fundir_sin_peso(meses: int = 6):
             GROUP BY np.id, material
             ORDER BY piezas_pendientes DESC
         """, (f"-{meses}",)).fetchall()
-        return [dict(r) for r in rows]
+        result = [dict(r) for r in rows]
+
+        pieza_ids = [r["pieza_id"] for r in result if r["pieza_id"] is not None]
+        vistas_desde: dict[int, str] = {}
+        if pieza_ids:
+            hoy = date_cls.today().isoformat()
+            qs = ",".join("?" * len(pieza_ids))
+            existentes = conn.execute(
+                f"SELECT idpieza, primera_vez FROM _piezas_sin_peso WHERE idpieza IN ({qs})",
+                pieza_ids,
+            ).fetchall()
+            vistas_desde = {row["idpieza"]: row["primera_vez"] for row in existentes}
+            for r in result:
+                conn.execute("""
+                    INSERT INTO _piezas_sin_peso (idpieza, nombrepieza, primera_vez, ultima_vez, ultima_ot_id)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(idpieza) DO UPDATE SET
+                        nombrepieza  = excluded.nombrepieza,
+                        ultima_vez   = excluded.ultima_vez,
+                        ultima_ot_id = excluded.ultima_ot_id
+                """, (r["pieza_id"], r["nombre"], hoy, hoy, r["ultima_ot_id"]))
+                r["visto_desde"] = vistas_desde.get(r["pieza_id"], hoy)
+            conn.commit()
+
+        return result
     finally:
         conn.close()
 
