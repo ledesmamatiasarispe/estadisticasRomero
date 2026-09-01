@@ -2267,9 +2267,9 @@ async function _onTrendRangeChange() {
   }
 }
 
-// Encima de la barra "Entregadas" del año actual: cuánto sumaría si se
-// entrega todo lo que ya está Programado o Fundido -- para poder estimar
-// dónde quedaría el año si se funde/entrega todo el pipeline actual.
+// Encima de la barra "Entregadas" del año actual: una barra fantasma
+// punteada que llega hasta la proyección (cuánto sumaría si se entrega todo
+// lo que ya está Programado o Fundido) -- visual, no un número para leer.
 const _trendProyeccionPlugin = {
   id: 'trendProyeccion',
   afterDatasetsDraw(chart, args, opts) {
@@ -2284,16 +2284,19 @@ const _trendProyeccionPlugin = {
     const { programado, fundido } = proyeccion;
     const entregadasActual = tendencia[idx].entregadas || 0;
     const proyectado = entregadasActual + (programado.piezas || 0) + (fundido.piezas || 0);
+    const yTop = chart.scales.y.getPixelForValue(proyectado);
+    if (yTop >= bar.y) return; // la proyección no supera lo ya entregado
+    const halfW = bar.width / 2;
     const ctx = chart.ctx;
     ctx.save();
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'bottom';
-    ctx.fillStyle = '#8b929e';
-    ctx.font = '700 10px system-ui, -apple-system, sans-serif';
-    ctx.fillText('+' + fmt(programado.piezas) + ' prog. · +' + fmt(fundido.piezas) + ' fund.', bar.x, bar.y - 14);
-    ctx.fillStyle = '#ffa726';
-    ctx.font = '700 11px system-ui, -apple-system, sans-serif';
-    ctx.fillText('→ ' + fmt(proyectado) + ' proy.', bar.x, bar.y - 2);
+    ctx.fillStyle = 'rgba(255,167,38,.3)';
+    ctx.strokeStyle = '#ffa726';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.rect(bar.x - halfW, yTop, bar.width, bar.y - yTop);
+    ctx.fill();
+    ctx.stroke();
     ctx.restore();
   },
 };
