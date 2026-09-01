@@ -1770,7 +1770,14 @@ function _printTrabajosTableHtml(rows, { conEstado } = {}) {
           <td style="text-align:right">${r.cantidadentregada ?? '—'}</td>
         </tr>`).join('')
     : `<tr><td colspan="${conEstado ? 7 : 6}">Sin OTs</td></tr>`;
-  return `<table>
+  // table-layout:fixed + colgroup: sin esto, cada tabla ajusta el ancho de sus
+  // columnas al contenido propio y dos estados con nombres de pieza/cliente de
+  // largo distinto terminan con proporciones de columna distintas al imprimir.
+  const cols = conEstado
+    ? ['9%', '12%', '20%', '31%', '11%', '8.5%', '8.5%']
+    : ['10%', '24%', '38%', '12%', '8%', '8%'];
+  return `<table style="table-layout:fixed">
+      <colgroup>${cols.map(w => `<col style="width:${w}">`).join('')}</colgroup>
       <thead><tr>
         <th>N&#176; OT</th>${conEstado ? '<th>Estado</th>' : ''}<th>Cliente</th><th>Pieza</th>
         <th>F. Entrega</th><th style="text-align:right">Prod.</th><th style="text-align:right">Entreg.</th>
