@@ -287,6 +287,7 @@ td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
 tr:last-child td { border-bottom: none; }
 .tr-link { cursor: pointer; }
 .tr-link:hover td { background: #1a2744; }
+.ped-group-start td { border-top: 2px solid var(--accent); }
 .tag { display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; }
 .tag-g { background: #1b3a1f; color: var(--green); }
 .tag-r { background: #3a1b1b; color: var(--red); }
@@ -1385,10 +1386,26 @@ async function triggerSync() {
 }
 
 // ── Dashboard ──────────────────────────────────────────────────────────────────
+
+// Modo "por OT": junta las filas del mismo pedido una al lado de la otra (se
+// llegan mezcladas porque el backend ordena por fecha de entrega, no por
+// pedido) conservando el orden de aparición del pedido -- así cada grupo
+// queda donde su fila más urgente lo hubiera puesto igual.
+function _agruparPorPedido(rows) {
+  const orden = [];
+  const grupos = new Map();
+  for (const r of rows) {
+    if (!grupos.has(r.idpedido)) { grupos.set(r.idpedido, []); orden.push(r.idpedido); }
+    grupos.get(r.idpedido).push(r);
+  }
+  return orden.flatMap(id => grupos.get(id));
+}
+
 function _renderVencTbl(rows, elId, emptyMsg) {
   const el = document.getElementById(elId);
   if (!el) return;
   if (!rows || !rows.length) { el.innerHTML = '<div class="empty">' + emptyMsg + '</div>'; return; }
+  rows = _agruparPorPedido(rows);
   let tbody = '';
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
@@ -1424,7 +1441,8 @@ function _renderVencTbl(rows, elId, emptyMsg) {
       + (rech > 0 ? '<span style="font-size:10px;color:var(--red)"> &#8722;' + rech + '</span>' : '')
     const rowClick = r.ot_id ? 'go(\'trabajo\',' + r.ot_id + ')' : 'go(\'pedido\',' + r.idpedido + ')';
     const probTag = r.pide_probeta_traccion ? '<span class="prob-tag">&#128300; Probeta</span>' : '';
-    tbody += '<tr class="tr-link ' + cls + prodOk + '" onclick="' + rowClick + '">'
+    const groupStart = (i > 0 && rows[i - 1].idpedido !== r.idpedido) ? ' ped-group-start' : '';
+    tbody += '<tr class="tr-link ' + cls + prodOk + groupStart + '" onclick="' + rowClick + '">'
       + '<td>' + otMain + '</td>'
       + '<td>' + pedLink + '<div style="font-size:11px;color:var(--muted)">' + (r.cliente_nombre || '—') + '</div></td>'
       + '<td style="font-size:12px">' + (r.nombrepieza || '—') + codPieza + '</td>'
@@ -1446,6 +1464,7 @@ function _renderEntregadosTbl(rows, elId) {
   const el = document.getElementById(elId);
   if (!el) return;
   if (!rows || !rows.length) { el.innerHTML = '<div class="empty">Sin entregas en los últimos 90 días</div>'; return; }
+  rows = _agruparPorPedido(rows);
   let tbody = '';
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
@@ -1463,7 +1482,8 @@ function _renderEntregadosTbl(rows, elId) {
       + (r.nropedido || r.idpedido) + '</code>';
     const rowClick = r.ot_id ? 'go(\'trabajo\',' + r.ot_id + ')' : 'go(\'pedido\',' + r.idpedido + ')';
     const probTagE = r.pide_probeta_traccion ? '<span class="prob-tag">&#128300; Probeta</span>' : '';
-    tbody += '<tr class="tr-link ' + cls + '" onclick="' + rowClick + '">'
+    const groupStart = (i > 0 && rows[i - 1].idpedido !== r.idpedido) ? ' ped-group-start' : '';
+    tbody += '<tr class="tr-link ' + cls + groupStart + '" onclick="' + rowClick + '">'
       + '<td>' + otMain + '</td>'
       + '<td>' + pedLink + '<div style="font-size:11px;color:var(--muted)">' + (r.cliente_nombre || '—') + '</div></td>'
       + '<td style="font-size:12px">' + (r.nombrepieza || '—') + codPieza + '</td>'
