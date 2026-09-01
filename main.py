@@ -1267,7 +1267,10 @@ def dashboard_pendiente_fundir(meses: int = 6):
                 ROUND(SUM((t.cantidad - COALESCE(t.cantidadfundida, 0)) *
                     CASE WHEN np.nombrepieza LIKE '%(AD)' THEN pp.pesopieza * 2
                          WHEN np.nombrepieza LIKE '%(TR)' THEN pp.pesopieza * 3
-                         ELSE pp.pesopieza END * COALESCE(np.coefcompl, 1)), 2) AS kg_pendientes
+                         ELSE pp.pesopieza END * COALESCE(np.coefcompl, 1)), 2) AS kg_pendientes,
+                SUM(CASE WHEN pp.pesopieza IS NULL THEN 1 ELSE 0 END) AS ots_sin_peso,
+                SUM(CASE WHEN pp.pesopieza IS NULL
+                    THEN (t.cantidad - COALESCE(t.cantidadfundida, 0)) ELSE 0 END) AS piezas_sin_peso
             FROM Trabajos t
             JOIN ItemDetallePedido idp ON idp.iditempedido = t.iditempedido
             JOIN Pedidos p             ON p.idpedido = idp.idpedido

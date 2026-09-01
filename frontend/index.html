@@ -972,12 +972,14 @@ function _drawPendienteFundirChart(canvasId, subtitleId, data) {
   }
   const useKg = _pendFundirKgMode;
   const sub = subtitleId ? $id(subtitleId) : null;
+  const totalPzsSinPeso = data.reduce((s, d) => s + (d.piezas_sin_peso || 0), 0);
   if (sub) {
     const totalOts = data.reduce((s, d) => s + d.ots, 0);
     const totalPzs = data.reduce((s, d) => s + d.piezas_pendientes, 0);
     const totalKg  = data.reduce((s, d) => s + (d.kg_pendientes || 0), 0);
     sub.textContent = totalOts + ' OT' + (totalOts !== 1 ? 's' : '') + ' activas · ' + fmt(totalPzs) + ' piezas'
-      + (useKg ? ' · ' + fmtKg(totalKg) : '');
+      + (useKg ? ' · ' + fmtKg(totalKg) : '')
+      + (useKg && totalPzsSinPeso > 0 ? ' · ⚠ ' + fmt(totalPzsSinPeso) + ' sin peso cargado (kg incompleto)' : '');
   }
   const kgBtn = $id('pend-fundir-kg-btn');
   if (kgBtn) kgBtn.textContent = useKg ? 'Ver en piezas' : 'Ver en kg';
@@ -992,14 +994,28 @@ function _drawPendienteFundirChart(canvasId, subtitleId, data) {
       return useKg
         ? fmt(d.piezas_pendientes) + ' piezas · ' + fmtKg(d.kg_pendientes)
         : ctx.raw + ' OT' + (ctx.raw !== 1 ? 's' : '') + ' · ' + fmt(d.piezas_pendientes) + ' piezas';
+    },
+    afterLabel: (ctx) => {
+      const d = data[ctx.dataIndex];
+      if (!useKg || !d.piezas_sin_peso) return undefined;
+      return d.piezas_sin_peso >= d.piezas_pendientes
+        ? '⚠ Sin ninguna pieza con peso cargado — kg desconocido'
+        : '⚠ ' + fmt(d.piezas_sin_peso) + ' de ' + fmt(d.piezas_pendientes) + ' piezas sin peso cargado — kg incompleto';
     }
   } };
   if (_pendFundirCharts[canvasId]) { _pendFundirCharts[canvasId].destroy(); _pendFundirCharts[canvasId] = null; }
   _pendFundirCharts[canvasId] = new Chart(canvas, {
     type: 'bar',
     data: {
-      labels: data.map(d => d.codigo),
-      datasets: [{ data: data.map(d => useKg ? (d.kg_pendientes || 0) : d.ots), backgroundColor: '#42a5f5bb', borderRadius: 4 }],
+      labels: data.map(d => d.codigo + ((useKg && d.piezas_sin_peso) ? ' ⚠' : '')),
+      datasets: [{
+        data: data.map(d => useKg ? (d.kg_pendientes || 0) : d.ots),
+        backgroundColor: data.map(d => {
+          if (!useKg || !d.piezas_sin_peso) return '#42a5f5bb';
+          return d.piezas_sin_peso >= d.piezas_pendientes ? '#ef5350bb' : '#ffa726bb';
+        }),
+        borderRadius: 4,
+      }],
     },
     options: opts,
   });
