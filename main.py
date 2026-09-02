@@ -1340,55 +1340,72 @@ def dashboard_pendiente_fundir(meses: int = 6):
         conn.close()
 
 
+# Compartida entre el agregado y el desglose por mes de dashboard_proyeccion_pipeline.
+# Programado: nada fundido todavia, lo pendiente es cantidad-cantidadfundida (falta
+# fundir). Fundido: ya se fundio, lo pendiente es lo YA producido (falta entregar) --
+# por eso NO se filtra por cantidadfundida<cantidad aca, un Fundido tipicamente ya
+# tiene cantidadfundida=cantidad.
+_CTE_PROYECCION_BASE = """
+    , base AS (
+        SELECT
+            t.estadotrabajo AS estado,
+            strftime('%Y', t.fechaprevista) AS año,
+            strftime('%m', t.fechaprevista) AS mes,
+            CASE WHEN upper(t.estadotrabajo) = 'P'
+                 THEN (t.cantidad - COALESCE(t.cantidadfundida, 0))
+                 ELSE COALESCE(t.cantidadproducida, 0) END AS pendientes,
+            np.nombrepieza AS nombrepieza,
+            COALESCE(np.coefcompl, 1) AS coefcompl,
+            CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END AS peso_efectivo
+        FROM Trabajos t
+        JOIN ItemDetallePedido idp ON idp.iditempedido = t.iditempedido
+        JOIN Pedidos p             ON p.idpedido = idp.idpedido
+        LEFT JOIN NombreDePiezas np ON np.id = idp.idpieza
+        LEFT JOIN PesosDePiezas pp  ON pp.códpieza = t.idpesopieza
+        LEFT JOIN piezas_peso pz    ON pz.pieza_id = np.id
+        WHERE upper(t.estadotrabajo) IN ('P', 'F')
+          AND upper(p.estadopedido)  NOT IN ('K','D')
+          AND upper(idp.estadoitem)  NOT IN ('K','D')
+          AND t."códdeagregados" NOT IN ('--', '4', 'Ar', 'ar', 'AR')
+    )
+"""
+_KG_EXPR = """ROUND(SUM(pendientes *
+                    CASE WHEN nombrepieza LIKE '%(AD)' THEN peso_efectivo * 2
+                         WHEN nombrepieza LIKE '%(TR)' THEN peso_efectivo * 3
+                         ELSE peso_efectivo END * coefcompl), 2)"""
+
+
 @app.get("/api/dashboard/proyeccion_pipeline")
 def dashboard_proyeccion_pipeline():
     """OTs Programadas y Fundidas (todo el pipeline activo, sin ventana de meses --
     es una foto de hoy, no algo historico) con su kg, mismo peso_efectivo que
-    dashboard_pendiente_fundir, para la proyeccion sobre la barra de Entregadas
-    del año actual en Tendencia."""
+    dashboard_pendiente_fundir. El agregado alimenta la tarjeta KPI y la barra
+    anual de Tendencia; por_mes (agrupado por año/mes de fechaprevista, la OT
+    puede ser de cualquier año si esta atrasada) alimenta el drill-down mensual,
+    para poner cada Programada/Fundida en su mes de entrega en vez de todas
+    juntas en el ultimo mes con datos."""
     conn = get_db()
     try:
-        rows = conn.execute(_CTE_PIEZAS_PESO + """
-            , base AS (
-                SELECT
-                    t.estadotrabajo AS estado,
-                    -- Programado: nada fundido todavia, lo pendiente es cantidad-cantidadfundida
-                    -- (falta fundir). Fundido: ya se fundio, lo pendiente es lo YA producido
-                    -- (falta entregar) -- por eso NO se filtra por cantidadfundida<cantidad aca,
-                    -- un Fundido tipicamente ya tiene cantidadfundida=cantidad.
-                    CASE WHEN upper(t.estadotrabajo) = 'P'
-                         THEN (t.cantidad - COALESCE(t.cantidadfundida, 0))
-                         ELSE COALESCE(t.cantidadproducida, 0) END AS pendientes,
-                    np.nombrepieza AS nombrepieza,
-                    COALESCE(np.coefcompl, 1) AS coefcompl,
-                    CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END AS peso_efectivo
-                FROM Trabajos t
-                JOIN ItemDetallePedido idp ON idp.iditempedido = t.iditempedido
-                JOIN Pedidos p             ON p.idpedido = idp.idpedido
-                LEFT JOIN NombreDePiezas np ON np.id = idp.idpieza
-                LEFT JOIN PesosDePiezas pp  ON pp.códpieza = t.idpesopieza
-                LEFT JOIN piezas_peso pz    ON pz.pieza_id = np.id
-                WHERE upper(t.estadotrabajo) IN ('P', 'F')
-                  AND upper(p.estadopedido)  NOT IN ('K','D')
-                  AND upper(idp.estadoitem)  NOT IN ('K','D')
-                  AND t."códdeagregados" NOT IN ('--', '4', 'Ar', 'ar', 'AR')
-            )
-            SELECT
-                estado,
-                COUNT(*) AS ots,
-                SUM(pendientes) AS piezas,
-                ROUND(SUM(pendientes *
-                    CASE WHEN nombrepieza LIKE '%(AD)' THEN peso_efectivo * 2
-                         WHEN nombrepieza LIKE '%(TR)' THEN peso_efectivo * 3
-                         ELSE peso_efectivo END * coefcompl), 2) AS kg
+        rows = conn.execute(_CTE_PIEZAS_PESO + _CTE_PROYECCION_BASE + f"""
+            SELECT estado, COUNT(*) AS ots, SUM(pendientes) AS piezas, {_KG_EXPR} AS kg
             FROM base
             GROUP BY estado
         """).fetchall()
         por_estado = {r["estado"]: dict(r) for r in rows}
         vacio = {"ots": 0, "piezas": 0, "kg": 0}
+
+        mes_rows = conn.execute(_CTE_PIEZAS_PESO + _CTE_PROYECCION_BASE + f"""
+            SELECT estado, año, mes, COUNT(*) AS ots, SUM(pendientes) AS piezas, {_KG_EXPR} AS kg
+            FROM base
+            WHERE año IS NOT NULL
+            GROUP BY estado, año, mes
+            ORDER BY año, mes
+        """).fetchall()
+
         return {
             "programado": por_estado.get("P", vacio),
             "fundido":    por_estado.get("F", vacio),
+            "por_mes":    [dict(r) for r in mes_rows],
         }
     finally:
         conn.close()

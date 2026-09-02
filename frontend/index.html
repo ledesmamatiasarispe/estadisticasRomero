@@ -1331,23 +1331,42 @@ function _drillMes(wrapId, año, rows, backFn, kgOpts) {
     <div class="chart-box"><canvas id="${cid}"></canvas></div>`;
   const canvas = $id(cid); if (!canvas) return;
 
-  // Proyección (Programado/Fundido) sobre el último mes con datos, solo si se
-  // está mirando el año en curso -- es una foto de hoy, no aplica a años viejos.
+  // Proyección (Programado/Fundido) puesta en su propio mes de fecha de
+  // entrega -- no todo junto en el último mes con datos. proyeccion.por_mes
+  // trae cualquier año (una OT Programada puede estar atrasada de un año
+  // viejo), así que se filtra al año que se está mirando.
   const proyeccion = kgOpts?.proyeccion || null;
-  let targetIdx = -1;
-  if (proyeccion && String(año) === String(new Date().getFullYear())) {
-    for (let i = ent.length - 1; i >= 0; i--) { if (ent[i] != null) { targetIdx = i; break; } }
+  const porMes = {}; // {mesIdx: {programado:{piezas,kg}, fundido:{piezas,kg}}}
+  if (proyeccion?.por_mes) {
+    for (const r of proyeccion.por_mes) {
+      if (String(r.año) !== String(año)) continue;
+      const mIdx = parseInt(r.mes, 10) - 1;
+      if (mIdx < 0 || mIdx > 11) continue;
+      if (!porMes[mIdx]) porMes[mIdx] = { programado: { piezas: 0, kg: 0 }, fundido: { piezas: 0, kg: 0 } };
+      const campo = r.estado === 'P' ? 'programado' : 'fundido';
+      porMes[mIdx][campo].piezas += r.piezas || 0;
+      porMes[mIdx][campo].kg += r.kg || 0;
+    }
+  }
+  const items = [];
+  const progPorMes = {}; // mesIdx -> Programadas (solo, para el tooltip), en la unidad de useKg
+  for (const mIdx of Object.keys(porMes).map(Number)) {
+    const { programado, fundido } = porMes[mIdx];
+    const suma = useKg ? (programado.kg + fundido.kg) : (programado.piezas + fundido.piezas);
+    if (suma <= 0) continue;
+    items.push({ index: mIdx, entregadasActual: ent[mIdx] || 0, suma });
+    progPorMes[mIdx] = useKg ? programado.kg : programado.piezas;
   }
 
   const opts = chartDefaults();
-  if (targetIdx >= 0) {
+  if (items.length) {
     opts.layout = { padding: { top: 30 } };
-    opts.plugins.trendProyeccion = { proyeccion, targetIndex: targetIdx, entregadasActual: ent[targetIdx] || 0, useKg };
+    opts.plugins.trendProyeccion = { items };
     opts.plugins.tooltip = { callbacks: { label: (ctx) => {
       const label = ctx.dataset.label || '';
       const v = ctx.parsed.y;
-      if (ctx.datasetIndex === 0 && ctx.dataIndex === targetIdx) {
-        const prog = useKg ? proyeccion.programado.kg : proyeccion.programado.piezas;
+      if (ctx.datasetIndex === 0 && progPorMes[ctx.dataIndex] != null) {
+        const prog = progPorMes[ctx.dataIndex];
         const fmtFn = useKg ? fmtKg : fmt;
         return label + ': ' + fmtFn(v) + ' + Programadas: ' + fmtFn(prog) + ' = ' + fmtFn(v + prog);
       }
@@ -2302,31 +2321,33 @@ function _proyeccionSuma(proyeccion, useKg) {
     : (programado.piezas || 0) + (fundido.piezas || 0);
 }
 
-// Encima de la barra "Entregadas" de un índice puntual (el año actual en el
-// gráfico anual, o el último mes con datos en el drill-down mensual): una
-// barra fantasma punteada que llega hasta la proyección (cuánto sumaría si
-// se entrega todo lo que ya está Programado o Fundido) -- visual, no texto.
+// Encima de la barra "Entregadas" de uno o más índices (el año actual en el
+// gráfico anual; en el drill-down mensual, cada mes que tenga Programado o
+// Fundido con esa fecha de entrega): una barra fantasma punteada que llega
+// hasta la proyección de ese punto -- visual, no texto.
 const _trendProyeccionPlugin = {
   id: 'trendProyeccion',
   afterDatasetsDraw(chart, args, opts) {
-    if (!opts || !opts.proyeccion || opts.targetIndex == null) return;
+    if (!opts || !opts.items || !opts.items.length) return;
     const meta = chart.getDatasetMeta(0); // dataset "Entregadas"
-    const bar = meta && meta.data[opts.targetIndex];
-    if (!bar) return;
-    const proyectado = (opts.entregadasActual || 0) + _proyeccionSuma(opts.proyeccion, opts.useKg);
-    const yTop = chart.scales.y.getPixelForValue(proyectado);
-    if (yTop >= bar.y) return; // la proyección no supera lo ya entregado
-    const halfW = bar.width / 2;
     const ctx = chart.ctx;
     ctx.save();
     ctx.fillStyle = 'rgba(255,167,38,.3)';
     ctx.strokeStyle = '#ffa726';
     ctx.lineWidth = 1.5;
     ctx.setLineDash([4, 3]);
-    ctx.beginPath();
-    ctx.rect(bar.x - halfW, yTop, bar.width, bar.y - yTop);
-    ctx.fill();
-    ctx.stroke();
+    for (const item of opts.items) {
+      const bar = meta && meta.data[item.index];
+      if (!bar) continue;
+      const proyectado = (item.entregadasActual || 0) + (item.suma || 0);
+      const yTop = chart.scales.y.getPixelForValue(proyectado);
+      if (yTop >= bar.y) continue; // la proyección no supera lo ya entregado
+      const halfW = bar.width / 2;
+      ctx.beginPath();
+      ctx.rect(bar.x - halfW, yTop, bar.width, bar.y - yTop);
+      ctx.fill();
+      ctx.stroke();
+    }
     ctx.restore();
   },
 };
@@ -2363,7 +2384,7 @@ function _renderTrendBarras() {
     ? (useKg ? (_dashTendencia[idxActual].kg_entregadas || 0) : (_dashTendencia[idxActual].entregadas || 0))
     : 0;
   opts.plugins.trendProyeccion = (_trendProyeccion && idxActual >= 0)
-    ? { proyeccion: _trendProyeccion, targetIndex: idxActual, entregadasActual, useKg }
+    ? { items: [{ index: idxActual, entregadasActual, suma: _proyeccionSuma(_trendProyeccion, useKg) }] }
     : null;
   // En la barra Entregadas del año actual, el tooltip suma la proyección
   // (Programadas) en vez de mostrar solo "Entregadas: X" por defecto.
