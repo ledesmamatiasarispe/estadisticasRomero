@@ -733,6 +733,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# JS compartido entre index.html y kiosk.html (kiosk_server.py monta el mismo
+# frontend/js/ por separado, ya que corre en otro proceso/puerto) -- una sola
+# fuente en disco, dos rutas HTTP porque son dos servidores distintos.
+_js_dir = FRONTEND / "js"
+if _js_dir.exists():
+    app.mount("/js", StaticFiles(directory=str(_js_dir)), name="js")
+
 
 # ── Endpoints API ─────────────────────────────────────────────────────────────
 

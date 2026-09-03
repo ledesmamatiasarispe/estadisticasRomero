@@ -47,6 +47,12 @@ _vendor = FRONTEND / "vendor"
 if _vendor.exists():
     app.mount("/vendor", StaticFiles(directory=str(_vendor)), name="vendor")
 
+# Mismo frontend/js/ que sirve main.py -- una sola fuente en disco, montada
+# aca tambien porque kiosk_server corre en su propio proceso/puerto (50505).
+_js = FRONTEND / "js"
+if _js.exists():
+    app.mount("/js", StaticFiles(directory=str(_js)), name="js")
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=50505, log_level="info")
