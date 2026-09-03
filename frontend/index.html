@@ -1082,15 +1082,11 @@ function _ordenarPorGrupos(data) {
 function _dibujarLlave(ctx, xLabel, yTop, yBottom, prof) {
   const yMid = (yTop + yBottom) / 2;
   const xSpine = xLabel - prof;
-  const xTip = xSpine - prof * 0.7;
+  const xTip = xSpine - prof;
   ctx.beginPath();
   ctx.moveTo(xLabel, yTop);
-  ctx.quadraticCurveTo(xSpine, yTop, xSpine, yTop + prof);
-  ctx.lineTo(xSpine, yMid - prof);
-  ctx.quadraticCurveTo(xSpine, yMid, xTip, yMid);
-  ctx.quadraticCurveTo(xSpine, yMid, xSpine, yMid + prof);
-  ctx.lineTo(xSpine, yBottom - prof);
-  ctx.quadraticCurveTo(xSpine, yBottom, xLabel, yBottom);
+  ctx.bezierCurveTo(xSpine, yTop, xSpine, yMid - prof, xTip, yMid);
+  ctx.bezierCurveTo(xSpine, yMid + prof, xSpine, yBottom, xLabel, yBottom);
   ctx.stroke();
   return xTip;
 }
@@ -1103,7 +1099,10 @@ const _grupoLlavePlugin = {
     const meta1 = chart.getDatasetMeta(1);
     if (!meta0 || !meta0.data.length) return;
     const ctx = chart.ctx;
-    const xLabel = chart.chartArea.left - 6;
+    // chart.scales.y.left es el borde del margen reservado por layout.padding.left
+    // -- chart.chartArea.left queda DESPUES de las etiquetas del eje (5, 1, 3...),
+    // dibujar ahi las tapa en vez de quedar en el margen libre.
+    const xLabel = chart.scales.y.left - 4;
     const prof = opts.print ? 10 : 8;
     ctx.save();
     ctx.strokeStyle = opts.print ? '#333' : '#8b929e';
@@ -1149,7 +1148,7 @@ function _pendFundirChartConfig(data, useKg, print) {
   opts.plugins.legend.labels = { color: print ? '#000' : '#8b929e', font: { size: print ? 13 : 11 } };
   opts.layout = { padding: {
     right: print ? 76 : 56, // lugar para el numero total al final de cada barra
-    left: grupos.length ? (print ? 95 : 75) : 0, // lugar para la llave + kg del grupo
+    left: grupos.length ? (print ? 110 : 90) : 0, // lugar para la llave + kg del grupo
   } };
   opts.plugins.reglaBarra = { minor, subdiv, etiquetas, print };
   opts.plugins.grupoLlave = { grupos, print };
