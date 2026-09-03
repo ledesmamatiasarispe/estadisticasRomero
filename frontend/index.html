@@ -329,15 +329,19 @@ tr:last-child td { border-bottom: none; }
 .cal-badge.cal-fund { background: #ffa72633; color: #ffc477; }
 .cal-badge.cal-prog-bat { background: #00897b55; color: #64d8cb; font-weight: 700; }
 .cal-badge.cal-fund-bat { background: #e6510055; color: #ffab5e; font-weight: 700; }
-.cal-anual-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; align-items: start; }
-.cal-mes-celda { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 8px; display: flex; flex-direction: column; gap: 5px; cursor: pointer; transition: border-color .15s; }
+.cal-anual-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px; align-items: start; }
+.cal-mes-celda { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 8px; display: flex; flex-direction: column; gap: 6px; cursor: pointer; transition: border-color .15s; }
 .cal-mes-celda:hover { border-color: var(--accent); }
 .cal-mes-celda.cal-vencida { border-color: var(--red); }
 .cal-mes-nombre { font-size: 12px; font-weight: 600; color: var(--text); }
-.cal-semana-row { display: flex; align-items: center; gap: 6px; }
-.cal-semana-rango { font-size: 10px; color: var(--muted); width: 32px; flex-shrink: 0; text-align: right; }
-.cal-semana-row.cal-semana-vencida .cal-semana-rango { color: var(--red); font-weight: 700; }
-.cal-semana-badges { display: flex; flex-wrap: wrap; gap: 3px; flex: 1; min-width: 0; }
+.cal-mes-tabla { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.cal-mes-tabla th { text-align: left; padding: 2px 5px 4px; font-size: 9px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; border-bottom: 1px solid var(--border); }
+.cal-mes-tabla th:first-child { width: 34px; }
+.cal-mes-tabla td { padding: 3px 5px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.cal-mes-tabla tr:last-child td { border-bottom: none; }
+.cal-mes-td-sem { font-size: 10px; color: var(--muted); white-space: nowrap; }
+.cal-semana-vencida .cal-mes-td-sem { color: var(--red); font-weight: 700; }
+.cal-mes-td-badges { display: flex; flex-direction: column; gap: 2px; }
 .cal-mes-vacio { font-size: 11px; color: var(--muted); }
 
 /* DB card */
@@ -1250,17 +1254,19 @@ function _renderPendFundirCalendarioAnual(el) {
     const semanas = [...mesInfo.semanas.entries()].sort((a, b) => a[0] - b[0]);
     const filas = semanas.map(([, sem]) => {
       const rango = sem.diaMin === sem.diaMax ? `${sem.diaMin}` : `${sem.diaMin}-${sem.diaMax}`;
-      return `<div class="cal-semana-row${sem.vencido ? ' cal-semana-vencida' : ''}">
-        <span class="cal-semana-rango">${rango}</span>
-        <div class="cal-semana-badges">
-          ${_pendFundirCalBadgeHtml(sem.programado, 'cal-prog', 'Programado')}
-          ${_pendFundirCalBadgeHtml(sem.fundido, 'cal-fund', 'Fundido')}
-        </div>
-      </div>`;
+      return `<tr class="${sem.vencido ? 'cal-semana-vencida' : ''}">
+        <td class="cal-mes-td-sem">${rango}</td>
+        <td><div class="cal-mes-td-badges">${_pendFundirCalBadgeHtml(sem.programado, 'cal-prog', 'Programado')}</div></td>
+        <td><div class="cal-mes-td-badges">${_pendFundirCalBadgeHtml(sem.fundido, 'cal-fund', 'Fundido')}</div></td>
+      </tr>`;
     }).join('');
+    const tabla = semanas.length ? `<table class="cal-mes-tabla">
+      <thead><tr><th>Sem.</th><th>Programado</th><th>Fundido</th></tr></thead>
+      <tbody>${filas}</tbody>
+    </table>` : '<div class="cal-mes-vacio">&mdash;</div>';
     return `<div class="cal-mes-celda${mesInfo.vencido ? ' cal-vencida' : ''}" onclick="_pendFundirCalIrAMes(${i})">
       <div class="cal-mes-nombre">${nombre}</div>
-      ${semanas.length ? filas : '<div class="cal-mes-vacio">&mdash;</div>'}
+      ${tabla}
     </div>`;
   }).join('');
 
