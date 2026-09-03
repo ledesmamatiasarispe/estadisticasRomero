@@ -1001,40 +1001,45 @@ const _reglaBarraPlugin = {
   afterDatasetsDraw(chart, args, opts) {
     if (!opts || !opts.minor) return;
     const { minor, subdiv, etiquetas, print } = opts;
-    const meta = chart.getDatasetMeta(0);
-    if (!meta || !meta.data.length) return;
-    const values = chart.data.datasets[0].data;
+    // etiquetas[datasetIndex][i]: una barra por serie (agrupadas, no apiladas)
+    // -- cada una con su propia regla y su propio total, no uno combinado.
+    const datasets = chart.data.datasets;
     const xScale = chart.scales.x;
     const x0 = xScale.getPixelForValue(0);
     const ctx = chart.ctx;
     ctx.save();
-    meta.data.forEach((bar, i) => {
-      const v = values[i] || 0;
-      if (v <= 0) return;
-      const top = bar.y - bar.height / 2 + 1;
-      const bottom = bar.y + bar.height / 2 - 1;
-      const xEnd = xScale.getPixelForValue(v);
-      for (let n = 1; n * minor < v; n++) {
-        const tickVal = n * minor;
-        const px = xScale.getPixelForValue(tickVal);
-        if (px <= x0 || px >= xEnd) continue;
-        const esMayor = Math.round(tickVal / minor) % subdiv === 0;
-        ctx.strokeStyle = esMayor ? 'rgba(13,17,23,.55)' : 'rgba(13,17,23,.22)';
-        ctx.lineWidth = esMayor ? 1.5 : 1;
-        ctx.beginPath();
-        ctx.moveTo(px, top);
-        ctx.lineTo(px, bottom);
-        ctx.stroke();
-      }
-      // Total al final de la barra -- en la imagen impresa no hay tooltip para
-      // ver el valor exacto al pasar el mouse, asi que queda siempre a la vista.
-      if (etiquetas && etiquetas[i] != null) {
-        ctx.fillStyle = print ? '#000' : '#c9d1d9';
-        ctx.font = (print ? '700 15px' : '700 11px') + ' system-ui, -apple-system, sans-serif';
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(String(etiquetas[i]), xEnd + 6, bar.y);
-      }
+    datasets.forEach((ds, dsIdx) => {
+      const meta = chart.getDatasetMeta(dsIdx);
+      if (!meta || !meta.data.length) return;
+      meta.data.forEach((bar, i) => {
+        const v = ds.data[i] || 0;
+        if (v <= 0) return;
+        const top = bar.y - bar.height / 2 + 1;
+        const bottom = bar.y + bar.height / 2 - 1;
+        const xEnd = bar.x;
+        for (let n = 1; n * minor < v; n++) {
+          const tickVal = n * minor;
+          const px = xScale.getPixelForValue(tickVal);
+          if (px <= x0 || px >= xEnd) continue;
+          const esMayor = Math.round(tickVal / minor) % subdiv === 0;
+          ctx.strokeStyle = esMayor ? 'rgba(13,17,23,.55)' : 'rgba(13,17,23,.22)';
+          ctx.lineWidth = esMayor ? 1.5 : 1;
+          ctx.beginPath();
+          ctx.moveTo(px, top);
+          ctx.lineTo(px, bottom);
+          ctx.stroke();
+        }
+        // Total al final de cada barra -- en la imagen impresa no hay tooltip
+        // para ver el valor exacto al pasar el mouse, asi que queda a la vista.
+        const etiqueta = etiquetas && etiquetas[dsIdx] && etiquetas[dsIdx][i];
+        if (etiqueta != null) {
+          ctx.fillStyle = print ? '#000' : '#c9d1d9';
+          ctx.font = (print ? '700 15px' : '700 11px') + ' system-ui, -apple-system, sans-serif';
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(String(etiqueta), xEnd + 6, bar.y);
+        }
+      });
     });
     ctx.restore();
   },
@@ -1045,14 +1050,21 @@ Chart.register(_reglaBarraPlugin);
 // el que se genera aparte para imprimir (fondo blanco, letra mas grande) --
 // print:true cambia colores/tamaños, nunca la logica de los pasos de la regla.
 function _pendFundirChartConfig(data, useKg, print) {
-  const valores = data.map(d => useKg ? (d.kg_pendientes || 0) : d.ots);
-  const etiquetas = data.map(d => useKg ? fmtKg(d.kg_pendientes) : fmt(d.ots) + ' OT' + (d.ots !== 1 ? 's' : ''));
-  const { major, minor, subdiv } = _reglaPasos(Math.max(...valores, 0));
+  const valorSegmento = (seg) => useKg ? (seg.kg_pendientes || 0) : (seg.ots || 0);
+  const etiquetaSegmento = (v) => useKg ? fmtKg(v) : fmt(v) + ' OT' + (v !== 1 ? 's' : '');
+  const progVals = data.map(d => valorSegmento(d.programado));
+  const fundVals = data.map(d => valorSegmento(d.fundido));
+  // Barras agrupadas (lado a lado), no apiladas -- cada una con su propio
+  // total, asi que el paso de la regla sale del maximo de CUALQUIER barra
+  // individual, no de la suma de las dos.
+  const etiquetas = [progVals.map(etiquetaSegmento), fundVals.map(etiquetaSegmento)];
+  const { major, minor, subdiv } = _reglaPasos(Math.max(...progVals, ...fundVals, 0));
   const esMayor = (val) => Math.round(val / minor) % subdiv === 0;
 
   const opts = chartDefaults();
   opts.indexAxis = 'y';
-  opts.plugins.legend.display = false;
+  opts.plugins.legend.display = true;
+  opts.plugins.legend.labels = { color: print ? '#000' : '#8b929e', font: { size: print ? 13 : 11 } };
   opts.layout = { padding: { right: print ? 76 : 56 } }; // lugar para el numero total al final de cada barra
   opts.plugins.reglaBarra = { minor, subdiv, etiquetas, print };
   if (print) { opts.animation = false; opts.responsive = false; }
@@ -1076,40 +1088,38 @@ function _pendFundirChartConfig(data, useKg, print) {
     },
   };
   if (print) {
-    opts.scales.y = {
-      ticks: { color: '#000', font: { size: 14, weight: '700' } },
-      grid: { color: '#eee' },
-    };
+    opts.scales.y = { ticks: { color: '#000', font: { size: 14, weight: '700' } }, grid: { color: '#eee' } };
   }
   opts.plugins.tooltip = { callbacks: {
     title: (items) => data[items[0].dataIndex].material,
     label: (ctx) => {
-      const d = data[ctx.dataIndex];
+      const seg = ctx.datasetIndex === 0 ? data[ctx.dataIndex].programado : data[ctx.dataIndex].fundido;
+      const nombre = ctx.datasetIndex === 0 ? 'Programado' : 'Fundido';
       return useKg
-        ? fmt(d.piezas_pendientes) + ' piezas · ' + fmtKg(d.kg_pendientes)
-        : ctx.raw + ' OT' + (ctx.raw !== 1 ? 's' : '') + ' · ' + fmt(d.piezas_pendientes) + ' piezas';
+        ? nombre + ': ' + fmt(seg.piezas_pendientes) + ' piezas · ' + fmtKg(seg.kg_pendientes)
+        : nombre + ': ' + fmt(seg.ots) + ' OT' + (seg.ots !== 1 ? 's' : '') + ' · ' + fmt(seg.piezas_pendientes) + ' piezas';
     },
     afterLabel: (ctx) => {
-      const d = data[ctx.dataIndex];
-      if (!useKg || !d.piezas_sin_peso) return undefined;
-      return d.piezas_sin_peso >= d.piezas_pendientes
+      const seg = ctx.datasetIndex === 0 ? data[ctx.dataIndex].programado : data[ctx.dataIndex].fundido;
+      if (!useKg || !seg.piezas_sin_peso) return undefined;
+      return seg.piezas_sin_peso >= seg.piezas_pendientes
         ? '⚠ Sin ninguna pieza con peso cargado — kg desconocido'
-        : '⚠ ' + fmt(d.piezas_sin_peso) + ' de ' + fmt(d.piezas_pendientes) + ' piezas sin peso cargado — kg incompleto';
+        : '⚠ ' + fmt(seg.piezas_sin_peso) + ' de ' + fmt(seg.piezas_pendientes) + ' piezas sin peso cargado — kg incompleto';
     }
   } };
+
+  const sinPesoTotal = (d) => (d.programado.piezas_sin_peso || 0) + (d.fundido.piezas_sin_peso || 0);
+  const colorProgramado = print ? '#42a5f5' : '#42a5f5bb';
+  const colorFundido    = print ? '#ffa726' : '#ffa726bb';
 
   return {
     type: 'bar',
     data: {
-      labels: data.map(d => d.codigo + ((useKg && d.piezas_sin_peso) ? ' ⚠' : '')),
-      datasets: [{
-        data: valores,
-        backgroundColor: data.map(d => {
-          if (!useKg || !d.piezas_sin_peso) return '#42a5f5bb';
-          return d.piezas_sin_peso >= d.piezas_pendientes ? '#ef5350bb' : '#ffa726bb';
-        }),
-        borderRadius: 4,
-      }],
+      labels: data.map(d => d.codigo + ((useKg && sinPesoTotal(d) > 0) ? ' ⚠' : '')),
+      datasets: [
+        { label: 'Programado', data: progVals, backgroundColor: colorProgramado, borderRadius: 4 },
+        { label: 'Fundido',    data: fundVals, backgroundColor: colorFundido,    borderRadius: 4 },
+      ],
     },
     options: opts,
   };
@@ -1124,11 +1134,12 @@ function _drawPendienteFundirChart(canvasId, subtitleId, data) {
   }
   const useKg = _pendFundirKgMode;
   const sub = subtitleId ? $id(subtitleId) : null;
-  const totalPzsSinPeso = data.reduce((s, d) => s + (d.piezas_sin_peso || 0), 0);
+  const segTotal = (d, campo) => (d.programado[campo] || 0) + (d.fundido[campo] || 0);
+  const totalPzsSinPeso = data.reduce((s, d) => s + segTotal(d, 'piezas_sin_peso'), 0);
   if (sub) {
-    const totalOts = data.reduce((s, d) => s + d.ots, 0);
-    const totalPzs = data.reduce((s, d) => s + d.piezas_pendientes, 0);
-    const totalKg  = data.reduce((s, d) => s + (d.kg_pendientes || 0), 0);
+    const totalOts = data.reduce((s, d) => s + segTotal(d, 'ots'), 0);
+    const totalPzs = data.reduce((s, d) => s + segTotal(d, 'piezas_pendientes'), 0);
+    const totalKg  = data.reduce((s, d) => s + segTotal(d, 'kg_pendientes'), 0);
     sub.textContent = totalOts + ' OT' + (totalOts !== 1 ? 's' : '') + ' activas · ' + fmt(totalPzs) + ' piezas'
       + (useKg ? ' · ' + fmtKg(totalKg) : '')
       + (useKg && totalPzsSinPeso > 0 ? ' · ⚠ ' + fmt(totalPzsSinPeso) + ' sin peso cargado (kg incompleto)' : '');
