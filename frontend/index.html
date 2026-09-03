@@ -1477,11 +1477,13 @@ const _grupoLlavePlugin = {
     const fundVisible = chart.isDatasetVisible(1);
     ctx.save();
     ctx.strokeStyle = opts.print ? '#333' : '#8b929e';
-    ctx.fillStyle   = opts.print ? '#000' : '#c9d1d9';
     ctx.lineWidth = 1.5;
-    ctx.font = (opts.print ? '700 12px' : '700 10px') + ' system-ui, -apple-system, sans-serif';
+    const fontSize = opts.print ? 11 : 9;
+    ctx.font = (opts.print ? '700 ' : '700 ') + fontSize + 'px system-ui, -apple-system, sans-serif';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
+    const colorProg = opts.print ? _COLOR_PROGRAMADO_PRINT : '#7cc0f8';
+    const colorFund = opts.print ? _COLOR_FUNDIDO_PRINT : '#ffc477';
     opts.grupos.forEach((g) => {
       const barTop = meta0.data[g.startIdx];
       const barBottomEl = (meta1 && meta1.data[g.endIdx]) || meta0.data[g.endIdx];
@@ -1489,8 +1491,18 @@ const _grupoLlavePlugin = {
       const yTop = barTop.y - barTop.height / 2 - 3;
       const yBottom = barBottomEl.y + barBottomEl.height / 2 + 3;
       const xTip = _dibujarLlave(ctx, xLabel, yTop, yBottom, prof);
-      const kg = (progVisible ? g.kgProgramado : 0) + (fundVisible ? g.kgFundido : 0);
-      ctx.fillText(fmtKg(kg), xTip - 6, (yTop + yBottom) / 2);
+      // Total de Programado y de Fundido por separado -- no un solo numero
+      // combinado -- cada uno en su color, apilados en dos renglones.
+      const yMid = (yTop + yBottom) / 2;
+      const lineas = [];
+      if (progVisible) lineas.push({ texto: fmtKg(g.kgProgramado), color: colorProg });
+      if (fundVisible) lineas.push({ texto: fmtKg(g.kgFundido), color: colorFund });
+      const gap = fontSize + 3;
+      const yIni = yMid - (lineas.length - 1) * gap / 2;
+      lineas.forEach((linea, i) => {
+        ctx.fillStyle = linea.color;
+        ctx.fillText(linea.texto, xTip - 6, yIni + i * gap);
+      });
     });
     ctx.restore();
   },
