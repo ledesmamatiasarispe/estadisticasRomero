@@ -1363,6 +1363,79 @@ def dashboard_pendiente_fundir(meses: int = 6):
         conn.close()
 
 
+@app.get("/api/dashboard/pendiente_fundir/calendario")
+def dashboard_pendiente_fundir_calendario(meses: int = 6):
+    """Igual base que dashboard_pendiente_fundir (mismo criterio de "pendiente"
+    y misma ventana de antigüedad de OT) pero agregado por fecha de entrega
+    (fechaprevista) en vez de por material -- para el modo calendario: cuanto
+    Programado/Fundido (OTs y kg) vence cada día, sumando todos los materiales."""
+    meses = max(1, min(meses, 60))
+    conn = get_db()
+    try:
+        cte_base = _CTE_PIEZAS_PESO + """
+            , base AS (
+                SELECT
+                    t.estadotrabajo AS estado,
+                    date(t.fechaprevista) AS fecha,
+                    CASE WHEN upper(t.estadotrabajo) = 'P'
+                         THEN (t.cantidad - COALESCE(t.cantidadfundida, 0))
+                         ELSE COALESCE(t.cantidadproducida, 0) END AS pendientes,
+                    np.nombrepieza AS nombrepieza,
+                    COALESCE(np.coefcompl, 1) AS coefcompl,
+                    CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END AS peso_efectivo
+                FROM Trabajos t
+                JOIN ItemDetallePedido idp ON idp.iditempedido = t.iditempedido
+                JOIN Pedidos p             ON p.idpedido = idp.idpedido
+                LEFT JOIN NombreDePiezas np ON np.id = idp.idpieza
+                LEFT JOIN PesosDePiezas pp  ON pp.códpieza = t.idpesopieza
+                LEFT JOIN piezas_peso pz    ON pz.pieza_id = np.id
+                WHERE upper(t.estadotrabajo) IN ('P', 'F')
+                  AND upper(p.estadopedido)  NOT IN ('K','D')
+                  AND upper(idp.estadoitem)  NOT IN ('K','D')
+                  AND t."códdeagregados" NOT IN ('--', '4', 'Ar', 'ar', 'AR')
+                  AND COALESCE(t.fechacargaot, p.fechapedido) >= date('now', ? || ' months')
+            )
+        """
+        kg_expr = """ROUND(SUM(pendientes *
+                    CASE WHEN nombrepieza LIKE '%(AD)' THEN peso_efectivo * 2
+                         WHEN nombrepieza LIKE '%(TR)' THEN peso_efectivo * 3
+                         ELSE peso_efectivo END * coefcompl), 2)"""
+
+        rows = conn.execute(cte_base + f"""
+            SELECT estado, fecha, COUNT(*) AS ots, SUM(pendientes) AS piezas_pendientes, {kg_expr} AS kg_pendientes
+            FROM base
+            WHERE fecha IS NOT NULL
+            GROUP BY estado, fecha
+        """, (f"-{meses}",)).fetchall()
+
+        sin_fecha_rows = conn.execute(cte_base + f"""
+            SELECT estado, COUNT(*) AS ots, SUM(pendientes) AS piezas_pendientes, {kg_expr} AS kg_pendientes
+            FROM base
+            WHERE fecha IS NULL
+            GROUP BY estado
+        """, (f"-{meses}",)).fetchall()
+
+        def vacio():
+            return {"ots": 0, "piezas_pendientes": 0, "kg_pendientes": 0}
+
+        por_fecha: dict[str, dict] = {}
+        for r in rows:
+            d = dict(r)
+            dia = por_fecha.setdefault(d["fecha"], {"fecha": d["fecha"], "programado": vacio(), "fundido": vacio()})
+            campo = "programado" if d["estado"] == "P" else "fundido"
+            dia[campo] = {"ots": d["ots"], "piezas_pendientes": d["piezas_pendientes"], "kg_pendientes": d["kg_pendientes"]}
+
+        sin_fecha = {"programado": vacio(), "fundido": vacio()}
+        for r in sin_fecha_rows:
+            d = dict(r)
+            campo = "programado" if d["estado"] == "P" else "fundido"
+            sin_fecha[campo] = {"ots": d["ots"], "piezas_pendientes": d["piezas_pendientes"], "kg_pendientes": d["kg_pendientes"]}
+
+        return {"dias": sorted(por_fecha.values(), key=lambda x: x["fecha"]), "sin_fecha": sin_fecha}
+    finally:
+        conn.close()
+
+
 # Compartida entre el agregado y el desglose por mes de dashboard_proyeccion_pipeline.
 # Programado: nada fundido todavia, lo pendiente es cantidad-cantidadfundida (falta
 # fundir). Fundido: ya se fundio, lo pendiente es lo YA producido (falta entregar) --

@@ -314,6 +314,20 @@ tr:last-child td { border-bottom: none; }
 /* Charts */
 .chart-box { position: relative; height: 240px; }
 
+/* Calendario de pendiente de fundir */
+.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.cal-grid.cal-header { margin-bottom: 4px; }
+.cal-dow { text-align: center; font-size: 10px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; padding: 2px 0; }
+.cal-celda { min-height: 58px; background: var(--surface2); border: 1px solid var(--border); border-radius: 5px; padding: 4px 5px; display: flex; flex-direction: column; gap: 2px; }
+.cal-celda.cal-vacia { background: transparent; border-color: transparent; }
+.cal-celda.cal-hoy { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.cal-celda.cal-vencida { border-color: var(--red); }
+.cal-num { font-size: 11px; color: var(--muted); font-weight: 600; }
+.cal-hoy .cal-num { color: var(--accent); }
+.cal-badge { font-size: 10px; font-weight: 600; padding: 1px 4px; border-radius: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cal-badge.cal-prog { background: #42a5f533; color: #7cc0f8; }
+.cal-badge.cal-fund { background: #ffa72633; color: #ffc477; }
+
 /* DB card */
 .db-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; display: flex; align-items: center; gap: 16px; cursor: pointer; transition: border-color .15s; }
 .db-card:hover { border-color: var(--accent); }
@@ -969,6 +983,10 @@ async function _renderPendienteFundirChart(canvasId, subtitleId, meses) {
   catch (e) { return; }
   _pendFundirData = data;
   _pendFundirIds  = { canvasId, subtitleId };
+  // El HTML recien renderizado siempre arranca en modo grafico (el div del
+  // calendario nace oculto) -- si el usuario navega afuera estando en modo
+  // calendario, hay que resincronizar el flag con ese estado por defecto.
+  _pendFundirCalMode = false;
   _drawPendienteFundirChart(canvasId, subtitleId, data);
 }
 
@@ -977,6 +995,106 @@ function _togglePendFundirKg() {
   if (_pendFundirData && _pendFundirIds) {
     _drawPendienteFundirChart(_pendFundirIds.canvasId, _pendFundirIds.subtitleId, _pendFundirData);
   }
+}
+
+// ── Modo calendario: mismo Programado/Fundido, pero agregado por fecha de
+// entrega (sumando todos los materiales) en vez de por material -- responde
+// "cuanto vence cada dia" en lugar de "cuanto pendiente hay por material".
+let _pendFundirCalMode   = false;
+let _pendFundirCalData   = null;  // {dias:[{fecha,programado,fundido}], sin_fecha}
+let _pendFundirCalCursor = null;  // Date (dia 1 del mes mostrado)
+
+function _pendFundirCalId(canvasId) { return canvasId.replace('chart-', 'cal-'); }
+function _fechaISO(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+function _mesDeHoy() { const d = new Date(); d.setDate(1); d.setHours(0, 0, 0, 0); return d; }
+
+async function _togglePendFundirCal() {
+  if (!_pendFundirIds) return;
+  _pendFundirCalMode = !_pendFundirCalMode;
+  const { canvasId } = _pendFundirIds;
+  const chartBox = $id(canvasId)?.closest('.chart-box');
+  const calBox = $id(_pendFundirCalId(canvasId));
+  const card = chartBox?.closest('.card');
+  const kgBtn = card?.querySelector('#pend-fundir-kg-btn');
+  const acciones = card?.querySelector('.pend-fundir-acciones');
+  const calBtn = card?.querySelector('#pend-fundir-cal-btn');
+
+  if (chartBox) chartBox.style.display = _pendFundirCalMode ? 'none' : '';
+  if (calBox) calBox.style.display = _pendFundirCalMode ? '' : 'none';
+  if (kgBtn) kgBtn.style.display = _pendFundirCalMode ? 'none' : '';
+  if (acciones) acciones.style.display = _pendFundirCalMode ? 'none' : '';
+  if (calBtn) calBtn.textContent = _pendFundirCalMode ? '📊 Volver al gráfico' : '📅 Modo calendario';
+
+  if (!_pendFundirCalMode) return;
+  if (!_pendFundirCalCursor) _pendFundirCalCursor = _mesDeHoy();
+  if (!_pendFundirCalData) {
+    if (calBox) calBox.innerHTML = '<div class="empty">Cargando&#8230;</div>';
+    try { _pendFundirCalData = await api('/api/dashboard/pendiente_fundir/calendario?meses=' + S.dashMeses); }
+    catch (e) { if (calBox) calBox.innerHTML = '<div class="empty">No se pudo cargar</div>'; return; }
+  }
+  _renderPendFundirCalendario(canvasId);
+}
+
+function _pendFundirCalCambiarMes(delta) {
+  _pendFundirCalCursor.setMonth(_pendFundirCalCursor.getMonth() + delta);
+  if (_pendFundirIds) _renderPendFundirCalendario(_pendFundirIds.canvasId);
+}
+
+const _CAL_DIAS_SEMANA = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
+const _CAL_MESES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio',
+  'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+
+function _renderPendFundirCalendario(canvasId) {
+  const el = $id(_pendFundirCalId(canvasId));
+  if (!el || !_pendFundirCalData) return;
+  const cursor = _pendFundirCalCursor;
+  const año = cursor.getFullYear(), mes = cursor.getMonth();
+  const porFecha = new Map((_pendFundirCalData.dias || []).map(d => [d.fecha, d]));
+
+  const primerDia = new Date(año, mes, 1);
+  const ultimoDia = new Date(año, mes + 1, 0);
+  const offsetInicio = (primerDia.getDay() + 6) % 7; // lunes = 0
+  const totalDias = ultimoDia.getDate();
+  const hoyStr = _fechaISO(new Date());
+
+  const badge = (seg, clase, titulo) => !seg || !seg.ots ? '' :
+    `<div class="cal-badge ${clase}" title="${titulo}">${fmt(seg.ots)} OT &middot; ${fmtKg(seg.kg_pendientes)}</div>`;
+
+  let celdas = '';
+  for (let i = 0; i < offsetInicio; i++) celdas += '<div class="cal-celda cal-vacia"></div>';
+  for (let dia = 1; dia <= totalDias; dia++) {
+    const fechaStr = _fechaISO(new Date(año, mes, dia));
+    const d = porFecha.get(fechaStr);
+    const esHoy = fechaStr === hoyStr;
+    const vencida = fechaStr < hoyStr && d && d.programado.ots > 0;
+    celdas += `<div class="cal-celda${esHoy ? ' cal-hoy' : ''}${vencida ? ' cal-vencida' : ''}">
+      <div class="cal-num">${dia}</div>
+      ${d ? badge(d.programado, 'cal-prog', 'Programado') : ''}
+      ${d ? badge(d.fundido, 'cal-fund', 'Fundido') : ''}
+    </div>`;
+  }
+  const restante = (7 - ((offsetInicio + totalDias) % 7)) % 7;
+  for (let i = 0; i < restante; i++) celdas += '<div class="cal-celda cal-vacia"></div>';
+
+  const sf = _pendFundirCalData.sin_fecha;
+  const sfProg = sf && sf.programado.ots;
+  const sfFund = sf && sf.fundido.ots;
+  const sinFechaTxt = (sfProg || sfFund) ? `<div style="font-size:11px;color:var(--muted);margin-top:10px">
+      &#9888; Sin fecha de entrega cargada:
+      ${sfProg ? fmt(sf.programado.ots) + ' OT programadas (' + fmtKg(sf.programado.kg_pendientes) + ')' : ''}
+      ${sfProg && sfFund ? ' &middot; ' : ''}
+      ${sfFund ? fmt(sf.fundido.ots) + ' OT fundidas (' + fmtKg(sf.fundido.kg_pendientes) + ')' : ''}
+    </div>` : '';
+
+  el.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:center;gap:14px;margin-bottom:10px">
+      <button class="page-btn" style="padding:3px 10px" onclick="_pendFundirCalCambiarMes(-1)">&#8249;</button>
+      <span style="font-size:13px;font-weight:600;min-width:150px;text-align:center">${_CAL_MESES[mes]} ${año}</span>
+      <button class="page-btn" style="padding:3px 10px" onclick="_pendFundirCalCambiarMes(1)">&#8250;</button>
+    </div>
+    <div class="cal-grid cal-header">${_CAL_DIAS_SEMANA.map(d => `<div class="cal-dow">${d}</div>`).join('')}</div>
+    <div class="cal-grid">${celdas}</div>
+    ${sinFechaTxt}`;
 }
 
 // "Nice number" para el paso mayor de la regla: ~6 marcas mayores prolijas
@@ -2321,10 +2439,12 @@ async function showDashboard() {
         <div style="display:flex;align-items:baseline;gap:10px">
           <span id="pend-fundir-sub" style="font-size:11px;color:var(--muted);font-weight:400">Cargando&#8230;</span>
           <button class="page-btn" id="pend-fundir-kg-btn" style="font-size:11px;padding:3px 9px" onclick="_togglePendFundirKg()">Ver en kg</button>
+          <button class="page-btn" id="pend-fundir-cal-btn" style="font-size:11px;padding:3px 9px" onclick="_togglePendFundirCal()">&#128197; Modo calendario</button>
         </div>
       </div>
       <div class="chart-box"><canvas id="chart-pend-fundir-dash"></canvas></div>
-      <div style="text-align:right;margin-top:8px;display:flex;justify-content:flex-end;gap:8px">
+      <div class="pend-fundir-cal" id="cal-pend-fundir-dash" style="display:none"></div>
+      <div class="pend-fundir-acciones" style="text-align:right;margin-top:8px;display:flex;justify-content:flex-end;gap:8px">
         <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="_imprimirPendienteFundir()">&#128438; Imprimir</button>
         <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="openSinPesoModal()">&#9888; Ver piezas sin peso</button>
       </div>
@@ -7391,10 +7511,12 @@ async function showTrabajos() {
         <div style="display:flex;align-items:baseline;gap:10px">
           <span id="pend-fundir-sub-tr" style="font-size:11px;color:var(--muted);font-weight:400">Cargando&#8230;</span>
           <button class="page-btn" id="pend-fundir-kg-btn" style="font-size:11px;padding:3px 9px" onclick="_togglePendFundirKg()">Ver en kg</button>
+          <button class="page-btn" id="pend-fundir-cal-btn" style="font-size:11px;padding:3px 9px" onclick="_togglePendFundirCal()">&#128197; Modo calendario</button>
         </div>
       </div>
       <div class="chart-box"><canvas id="chart-pend-fundir-tr"></canvas></div>
-      <div style="text-align:right;margin-top:8px;display:flex;justify-content:flex-end;gap:8px">
+      <div class="pend-fundir-cal" id="cal-pend-fundir-tr" style="display:none"></div>
+      <div class="pend-fundir-acciones" style="text-align:right;margin-top:8px;display:flex;justify-content:flex-end;gap:8px">
         <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="_imprimirPendienteFundir()">&#128438; Imprimir</button>
         <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="openSinPesoModal()">&#9888; Ver piezas sin peso</button>
       </div>
