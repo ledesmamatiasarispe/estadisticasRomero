@@ -1287,20 +1287,33 @@ _CTE_PIEZAS_PESO = """
     )
 """
 
+# Batiplane queda afuera de pendiente_fundir/calendario/detalle salvo pedido explícito
+# (ver dashboard_pendiente_fundir) -- su código de cliente es fijo, no una config editable.
+_COD_CLIENTE_BATIPLANE = "BA3"
+
 
 @app.get("/api/dashboard/pendiente_fundir")
-def dashboard_pendiente_fundir(meses: int = 6):
+def dashboard_pendiente_fundir(meses: int = 6, incluir_batiplane: bool = False):
     """Pendiente de fundir por material, separado en Programado (nada fundido
     todavía, falta fundir) y Fundido (ya fundido, falta entregar) -- mismo
     criterio de "pendiente" por estado que dashboard_proyeccion_pipeline, acá
-    agrupado por material además de por estado."""
+    agrupado por material además de por estado. Batiplane (BA3) queda afuera
+    salvo que se pida explícitamente (checkbox "Batiplane", off por defecto):
+    sus OTs son un volumen aparte que distorsiona la lectura del día a día
+    en planta si se suman con el resto."""
     meses = max(1, min(meses, 60))
     conn = get_db()
     try:
         # Antigüedad de la OT: fechacargaot es NULL en ~93% de las OTs activas pendientes de
         # fundir (a diferencia de datos históricas ya cerradas), así que igual que en
         # analytics_top_defectos/analytics_top_piezas usamos p.fechapedido como respaldo.
-        rows = conn.execute(_CTE_PIEZAS_PESO + """
+        params: list = [f"-{meses}"]
+        clausula_batiplane = ""
+        if not incluir_batiplane:
+            clausula_batiplane = 'AND upper(p."códigocliente") <> ?'
+            params.append(_COD_CLIENTE_BATIPLANE)
+
+        rows = conn.execute(_CTE_PIEZAS_PESO + f"""
             , base AS (
                 SELECT
                     t."códdeagregados" AS codigo,
@@ -1324,6 +1337,7 @@ def dashboard_pendiente_fundir(meses: int = 6):
                   AND upper(idp.estadoitem)  NOT IN ('K','D')
                   AND t."códdeagregados" NOT IN ('--', '4', 'Ar', 'ar', 'AR')
                   AND COALESCE(t.fechacargaot, p.fechapedido) >= date('now', ? || ' months')
+                  {clausula_batiplane}
             )
             SELECT
                 codigo,
@@ -1340,7 +1354,7 @@ def dashboard_pendiente_fundir(meses: int = 6):
             FROM base
             GROUP BY codigo, estado
             ORDER BY codigo
-        """, (f"-{meses}",)).fetchall()
+        """, params).fetchall()
 
         vacio = {"ots": 0, "piezas_pendientes": 0, "kg_pendientes": 0, "ots_sin_peso": 0, "piezas_sin_peso": 0}
         por_material: dict[str, dict] = {}
@@ -1364,15 +1378,22 @@ def dashboard_pendiente_fundir(meses: int = 6):
 
 
 @app.get("/api/dashboard/pendiente_fundir/calendario")
-def dashboard_pendiente_fundir_calendario(meses: int = 6):
-    """Igual base que dashboard_pendiente_fundir (mismo criterio de "pendiente"
-    y misma ventana de antigüedad de OT) pero agregado por fecha de entrega
-    (fechaprevista) en vez de por material -- para el modo calendario: cuanto
-    Programado/Fundido (OTs y kg) vence cada día, sumando todos los materiales."""
+def dashboard_pendiente_fundir_calendario(meses: int = 6, incluir_batiplane: bool = False):
+    """Igual base que dashboard_pendiente_fundir (mismo criterio de "pendiente",
+    misma ventana de antigüedad de OT y mismo default de excluir Batiplane)
+    pero agregado por fecha de entrega (fechaprevista) en vez de por material
+    -- para el modo calendario: cuanto Programado/Fundido (OTs y kg) vence
+    cada día, sumando todos los materiales."""
     meses = max(1, min(meses, 60))
     conn = get_db()
     try:
-        cte_base = _CTE_PIEZAS_PESO + """
+        params: list = [f"-{meses}"]
+        clausula_batiplane = ""
+        if not incluir_batiplane:
+            clausula_batiplane = 'AND upper(p."códigocliente") <> ?'
+            params.append(_COD_CLIENTE_BATIPLANE)
+
+        cte_base = _CTE_PIEZAS_PESO + f"""
             , base AS (
                 SELECT
                     t.estadotrabajo AS estado,
@@ -1394,6 +1415,7 @@ def dashboard_pendiente_fundir_calendario(meses: int = 6):
                   AND upper(idp.estadoitem)  NOT IN ('K','D')
                   AND t."códdeagregados" NOT IN ('--', '4', 'Ar', 'ar', 'AR')
                   AND COALESCE(t.fechacargaot, p.fechapedido) >= date('now', ? || ' months')
+                  {clausula_batiplane}
             )
         """
         kg_expr = """ROUND(SUM(pendientes *
@@ -1406,14 +1428,14 @@ def dashboard_pendiente_fundir_calendario(meses: int = 6):
             FROM base
             WHERE fecha IS NOT NULL
             GROUP BY estado, fecha
-        """, (f"-{meses}",)).fetchall()
+        """, params).fetchall()
 
         sin_fecha_rows = conn.execute(cte_base + f"""
             SELECT estado, COUNT(*) AS ots, SUM(pendientes) AS piezas_pendientes, {kg_expr} AS kg_pendientes
             FROM base
             WHERE fecha IS NULL
             GROUP BY estado
-        """, (f"-{meses}",)).fetchall()
+        """, params).fetchall()
 
         def vacio():
             return {"ots": 0, "piezas_pendientes": 0, "kg_pendientes": 0}
@@ -1442,14 +1464,15 @@ def dashboard_pendiente_fundir_detalle(
     codigo: Optional[str] = Query(None),
     estado: Optional[str] = Query(None),
     fecha: Optional[str] = Query(None),
+    incluir_batiplane: bool = False,
 ):
     """Lista de OTs (Trabajos) individuales detras de un numero de
     dashboard_pendiente_fundir (codigo+estado, clic en una barra) o de
     dashboard_pendiente_fundir_calendario (fecha, clic en un dia del
     calendario -- sin estado trae Programadas y Fundidas juntas, cada fila
-    ya dice la suya). Mismo criterio de "pendiente" y misma ventana de
-    antigüedad que esos dos endpoints, para que la lista SIEMPRE coincida
-    exacto con el total que el usuario tocó."""
+    ya dice la suya). Mismo criterio de "pendiente", misma ventana de
+    antigüedad y mismo default de excluir Batiplane que esos dos endpoints,
+    para que la lista SIEMPRE coincida exacto con el total que el usuario tocó."""
     meses = max(1, min(meses, 60))
     conn = get_db()
     try:
@@ -1461,6 +1484,9 @@ def dashboard_pendiente_fundir_detalle(
             "COALESCE(t.fechacargaot, p.fechapedido) >= date('now', ? || ' months')",
         ]
         params: list = [f"-{meses}"]
+        if not incluir_batiplane:
+            where.append('upper(p."códigocliente") <> ?')
+            params.append(_COD_CLIENTE_BATIPLANE)
         if codigo:
             where.append('t."códdeagregados" = ?')
             params.append(codigo)
