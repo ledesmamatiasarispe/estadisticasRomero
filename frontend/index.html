@@ -329,11 +329,15 @@ tr:last-child td { border-bottom: none; }
 .cal-badge.cal-fund { background: #ffa72633; color: #ffc477; }
 .cal-badge.cal-prog-bat { background: #00897b55; color: #64d8cb; font-weight: 700; }
 .cal-badge.cal-fund-bat { background: #e6510055; color: #ffab5e; font-weight: 700; }
-.cal-anual-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
-.cal-mes-celda { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 8px; display: flex; flex-direction: column; gap: 4px; cursor: pointer; transition: border-color .15s; }
+.cal-anual-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; align-items: start; }
+.cal-mes-celda { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 8px; display: flex; flex-direction: column; gap: 5px; cursor: pointer; transition: border-color .15s; }
 .cal-mes-celda:hover { border-color: var(--accent); }
 .cal-mes-celda.cal-vencida { border-color: var(--red); }
 .cal-mes-nombre { font-size: 12px; font-weight: 600; color: var(--text); }
+.cal-semana-row { display: flex; align-items: center; gap: 6px; }
+.cal-semana-rango { font-size: 10px; color: var(--muted); width: 32px; flex-shrink: 0; text-align: right; }
+.cal-semana-row.cal-semana-vencida .cal-semana-rango { color: var(--red); font-weight: 700; }
+.cal-semana-badges { display: flex; flex-wrap: wrap; gap: 3px; flex: 1; min-width: 0; }
 .cal-mes-vacio { font-size: 11px; color: var(--muted); }
 
 /* DB card */
@@ -1135,6 +1139,29 @@ function _renderPendFundirCalendario(canvasId) {
   else _renderPendFundirCalendarioMensual(el);
 }
 
+// Un segmento (programado/fundido, de un dia o ya sumado por semana/mes) en
+// badges: resto + Batiplane en color mas oscuro cuando corresponde, uno solo
+// si no hay Batiplane ese periodo -- misma regla en dia, semana y mes.
+// seg: {ots, kg, batOts, batKg}
+function _pendFundirCalBadgeHtml(seg, clase, titulo) {
+  if (!seg || !seg.ots) return '';
+  if (!seg.batOts) return `<div class="cal-badge ${clase}" title="${titulo}">${fmt(seg.ots)} OT &middot; ${fmtKg(seg.kg)}</div>`;
+  const restoOts = seg.ots - seg.batOts, restoKg = seg.kg - seg.batKg;
+  const restoHtml = restoOts > 0
+    ? `<div class="cal-badge ${clase}" title="${titulo}">${fmt(restoOts)} OT &middot; ${fmtKg(restoKg)}</div>` : '';
+  return restoHtml
+    + `<div class="cal-badge ${clase}-bat" title="${titulo} (Batiplane)">${fmt(seg.batOts)} OT &middot; ${fmtKg(seg.batKg)}</div>`;
+}
+// Normaliza la forma cruda que trae la API ({ots, kg_pendientes, batiplane:{ots,kg_pendientes}})
+// a la forma acumulable {ots, kg, batOts, batKg} que usan las sumas por semana/mes.
+function _pendFundirCalNormSeg(seg) {
+  return {
+    ots: (seg && seg.ots) || 0, kg: (seg && seg.kg_pendientes) || 0,
+    batOts: (seg && seg.batiplane && seg.batiplane.ots) || 0,
+    batKg: (seg && seg.batiplane && seg.batiplane.kg_pendientes) || 0,
+  };
+}
+
 function _renderPendFundirCalendarioMensual(el) {
   const cursor = _pendFundirCalCursor;
   const año = cursor.getFullYear(), mes = cursor.getMonth();
@@ -1145,22 +1172,6 @@ function _renderPendFundirCalendarioMensual(el) {
   const offsetInicio = (primerDia.getDay() + 6) % 7; // lunes = 0
   const totalDias = ultimoDia.getDate();
   const hoyStr = _fechaISO(new Date());
-
-  // Si ese dia/estado tiene OTs de Batiplane, se parte en dos badges (resto +
-  // Batiplane en color mas oscuro) en vez de uno solo con el total mezclado.
-  const badge = (seg, clase, titulo) => {
-    if (!seg || !seg.ots) return '';
-    const bat = seg.batiplane;
-    if (!bat || !bat.ots) {
-      return `<div class="cal-badge ${clase}" title="${titulo}">${fmt(seg.ots)} OT &middot; ${fmtKg(seg.kg_pendientes)}</div>`;
-    }
-    const restoOts = seg.ots - bat.ots;
-    const restoKg = (seg.kg_pendientes || 0) - (bat.kg_pendientes || 0);
-    const restoHtml = restoOts > 0
-      ? `<div class="cal-badge ${clase}" title="${titulo}">${fmt(restoOts)} OT &middot; ${fmtKg(restoKg)}</div>` : '';
-    return restoHtml
-      + `<div class="cal-badge ${clase}-bat" title="${titulo} (Batiplane)">${fmt(bat.ots)} OT &middot; ${fmtKg(bat.kg_pendientes)}</div>`;
-  };
 
   let celdas = '';
   for (let i = 0; i < offsetInicio; i++) celdas += '<div class="cal-celda cal-vacia"></div>';
@@ -1173,8 +1184,8 @@ function _renderPendFundirCalendarioMensual(el) {
     const clickAttr = tieneDatos ? ` style="cursor:pointer" onclick="_pendFundirCalAbrirDia('${fechaStr}')"` : '';
     celdas += `<div class="cal-celda${esHoy ? ' cal-hoy' : ''}${vencida ? ' cal-vencida' : ''}"${clickAttr}>
       <div class="cal-num">${dia}</div>
-      ${d ? badge(d.programado, 'cal-prog', 'Programado') : ''}
-      ${d ? badge(d.fundido, 'cal-fund', 'Fundido') : ''}
+      ${d ? _pendFundirCalBadgeHtml(_pendFundirCalNormSeg(d.programado), 'cal-prog', 'Programado') : ''}
+      ${d ? _pendFundirCalBadgeHtml(_pendFundirCalNormSeg(d.fundido), 'cal-fund', 'Fundido') : ''}
     </div>`;
   }
   const restante = (7 - ((offsetInicio + totalDias) % 7)) % 7;
@@ -1192,47 +1203,64 @@ function _renderPendFundirCalendarioMensual(el) {
     ${_pendFundirCalSinFechaHtml()}`;
 }
 
+// Semana-del-mes de un dia: misma fila que ocuparia en la grilla de la vista
+// mensual (offsetInicio = dia de la semana, lunes=0, del dia 1 de ese mes) --
+// asi "Semana 2" en la vista anual es la misma semana que la fila 2 al
+// entrar al mes, sin dos numeraciones distintas para lo mismo.
+function _semanaDelMes(dia, offsetInicio) {
+  return Math.floor((dia - 1 + offsetInicio) / 7) + 1;
+}
+
 function _renderPendFundirCalendarioAnual(el) {
   const año = _pendFundirCalCursor.getFullYear();
   const hoyStr = _fechaISO(new Date());
-  const porMes = Array.from({ length: 12 }, () => ({
-    programado: { ots: 0, kg: 0, batOts: 0, batKg: 0 },
-    fundido:    { ots: 0, kg: 0, batOts: 0, batKg: 0 },
+
+  const meses = Array.from({ length: 12 }, (_, i) => ({
+    offsetInicio: (new Date(año, i, 1).getDay() + 6) % 7,
+    semanas: new Map(), // semIdx -> {diaMin, diaMax, programado, fundido, vencido}
     vencido: false,
   }));
+
   (_pendFundirCalData.dias || []).forEach((d) => {
-    const [y, m] = d.fecha.split('-').map(Number);
+    const [y, m, dia] = d.fecha.split('-').map(Number);
     if (y !== año) return;
-    const c = porMes[m - 1];
-    c.programado.ots += d.programado.ots || 0;
-    c.programado.kg  += d.programado.kg_pendientes || 0;
-    c.programado.batOts += (d.programado.batiplane && d.programado.batiplane.ots) || 0;
-    c.programado.batKg  += (d.programado.batiplane && d.programado.batiplane.kg_pendientes) || 0;
-    c.fundido.ots    += d.fundido.ots || 0;
-    c.fundido.kg     += d.fundido.kg_pendientes || 0;
-    c.fundido.batOts += (d.fundido.batiplane && d.fundido.batiplane.ots) || 0;
-    c.fundido.batKg  += (d.fundido.batiplane && d.fundido.batiplane.kg_pendientes) || 0;
-    if (d.fecha < hoyStr && d.programado.ots > 0) c.vencido = true;
+    const mesInfo = meses[m - 1];
+    const semIdx = _semanaDelMes(dia, mesInfo.offsetInicio);
+    let sem = mesInfo.semanas.get(semIdx);
+    if (!sem) {
+      sem = { diaMin: dia, diaMax: dia, vencido: false,
+        programado: { ots: 0, kg: 0, batOts: 0, batKg: 0 }, fundido: { ots: 0, kg: 0, batOts: 0, batKg: 0 } };
+      mesInfo.semanas.set(semIdx, sem);
+    }
+    sem.diaMin = Math.min(sem.diaMin, dia);
+    sem.diaMax = Math.max(sem.diaMax, dia);
+    const acumular = (seg, raw) => {
+      seg.ots += raw.ots || 0;
+      seg.kg  += raw.kg_pendientes || 0;
+      seg.batOts += (raw.batiplane && raw.batiplane.ots) || 0;
+      seg.batKg  += (raw.batiplane && raw.batiplane.kg_pendientes) || 0;
+    };
+    acumular(sem.programado, d.programado);
+    acumular(sem.fundido, d.fundido);
+    if (d.fecha < hoyStr && d.programado.ots > 0) { sem.vencido = true; mesInfo.vencido = true; }
   });
 
-  // Mismo criterio que la vista mensual: si hay Batiplane ese mes, se parte
-  // en dos badges (resto + Batiplane en color mas oscuro).
-  const badgeMes = (seg, clase, titulo) => {
-    if (!seg.ots) return '';
-    if (!seg.batOts) return `<div class="cal-badge ${clase}" title="${titulo}">${fmt(seg.ots)} OT &middot; ${fmtKg(seg.kg)}</div>`;
-    const restoOts = seg.ots - seg.batOts, restoKg = seg.kg - seg.batKg;
-    const restoHtml = restoOts > 0 ? `<div class="cal-badge ${clase}" title="${titulo}">${fmt(restoOts)} OT &middot; ${fmtKg(restoKg)}</div>` : '';
-    return restoHtml + `<div class="cal-badge ${clase}-bat" title="${titulo} (Batiplane)">${fmt(seg.batOts)} OT &middot; ${fmtKg(seg.batKg)}</div>`;
-  };
-
   const celdas = _CAL_MESES.map((nombre, i) => {
-    const c = porMes[i];
-    const sinDatos = !c.programado.ots && !c.fundido.ots;
-    return `<div class="cal-mes-celda${c.vencido ? ' cal-vencida' : ''}" onclick="_pendFundirCalIrAMes(${i})">
+    const mesInfo = meses[i];
+    const semanas = [...mesInfo.semanas.entries()].sort((a, b) => a[0] - b[0]);
+    const filas = semanas.map(([, sem]) => {
+      const rango = sem.diaMin === sem.diaMax ? `${sem.diaMin}` : `${sem.diaMin}-${sem.diaMax}`;
+      return `<div class="cal-semana-row${sem.vencido ? ' cal-semana-vencida' : ''}">
+        <span class="cal-semana-rango">${rango}</span>
+        <div class="cal-semana-badges">
+          ${_pendFundirCalBadgeHtml(sem.programado, 'cal-prog', 'Programado')}
+          ${_pendFundirCalBadgeHtml(sem.fundido, 'cal-fund', 'Fundido')}
+        </div>
+      </div>`;
+    }).join('');
+    return `<div class="cal-mes-celda${mesInfo.vencido ? ' cal-vencida' : ''}" onclick="_pendFundirCalIrAMes(${i})">
       <div class="cal-mes-nombre">${nombre}</div>
-      ${badgeMes(c.programado, 'cal-prog', 'Programado')}
-      ${badgeMes(c.fundido, 'cal-fund', 'Fundido')}
-      ${sinDatos ? '<div class="cal-mes-vacio">&mdash;</div>' : ''}
+      ${semanas.length ? filas : '<div class="cal-mes-vacio">&mdash;</div>'}
     </div>`;
   }).join('');
 
