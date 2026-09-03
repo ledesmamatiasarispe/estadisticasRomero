@@ -1123,6 +1123,10 @@ function _pendFundirCalVistaBtnsHtml() {
   </span>`;
 }
 
+function _pendFundirCalImprimirBtnHtml() {
+  return `<button class="page-btn" style="padding:3px 10px;margin-left:10px" onclick="_imprimirPendFundirCalendario()">&#128438; Imprimir</button>`;
+}
+
 function _pendFundirCalSinFechaHtml() {
   const sf = _pendFundirCalData.sin_fecha;
   const sfProg = sf && sf.programado.ots;
@@ -1201,43 +1205,44 @@ function _renderPendFundirCalendarioMensual(el) {
       <span style="font-size:13px;font-weight:600;min-width:150px;text-align:center">${_CAL_MESES[mes]} ${año}</span>
       <button class="page-btn" style="padding:3px 10px" onclick="_pendFundirCalCambiarPeriodo(1)">&#8250;</button>
       ${_pendFundirCalVistaBtnsHtml()}
+      ${_pendFundirCalImprimirBtnHtml()}
     </div>
     <div class="cal-grid cal-header">${_CAL_DIAS_SEMANA.map(d => `<div class="cal-dow">${d}</div>`).join('')}</div>
     <div class="cal-grid">${celdas}</div>
     ${_pendFundirCalSinFechaHtml()}`;
 }
 
-// Semana-del-mes de un dia: misma fila que ocuparia en la grilla de la vista
-// mensual (offsetInicio = dia de la semana, lunes=0, del dia 1 de ese mes) --
-// asi "Semana 2" en la vista anual es la misma semana que la fila 2 al
-// entrar al mes, sin dos numeraciones distintas para lo mismo.
-function _semanaDelMes(dia, offsetInicio) {
-  return Math.floor((dia - 1 + offsetInicio) / 7) + 1;
+// Semana-del-mes de un dia: bloques fijos de 7 dias (1-7, 8-14, 15-21, 22-fin)
+// sin importar que dia de la semana arranca el mes -- 4 semanas siempre,
+// mismo numero de fila en cualquier mes, para que "semana 2" siempre sea
+// "8-14" y no dependa de si el mes empezo lunes o jueves.
+function _semanaDelMes(dia) {
+  return Math.min(4, Math.ceil(dia / 7));
 }
 
-function _renderPendFundirCalendarioAnual(el) {
-  const año = _pendFundirCalCursor.getFullYear();
+// Agrupa _pendFundirCalData.dias en {totalDias, semanas: [4 x {diaMin,diaMax,
+// vencido,programado,fundido}], vencido} por mes, para la vista anual
+// (pantalla e impresion, mismo calculo para las dos). Las 4 semanas siempre
+// estan presentes -- rango fijo aunque no tengan ninguna OT esa semana.
+function _pendFundirCalAgruparAnual(año) {
   const hoyStr = _fechaISO(new Date());
-
-  const meses = Array.from({ length: 12 }, (_, i) => ({
-    offsetInicio: (new Date(año, i, 1).getDay() + 6) % 7,
-    semanas: new Map(), // semIdx -> {diaMin, diaMax, programado, fundido, vencido}
-    vencido: false,
-  }));
-
+  const meses = Array.from({ length: 12 }, (_, i) => {
+    const totalDias = new Date(año, i + 1, 0).getDate();
+    const rangos = [[1, 7], [8, 14], [15, 21], [22, totalDias]];
+    return {
+      totalDias,
+      semanas: rangos.map(([diaMin, diaMax]) => ({
+        diaMin, diaMax, vencido: false,
+        programado: { ots: 0, kg: 0, batOts: 0, batKg: 0 }, fundido: { ots: 0, kg: 0, batOts: 0, batKg: 0 },
+      })),
+      vencido: false,
+    };
+  });
   (_pendFundirCalData.dias || []).forEach((d) => {
     const [y, m, dia] = d.fecha.split('-').map(Number);
     if (y !== año) return;
     const mesInfo = meses[m - 1];
-    const semIdx = _semanaDelMes(dia, mesInfo.offsetInicio);
-    let sem = mesInfo.semanas.get(semIdx);
-    if (!sem) {
-      sem = { diaMin: dia, diaMax: dia, vencido: false,
-        programado: { ots: 0, kg: 0, batOts: 0, batKg: 0 }, fundido: { ots: 0, kg: 0, batOts: 0, batKg: 0 } };
-      mesInfo.semanas.set(semIdx, sem);
-    }
-    sem.diaMin = Math.min(sem.diaMin, dia);
-    sem.diaMax = Math.max(sem.diaMax, dia);
+    const sem = mesInfo.semanas[_semanaDelMes(dia) - 1];
     const acumular = (seg, raw) => {
       seg.ots += raw.ots || 0;
       seg.kg  += raw.kg_pendientes || 0;
@@ -1248,11 +1253,17 @@ function _renderPendFundirCalendarioAnual(el) {
     acumular(sem.fundido, d.fundido);
     if (d.fecha < hoyStr && d.programado.ots > 0) { sem.vencido = true; mesInfo.vencido = true; }
   });
+  return meses;
+}
+
+function _renderPendFundirCalendarioAnual(el) {
+  const año = _pendFundirCalCursor.getFullYear();
+  const meses = _pendFundirCalAgruparAnual(año);
 
   const celdas = _CAL_MESES.map((nombre, i) => {
     const mesInfo = meses[i];
-    const semanas = [...mesInfo.semanas.entries()].sort((a, b) => a[0] - b[0]);
-    const filas = semanas.map(([, sem]) => {
+    const tieneDatos = mesInfo.semanas.some(sem => sem.programado.ots || sem.fundido.ots);
+    const filas = mesInfo.semanas.map((sem) => {
       const rango = sem.diaMin === sem.diaMax ? `${sem.diaMin}` : `${sem.diaMin}-${sem.diaMax}`;
       return `<tr class="${sem.vencido ? 'cal-semana-vencida' : ''}">
         <td class="cal-mes-td-sem">${rango}</td>
@@ -1260,7 +1271,7 @@ function _renderPendFundirCalendarioAnual(el) {
         <td><div class="cal-mes-td-badges">${_pendFundirCalBadgeHtml(sem.fundido, 'cal-fund', 'Fundido')}</div></td>
       </tr>`;
     }).join('');
-    const tabla = semanas.length ? `<table class="cal-mes-tabla">
+    const tabla = tieneDatos ? `<table class="cal-mes-tabla">
       <thead><tr><th>Sem.</th><th>Programado</th><th>Fundido</th></tr></thead>
       <tbody>${filas}</tbody>
     </table>` : '<div class="cal-mes-vacio">&mdash;</div>';
@@ -1276,6 +1287,7 @@ function _renderPendFundirCalendarioAnual(el) {
       <span style="font-size:13px;font-weight:600;min-width:150px;text-align:center">${año}</span>
       <button class="page-btn" style="padding:3px 10px" onclick="_pendFundirCalCambiarPeriodo(1)">&#8250;</button>
       ${_pendFundirCalVistaBtnsHtml()}
+      ${_pendFundirCalImprimirBtnHtml()}
     </div>
     <div class="cal-anual-grid">${celdas}</div>
     ${_pendFundirCalSinFechaHtml()}`;
@@ -1284,6 +1296,113 @@ function _renderPendFundirCalendarioAnual(el) {
 function _pendFundirCalAbrirDia(fechaStr) {
   const [y, m, d] = fechaStr.split('-');
   _abrirPendFundirDetalle(`Fecha de entrega — ${d}/${m}/${y}`, { fecha: fechaStr });
+}
+
+// Un segmento como pill solida (fondo de color, texto blanco) para la hoja
+// impresa -- los badges semitransparentes de pantalla se ven lavados sobre
+// papel blanco. Mismo split resto/Batiplane que en pantalla.
+function _pendFundirImpPill(seg, colorResto, colorBat) {
+  if (!seg || !seg.ots) return '';
+  const pill = (n, kg, color) => `<span style="display:inline-block;background:${color};color:#fff;border-radius:3px;
+    padding:1px 5px;margin:1px 3px 1px 0;font-size:10px;font-weight:700;white-space:nowrap">${fmt(n)} OT &middot; ${fmtKg(kg)}</span>`;
+  const restoOts = seg.ots - seg.batOts, restoKg = seg.kg - seg.batKg;
+  return (restoOts > 0 ? pill(restoOts, restoKg, colorResto) : '')
+    + (seg.batOts > 0 ? pill(seg.batOts, seg.batKg, colorBat) : '');
+}
+
+// Vista anual impresa: una tabla Sem./Programado/Fundido por mes, igual que
+// en pantalla -- los meses sin ninguna semana con datos no se imprimen.
+function _imprimirCalendarioAnualHtml(año) {
+  const meses = _pendFundirCalAgruparAnual(año);
+  return _CAL_MESES.map((nombre, i) => {
+    const mesInfo = meses[i];
+    const tieneDatos = mesInfo.semanas.some(sem => sem.programado.ots || sem.fundido.ots);
+    if (!tieneDatos) return '';
+    const filas = mesInfo.semanas.map((sem) => `<tr>
+        <td style="font-weight:${sem.vencido ? '700' : '400'};color:${sem.vencido ? '#c62828' : '#333'}">${sem.diaMin === sem.diaMax ? sem.diaMin : sem.diaMin + '-' + sem.diaMax}${sem.vencido ? ' &#9888;' : ''}</td>
+        <td>${_pendFundirImpPill(sem.programado, _COLOR_PROGRAMADO_PRINT, _COLOR_PROGRAMADO_BATIPLANE_PRINT)}</td>
+        <td>${_pendFundirImpPill(sem.fundido, _COLOR_FUNDIDO_PRINT, _COLOR_FUNDIDO_BATIPLANE_PRINT)}</td>
+      </tr>`).join('');
+    return `<div class="p-mes">
+      <h3>${nombre}${mesInfo.vencido ? ' <span style="color:#c62828;font-size:11px">&#9888; vencido</span>' : ''}</h3>
+      <table><thead><tr><th style="width:50px">Sem.</th><th>Programado</th><th>Fundido</th></tr></thead>
+      <tbody>${filas}</tbody></table>
+    </div>`;
+  }).filter(Boolean).join('');
+}
+
+// Vista mensual impresa: la misma grilla de 7 columnas que en pantalla.
+function _imprimirCalendarioMensualHtml(año, mes) {
+  const porFecha = new Map((_pendFundirCalData.dias || []).map(d => [d.fecha, d]));
+  const primerDia = new Date(año, mes, 1);
+  const ultimoDia = new Date(año, mes + 1, 0);
+  const offsetInicio = (primerDia.getDay() + 6) % 7;
+  const totalDias = ultimoDia.getDate();
+  const hoyStr = _fechaISO(new Date());
+
+  let celdas = '';
+  for (let i = 0; i < offsetInicio; i++) celdas += '<td class="p-cal-vacia"></td>';
+  for (let dia = 1; dia <= totalDias; dia++) {
+    const fechaStr = _fechaISO(new Date(año, mes, dia));
+    const d = porFecha.get(fechaStr);
+    const vencida = fechaStr < hoyStr && d && d.programado.ots > 0;
+    celdas += `<td class="p-cal-celda">
+      <div style="font-weight:700;color:${vencida ? '#c62828' : '#333'};font-size:11px">${dia}${vencida ? ' &#9888;' : ''}</div>
+      ${d ? _pendFundirImpPill(_pendFundirCalNormSeg(d.programado), _COLOR_PROGRAMADO_PRINT, _COLOR_PROGRAMADO_BATIPLANE_PRINT) : ''}
+      ${d ? '<br>' : ''}
+      ${d ? _pendFundirImpPill(_pendFundirCalNormSeg(d.fundido), _COLOR_FUNDIDO_PRINT, _COLOR_FUNDIDO_BATIPLANE_PRINT) : ''}
+    </td>`;
+    if ((offsetInicio + dia) % 7 === 0) celdas += '</tr><tr>';
+  }
+  const restante = (7 - ((offsetInicio + totalDias) % 7)) % 7;
+  for (let i = 0; i < restante; i++) celdas += '<td class="p-cal-vacia"></td>';
+
+  return `<table class="p-cal-grid">
+    <thead><tr>${_CAL_DIAS_SEMANA.map(d => `<th>${d}</th>`).join('')}</tr></thead>
+    <tbody><tr>${celdas}</tr></tbody>
+  </table>`;
+}
+
+function _imprimirPendFundirCalendario() {
+  if (!_pendFundirCalData) { alert('Esperá a que termine de cargar el calendario.'); return; }
+  const now = new Date().toLocaleString('es-AR');
+  const año = _pendFundirCalCursor.getFullYear();
+  const esAnual = _pendFundirCalVista === 'año';
+  const titulo = esAnual ? `Calendario ${año}` : `Calendario ${_CAL_MESES[_pendFundirCalCursor.getMonth()]} ${año}`;
+  const cuerpo = esAnual
+    ? `<div class="p-anual">${_imprimirCalendarioAnualHtml(año)}</div>`
+    : _imprimirCalendarioMensualHtml(año, _pendFundirCalCursor.getMonth());
+
+  const w = window.open('', '_blank', 'width=1000,height=750,scrollbars=yes');
+  if (!w) { alert('Permitir ventanas emergentes para usar esta función.'); return; }
+  w.document.open();
+  w.document.write(`<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<title>${titulo}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;color:#111;background:#fff;padding:24px 28px}
+h1{font-size:17px;font-weight:700;color:#333;margin-bottom:3px}
+.period{font-size:11px;color:#888;margin-bottom:16px}
+.print-date{font-size:16px;color:#000;font-weight:700}
+.p-anual{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.p-mes{border:1px solid #ddd;border-radius:6px;padding:8px;break-inside:avoid}
+.p-mes h3{font-size:13px;margin-bottom:6px}
+.p-mes table, .p-cal-grid{width:100%;border-collapse:collapse}
+.p-mes th, .p-cal-grid th{text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.03em;color:#888;
+  border-bottom:1px solid #ccc;padding:2px 4px}
+.p-mes td{padding:3px 4px;border-bottom:1px solid #eee;vertical-align:top;font-size:11px}
+.p-cal-grid th{text-align:center;padding:4px}
+.p-cal-grid td{border:1px solid #eee;vertical-align:top;padding:4px;height:70px;width:14.28%}
+.p-cal-vacia{background:#fafafa}
+@media print{body{padding:0}@page{margin:12mm;size:A4 ${esAnual ? 'landscape' : 'portrait'}}}
+</style></head><body>
+<h1>${titulo}</h1>
+<div class="period"><span class="print-date">Impreso: ${now}</span></div>
+${cuerpo}
+</body></html>`);
+  w.document.close();
+  setTimeout(() => w.print(), 500);
 }
 
 // ── Modal de detalle: lista de OTs detras de una barra (codigo+estado) o de
