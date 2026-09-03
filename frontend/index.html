@@ -327,6 +327,12 @@ tr:last-child td { border-bottom: none; }
 .cal-badge { font-size: 10px; font-weight: 600; padding: 1px 4px; border-radius: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cal-badge.cal-prog { background: #42a5f533; color: #7cc0f8; }
 .cal-badge.cal-fund { background: #ffa72633; color: #ffc477; }
+.cal-anual-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.cal-mes-celda { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 8px; display: flex; flex-direction: column; gap: 4px; cursor: pointer; transition: border-color .15s; }
+.cal-mes-celda:hover { border-color: var(--accent); }
+.cal-mes-celda.cal-vencida { border-color: var(--red); }
+.cal-mes-nombre { font-size: 12px; font-weight: 600; color: var(--text); }
+.cal-mes-vacio { font-size: 11px; color: var(--muted); }
 
 /* DB card */
 .db-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; display: flex; align-items: center; gap: 16px; cursor: pointer; transition: border-color .15s; }
@@ -1035,8 +1041,22 @@ async function _togglePendFundirCal() {
   _renderPendFundirCalendario(canvasId);
 }
 
-function _pendFundirCalCambiarMes(delta) {
-  _pendFundirCalCursor.setMonth(_pendFundirCalCursor.getMonth() + delta);
+let _pendFundirCalVista = 'mes'; // 'mes' | 'año'
+
+function _pendFundirCalCambiarPeriodo(delta) {
+  if (_pendFundirCalVista === 'año') _pendFundirCalCursor.setFullYear(_pendFundirCalCursor.getFullYear() + delta);
+  else _pendFundirCalCursor.setMonth(_pendFundirCalCursor.getMonth() + delta);
+  if (_pendFundirIds) _renderPendFundirCalendario(_pendFundirIds.canvasId);
+}
+
+function _pendFundirCalCambiarVista(vista) {
+  _pendFundirCalVista = vista;
+  if (_pendFundirIds) _renderPendFundirCalendario(_pendFundirIds.canvasId);
+}
+
+function _pendFundirCalIrAMes(mesIdx) {
+  _pendFundirCalCursor.setMonth(mesIdx);
+  _pendFundirCalVista = 'mes';
   if (_pendFundirIds) _renderPendFundirCalendario(_pendFundirIds.canvasId);
 }
 
@@ -1044,9 +1064,35 @@ const _CAL_DIAS_SEMANA = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
 const _CAL_MESES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio',
   'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
 
+function _pendFundirCalVistaBtnsHtml() {
+  const activo = 'background:var(--accent-dim);color:var(--accent)';
+  return `<span style="display:inline-flex;border:1px solid var(--border);border-radius:5px;overflow:hidden;margin-left:10px">
+    <button class="page-btn" style="border:none;border-radius:0;padding:3px 10px;${_pendFundirCalVista === 'mes' ? activo : ''}" onclick="_pendFundirCalCambiarVista('mes')">Mes</button>
+    <button class="page-btn" style="border:none;border-radius:0;padding:3px 10px;${_pendFundirCalVista === 'año' ? activo : ''}" onclick="_pendFundirCalCambiarVista('año')">A&ntilde;o</button>
+  </span>`;
+}
+
+function _pendFundirCalSinFechaHtml() {
+  const sf = _pendFundirCalData.sin_fecha;
+  const sfProg = sf && sf.programado.ots;
+  const sfFund = sf && sf.fundido.ots;
+  if (!sfProg && !sfFund) return '';
+  return `<div style="font-size:11px;color:var(--muted);margin-top:10px">
+      &#9888; Sin fecha de entrega cargada:
+      ${sfProg ? fmt(sf.programado.ots) + ' OT programadas (' + fmtKg(sf.programado.kg_pendientes) + ')' : ''}
+      ${sfProg && sfFund ? ' &middot; ' : ''}
+      ${sfFund ? fmt(sf.fundido.ots) + ' OT fundidas (' + fmtKg(sf.fundido.kg_pendientes) + ')' : ''}
+    </div>`;
+}
+
 function _renderPendFundirCalendario(canvasId) {
   const el = $id(_pendFundirCalId(canvasId));
   if (!el || !_pendFundirCalData) return;
+  if (_pendFundirCalVista === 'año') _renderPendFundirCalendarioAnual(el);
+  else _renderPendFundirCalendarioMensual(el);
+}
+
+function _renderPendFundirCalendarioMensual(el) {
   const cursor = _pendFundirCalCursor;
   const año = cursor.getFullYear(), mes = cursor.getMonth();
   const porFecha = new Map((_pendFundirCalData.dias || []).map(d => [d.fecha, d]));
@@ -1076,25 +1122,55 @@ function _renderPendFundirCalendario(canvasId) {
   const restante = (7 - ((offsetInicio + totalDias) % 7)) % 7;
   for (let i = 0; i < restante; i++) celdas += '<div class="cal-celda cal-vacia"></div>';
 
-  const sf = _pendFundirCalData.sin_fecha;
-  const sfProg = sf && sf.programado.ots;
-  const sfFund = sf && sf.fundido.ots;
-  const sinFechaTxt = (sfProg || sfFund) ? `<div style="font-size:11px;color:var(--muted);margin-top:10px">
-      &#9888; Sin fecha de entrega cargada:
-      ${sfProg ? fmt(sf.programado.ots) + ' OT programadas (' + fmtKg(sf.programado.kg_pendientes) + ')' : ''}
-      ${sfProg && sfFund ? ' &middot; ' : ''}
-      ${sfFund ? fmt(sf.fundido.ots) + ' OT fundidas (' + fmtKg(sf.fundido.kg_pendientes) + ')' : ''}
-    </div>` : '';
-
   el.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:center;gap:14px;margin-bottom:10px">
-      <button class="page-btn" style="padding:3px 10px" onclick="_pendFundirCalCambiarMes(-1)">&#8249;</button>
+      <button class="page-btn" style="padding:3px 10px" onclick="_pendFundirCalCambiarPeriodo(-1)">&#8249;</button>
       <span style="font-size:13px;font-weight:600;min-width:150px;text-align:center">${_CAL_MESES[mes]} ${año}</span>
-      <button class="page-btn" style="padding:3px 10px" onclick="_pendFundirCalCambiarMes(1)">&#8250;</button>
+      <button class="page-btn" style="padding:3px 10px" onclick="_pendFundirCalCambiarPeriodo(1)">&#8250;</button>
+      ${_pendFundirCalVistaBtnsHtml()}
     </div>
     <div class="cal-grid cal-header">${_CAL_DIAS_SEMANA.map(d => `<div class="cal-dow">${d}</div>`).join('')}</div>
     <div class="cal-grid">${celdas}</div>
-    ${sinFechaTxt}`;
+    ${_pendFundirCalSinFechaHtml()}`;
+}
+
+function _renderPendFundirCalendarioAnual(el) {
+  const año = _pendFundirCalCursor.getFullYear();
+  const hoyStr = _fechaISO(new Date());
+  const porMes = Array.from({ length: 12 }, () => ({
+    programado: { ots: 0, kg: 0 }, fundido: { ots: 0, kg: 0 }, vencido: false,
+  }));
+  (_pendFundirCalData.dias || []).forEach((d) => {
+    const [y, m] = d.fecha.split('-').map(Number);
+    if (y !== año) return;
+    const c = porMes[m - 1];
+    c.programado.ots += d.programado.ots || 0;
+    c.programado.kg  += d.programado.kg_pendientes || 0;
+    c.fundido.ots    += d.fundido.ots || 0;
+    c.fundido.kg     += d.fundido.kg_pendientes || 0;
+    if (d.fecha < hoyStr && d.programado.ots > 0) c.vencido = true;
+  });
+
+  const celdas = _CAL_MESES.map((nombre, i) => {
+    const c = porMes[i];
+    const sinDatos = !c.programado.ots && !c.fundido.ots;
+    return `<div class="cal-mes-celda${c.vencido ? ' cal-vencida' : ''}" onclick="_pendFundirCalIrAMes(${i})">
+      <div class="cal-mes-nombre">${nombre}</div>
+      ${c.programado.ots ? `<div class="cal-badge cal-prog" title="Programado">${fmt(c.programado.ots)} OT &middot; ${fmtKg(c.programado.kg)}</div>` : ''}
+      ${c.fundido.ots ? `<div class="cal-badge cal-fund" title="Fundido">${fmt(c.fundido.ots)} OT &middot; ${fmtKg(c.fundido.kg)}</div>` : ''}
+      ${sinDatos ? '<div class="cal-mes-vacio">&mdash;</div>' : ''}
+    </div>`;
+  }).join('');
+
+  el.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:center;gap:14px;margin-bottom:10px">
+      <button class="page-btn" style="padding:3px 10px" onclick="_pendFundirCalCambiarPeriodo(-1)">&#8249;</button>
+      <span style="font-size:13px;font-weight:600;min-width:150px;text-align:center">${año}</span>
+      <button class="page-btn" style="padding:3px 10px" onclick="_pendFundirCalCambiarPeriodo(1)">&#8250;</button>
+      ${_pendFundirCalVistaBtnsHtml()}
+    </div>
+    <div class="cal-anual-grid">${celdas}</div>
+    ${_pendFundirCalSinFechaHtml()}`;
 }
 
 // "Nice number" para el paso mayor de la regla: ~6 marcas mayores prolijas
