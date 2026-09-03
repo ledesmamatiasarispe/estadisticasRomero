@@ -1009,6 +1009,7 @@ const _reglaBarraPlugin = {
     const ctx = chart.ctx;
     ctx.save();
     datasets.forEach((ds, dsIdx) => {
+      if (!chart.isDatasetVisible(dsIdx)) return;
       const meta = chart.getDatasetMeta(dsIdx);
       if (!meta || !meta.data.length) return;
       meta.data.forEach((bar, i) => {
@@ -1059,19 +1060,22 @@ function _ordenarPorGrupos(data) {
   const porCodigo = new Map(data.map(d => [d.codigo, d]));
   const usados = new Set();
   const ordenada = [];
-  const grupos = []; // {startIdx, endIdx, kg}
+  const grupos = []; // {startIdx, endIdx, kgProgramado, kgFundido}
   for (const codigos of _PEND_FUNDIR_GRUPOS) {
     const startIdx = ordenada.length;
-    let kg = 0, huboAlguno = false;
+    let kgProgramado = 0, kgFundido = 0, huboAlguno = false;
     for (const cod of codigos) {
       const d = porCodigo.get(cod);
       if (!d) continue;
       ordenada.push(d);
       usados.add(cod);
-      kg += (d.programado.kg_pendientes || 0) + (d.fundido.kg_pendientes || 0);
+      kgProgramado += d.programado.kg_pendientes || 0;
+      kgFundido += d.fundido.kg_pendientes || 0;
       huboAlguno = true;
     }
-    if (huboAlguno) grupos.push({ startIdx, endIdx: ordenada.length - 1, kg });
+    // kg separado por serie -- el plugin suma solo lo que este visible segun
+    // la leyenda, asi apagar "Fundido" tambien saca su parte del total de la llave.
+    if (huboAlguno) grupos.push({ startIdx, endIdx: ordenada.length - 1, kgProgramado, kgFundido });
   }
   for (const d of data) { if (!usados.has(d.codigo)) ordenada.push(d); }
   return { ordenada, grupos };
@@ -1104,6 +1108,10 @@ const _grupoLlavePlugin = {
     // dibujar ahi las tapa en vez de quedar en el margen libre.
     const xLabel = chart.scales.y.left - 4;
     const prof = opts.print ? 10 : 8;
+    // Togglear una serie en la leyenda saca su parte del kg de la llave --
+    // el total mostrado siempre coincide con lo que las barras estan mostrando.
+    const progVisible = chart.isDatasetVisible(0);
+    const fundVisible = chart.isDatasetVisible(1);
     ctx.save();
     ctx.strokeStyle = opts.print ? '#333' : '#8b929e';
     ctx.fillStyle   = opts.print ? '#000' : '#c9d1d9';
@@ -1118,17 +1126,56 @@ const _grupoLlavePlugin = {
       const yTop = barTop.y - barTop.height / 2 - 3;
       const yBottom = barBottomEl.y + barBottomEl.height / 2 + 3;
       const xTip = _dibujarLlave(ctx, xLabel, yTop, yBottom, prof);
-      ctx.fillText(fmtKg(g.kg), xTip - 6, (yTop + yBottom) / 2);
+      const kg = (progVisible ? g.kgProgramado : 0) + (fundVisible ? g.kgFundido : 0);
+      ctx.fillText(fmtKg(kg), xTip - 6, (yTop + yBottom) / 2);
     });
     ctx.restore();
   },
 };
 Chart.register(_grupoLlavePlugin);
 
+// Texto de resumen (arriba del grafico): togglear "Programado"/"Fundido" en
+// la leyenda saca esa serie de los totales y de su propio renglon, no solo
+// de las barras -- son los mismos numeros, calculados con la misma logica.
+function _pendFundirResumenTexto(chart, data, useKg) {
+  const progVisible = chart.isDatasetVisible(0);
+  const fundVisible = chart.isDatasetVisible(1);
+  const segTotal = (d, campo) =>
+    (progVisible ? (d.programado[campo] || 0) : 0) + (fundVisible ? (d.fundido[campo] || 0) : 0);
+  const grupoTotal = (grupo, campo) => data.reduce((s, d) => s + (d[grupo][campo] || 0), 0);
+  const totalPzsSinPeso = data.reduce((s, d) => s + segTotal(d, 'piezas_sin_peso'), 0);
+  const totalOts = data.reduce((s, d) => s + segTotal(d, 'ots'), 0);
+  const totalPzs = data.reduce((s, d) => s + segTotal(d, 'piezas_pendientes'), 0);
+  const totalKg  = data.reduce((s, d) => s + segTotal(d, 'kg_pendientes'), 0);
+  const resumenGrupo = (grupo, nombre) => nombre + ': ' + fmt(grupoTotal(grupo, 'ots')) + ' OT' + (grupoTotal(grupo, 'ots') !== 1 ? 's' : '')
+    + ' · ' + fmt(grupoTotal(grupo, 'piezas_pendientes')) + ' piezas'
+    + (useKg ? ' · ' + fmtKg(grupoTotal(grupo, 'kg_pendientes')) : '');
+  const partes = [];
+  if (progVisible) partes.push(resumenGrupo('programado', 'Programado'));
+  if (fundVisible) partes.push(resumenGrupo('fundido', 'Fundido'));
+  return totalOts + ' OT' + (totalOts !== 1 ? 's' : '') + ' activas · ' + fmt(totalPzs) + ' piezas'
+    + (useKg ? ' · ' + fmtKg(totalKg) : '')
+    + (useKg && totalPzsSinPeso > 0 ? ' · ⚠ ' + fmt(totalPzsSinPeso) + ' sin peso cargado (kg incompleto)' : '')
+    + (partes.length ? ' — ' + partes.join(' · ') : '');
+}
+
+// afterUpdate (no solo al crear el grafico) para que un toggle de leyenda
+// -- que dispara su propio chart.update() interno -- deje el texto sincronizado
+// sin que cada call site tenga que acordarse de llamarlo a mano.
+const _pendFundirSubtituloPlugin = {
+  id: 'pendFundirSubtitulo',
+  afterUpdate(chart, args, opts) {
+    if (!opts || !opts.subtitleId) return;
+    const sub = $id(opts.subtitleId);
+    if (sub) sub.textContent = _pendFundirResumenTexto(chart, opts.data, opts.useKg);
+  },
+};
+Chart.register(_pendFundirSubtituloPlugin);
+
 // Config compartida entre el grafico interactivo (tema oscuro, en pantalla) y
 // el que se genera aparte para imprimir (fondo blanco, letra mas grande) --
 // print:true cambia colores/tamaños, nunca la logica de los pasos de la regla.
-function _pendFundirChartConfig(data, useKg, print) {
+function _pendFundirChartConfig(data, useKg, print, subtitleId) {
   const { ordenada, grupos } = _ordenarPorGrupos(data);
   data = ordenada;
   const valorSegmento = (seg) => useKg ? (seg.kg_pendientes || 0) : (seg.ots || 0);
@@ -1152,6 +1199,9 @@ function _pendFundirChartConfig(data, useKg, print) {
   } };
   opts.plugins.reglaBarra = { minor, subdiv, etiquetas, print };
   opts.plugins.grupoLlave = { grupos, print };
+  // Solo en pantalla -- la imagen de impresion es una captura estatica sin
+  // leyenda clickeable, no tiene sentido sincronizar un texto que no cambia.
+  if (!print && subtitleId) opts.plugins.pendFundirSubtitulo = { data, useKg, subtitleId };
   if (print) { opts.animation = false; opts.responsive = false; }
   // Eje tipo regla: paso mayor "prolijo" (1/2/5×10^n) segun el maximo actual, con
   // 5 subdivisiones menores mas finas y sin etiqueta -- las marcas mayores, mas
@@ -1218,27 +1268,11 @@ function _drawPendienteFundirChart(canvasId, subtitleId, data) {
     return;
   }
   const useKg = _pendFundirKgMode;
-  const sub = subtitleId ? $id(subtitleId) : null;
-  const segTotal = (d, campo) => (d.programado[campo] || 0) + (d.fundido[campo] || 0);
-  const grupoTotal = (grupo, campo) => data.reduce((s, d) => s + (d[grupo][campo] || 0), 0);
-  const totalPzsSinPeso = data.reduce((s, d) => s + segTotal(d, 'piezas_sin_peso'), 0);
-  if (sub) {
-    const totalOts = data.reduce((s, d) => s + segTotal(d, 'ots'), 0);
-    const totalPzs = data.reduce((s, d) => s + segTotal(d, 'piezas_pendientes'), 0);
-    const totalKg  = data.reduce((s, d) => s + segTotal(d, 'kg_pendientes'), 0);
-    const resumenGrupo = (grupo, nombre) => nombre + ': ' + fmt(grupoTotal(grupo, 'ots')) + ' OT' + (grupoTotal(grupo, 'ots') !== 1 ? 's' : '')
-      + ' · ' + fmt(grupoTotal(grupo, 'piezas_pendientes')) + ' piezas'
-      + (useKg ? ' · ' + fmtKg(grupoTotal(grupo, 'kg_pendientes')) : '');
-    sub.textContent = totalOts + ' OT' + (totalOts !== 1 ? 's' : '') + ' activas · ' + fmt(totalPzs) + ' piezas'
-      + (useKg ? ' · ' + fmtKg(totalKg) : '')
-      + (useKg && totalPzsSinPeso > 0 ? ' · ⚠ ' + fmt(totalPzsSinPeso) + ' sin peso cargado (kg incompleto)' : '')
-      + ' — ' + resumenGrupo('programado', 'Programado') + ' · ' + resumenGrupo('fundido', 'Fundido');
-  }
   const kgBtn = $id('pend-fundir-kg-btn');
   if (kgBtn) kgBtn.textContent = useKg ? 'Ver en piezas' : 'Ver en kg';
 
   if (_pendFundirCharts[canvasId]) { _pendFundirCharts[canvasId].destroy(); _pendFundirCharts[canvasId] = null; }
-  _pendFundirCharts[canvasId] = new Chart(canvas, _pendFundirChartConfig(data, useKg, false));
+  _pendFundirCharts[canvasId] = new Chart(canvas, _pendFundirChartConfig(data, useKg, false, subtitleId));
 }
 
 let _sinPesoRows = [];
