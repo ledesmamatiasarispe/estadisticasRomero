@@ -1423,10 +1423,10 @@ function _ordenarPorGrupos(data) {
   const porCodigo = new Map(data.map(d => [d.codigo, d]));
   const usados = new Set();
   const ordenada = [];
-  const grupos = []; // {startIdx, endIdx, kgProgramado, kgFundido}
+  const grupos = []; // {startIdx, endIdx, kgProgramado, kgFundido, kgProgramadoBatiplane, kgFundidoBatiplane}
   for (const codigos of _PEND_FUNDIR_GRUPOS) {
     const startIdx = ordenada.length;
-    let kgProgramado = 0, kgFundido = 0, huboAlguno = false;
+    let kgProgramado = 0, kgFundido = 0, kgProgramadoBatiplane = 0, kgFundidoBatiplane = 0, huboAlguno = false;
     for (const cod of codigos) {
       const d = porCodigo.get(cod);
       if (!d) continue;
@@ -1434,11 +1434,13 @@ function _ordenarPorGrupos(data) {
       usados.add(cod);
       kgProgramado += d.programado.kg_pendientes || 0;
       kgFundido += d.fundido.kg_pendientes || 0;
+      kgProgramadoBatiplane += (d.programado.batiplane && d.programado.batiplane.kg_pendientes) || 0;
+      kgFundidoBatiplane += (d.fundido.batiplane && d.fundido.batiplane.kg_pendientes) || 0;
       huboAlguno = true;
     }
     // kg separado por serie -- el plugin suma solo lo que este visible segun
     // la leyenda, asi apagar "Fundido" tambien saca su parte del total de la llave.
-    if (huboAlguno) grupos.push({ startIdx, endIdx: ordenada.length - 1, kgProgramado, kgFundido });
+    if (huboAlguno) grupos.push({ startIdx, endIdx: ordenada.length - 1, kgProgramado, kgFundido, kgProgramadoBatiplane, kgFundidoBatiplane });
   }
   for (const d of data) { if (!usados.has(d.codigo)) ordenada.push(d); }
   return { ordenada, grupos };
@@ -1482,8 +1484,10 @@ const _grupoLlavePlugin = {
     ctx.font = (opts.print ? '700 ' : '700 ') + fontSize + 'px system-ui, -apple-system, sans-serif';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    const colorProg = opts.print ? _COLOR_PROGRAMADO_PRINT : '#7cc0f8';
-    const colorFund = opts.print ? _COLOR_FUNDIDO_PRINT : '#ffc477';
+    const colorProg    = opts.print ? _COLOR_PROGRAMADO_PRINT : '#7cc0f8';
+    const colorFund     = opts.print ? _COLOR_FUNDIDO_PRINT : '#ffc477';
+    const colorProgBat = opts.print ? _COLOR_PROGRAMADO_BATIPLANE_PRINT : _COLOR_PROGRAMADO_BATIPLANE;
+    const colorFundBat  = opts.print ? _COLOR_FUNDIDO_BATIPLANE_PRINT : _COLOR_FUNDIDO_BATIPLANE;
     opts.grupos.forEach((g) => {
       const barTop = meta0.data[g.startIdx];
       const barBottomEl = (meta1 && meta1.data[g.endIdx]) || meta0.data[g.endIdx];
@@ -1491,13 +1495,25 @@ const _grupoLlavePlugin = {
       const yTop = barTop.y - barTop.height / 2 - 3;
       const yBottom = barBottomEl.y + barBottomEl.height / 2 + 3;
       const xTip = _dibujarLlave(ctx, xLabel, yTop, yBottom, prof);
-      // Total de Programado y de Fundido por separado -- no un solo numero
-      // combinado -- cada uno en su color, apilados en dos renglones.
+      // Total de Programado y de Fundido por separado, y dentro de cada uno
+      // Batiplane tambien aparte (resto + Batiplane, se omite el renglon que
+      // de cero) -- mismo criterio que las barras y el calendario, nunca un
+      // numero mezclado.
       const yMid = (yTop + yBottom) / 2;
       const lineas = [];
-      if (progVisible) lineas.push({ texto: fmtKg(g.kgProgramado), color: colorProg });
-      if (fundVisible) lineas.push({ texto: fmtKg(g.kgFundido), color: colorFund });
-      const gap = fontSize + 3;
+      if (progVisible) {
+        const bat = g.kgProgramadoBatiplane || 0;
+        const resto = g.kgProgramado - bat;
+        if (resto > 0) lineas.push({ texto: fmtKg(resto), color: colorProg });
+        if (bat > 0) lineas.push({ texto: fmtKg(bat), color: colorProgBat });
+      }
+      if (fundVisible) {
+        const bat = g.kgFundidoBatiplane || 0;
+        const resto = g.kgFundido - bat;
+        if (resto > 0) lineas.push({ texto: fmtKg(resto), color: colorFund });
+        if (bat > 0) lineas.push({ texto: fmtKg(bat), color: colorFundBat });
+      }
+      const gap = fontSize + 2;
       const yIni = yMid - (lineas.length - 1) * gap / 2;
       lineas.forEach((linea, i) => {
         ctx.fillStyle = linea.color;
@@ -1679,6 +1695,14 @@ function _drawPendienteFundirChart(canvasId, subtitleId, data) {
   const useKg = _pendFundirKgMode;
   const kgBtn = $id('pend-fundir-kg-btn');
   if (kgBtn) kgBtn.textContent = useKg ? 'Ver en piezas' : 'Ver en kg';
+
+  // .chart-box trae una altura fija (240px) pensada para los demas graficos
+  // de la app -- ahi, con Programado y Fundido lado a lado por cada material,
+  // las barras quedaban cada vez mas finas cuanto mas materiales hay pendientes.
+  // Alto proporcional a la cantidad de filas para que el grosor de barra no
+  // dependa de cuantos materiales entren, con un piso igual al de siempre.
+  const chartBox = canvas.closest('.chart-box');
+  if (chartBox) chartBox.style.height = Math.max(240, data.length * 46 + 60) + 'px';
 
   if (_pendFundirCharts[canvasId]) { _pendFundirCharts[canvasId].destroy(); _pendFundirCharts[canvasId] = null; }
   _pendFundirCharts[canvasId] = new Chart(canvas, _pendFundirChartConfig(data, useKg, false, subtitleId));
