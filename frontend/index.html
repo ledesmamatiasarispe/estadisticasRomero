@@ -1135,14 +1135,19 @@ function _drawPendienteFundirChart(canvasId, subtitleId, data) {
   const useKg = _pendFundirKgMode;
   const sub = subtitleId ? $id(subtitleId) : null;
   const segTotal = (d, campo) => (d.programado[campo] || 0) + (d.fundido[campo] || 0);
+  const grupoTotal = (grupo, campo) => data.reduce((s, d) => s + (d[grupo][campo] || 0), 0);
   const totalPzsSinPeso = data.reduce((s, d) => s + segTotal(d, 'piezas_sin_peso'), 0);
   if (sub) {
     const totalOts = data.reduce((s, d) => s + segTotal(d, 'ots'), 0);
     const totalPzs = data.reduce((s, d) => s + segTotal(d, 'piezas_pendientes'), 0);
     const totalKg  = data.reduce((s, d) => s + segTotal(d, 'kg_pendientes'), 0);
+    const resumenGrupo = (grupo, nombre) => nombre + ': ' + fmt(grupoTotal(grupo, 'ots')) + ' OT' + (grupoTotal(grupo, 'ots') !== 1 ? 's' : '')
+      + ' · ' + fmt(grupoTotal(grupo, 'piezas_pendientes')) + ' piezas'
+      + (useKg ? ' · ' + fmtKg(grupoTotal(grupo, 'kg_pendientes')) : '');
     sub.textContent = totalOts + ' OT' + (totalOts !== 1 ? 's' : '') + ' activas · ' + fmt(totalPzs) + ' piezas'
       + (useKg ? ' · ' + fmtKg(totalKg) : '')
-      + (useKg && totalPzsSinPeso > 0 ? ' · ⚠ ' + fmt(totalPzsSinPeso) + ' sin peso cargado (kg incompleto)' : '');
+      + (useKg && totalPzsSinPeso > 0 ? ' · ⚠ ' + fmt(totalPzsSinPeso) + ' sin peso cargado (kg incompleto)' : '')
+      + ' — ' + resumenGrupo('programado', 'Programado') + ' · ' + resumenGrupo('fundido', 'Fundido');
   }
   const kgBtn = $id('pend-fundir-kg-btn');
   if (kgBtn) kgBtn.textContent = useKg ? 'Ver en piezas' : 'Ver en kg';
