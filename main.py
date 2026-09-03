@@ -1288,64 +1288,53 @@ _CTE_PIEZAS_PESO = """
 """
 
 
-# Compartida entre el agregado por material y el desglose por fecha de dashboard_pendiente_fundir.
-# Antigüedad de la OT: fechacargaot es NULL en ~93% de las OTs activas pendientes de
-# fundir (a diferencia de datos históricas ya cerradas), así que igual que en
-# analytics_top_defectos/analytics_top_piezas usamos p.fechapedido como respaldo.
-# fecha = fechaprevista (fecha de entrega) truncada al día, para el desglose de barra.
-_CTE_PENDIENTE_FUNDIR_BASE = """
-    , base AS (
-        SELECT
-            t."códdeagregados" AS codigo,
-            COALESCE(tm.sobrenombrematerial, t."códdeagregados") AS material,
-            t.estadotrabajo AS estado,
-            date(t.fechaprevista) AS fecha,
-            CASE WHEN upper(t.estadotrabajo) = 'P'
-                 THEN (t.cantidad - COALESCE(t.cantidadfundida, 0))
-                 ELSE COALESCE(t.cantidadproducida, 0) END AS pendientes,
-            np.nombrepieza AS nombrepieza,
-            COALESCE(np.coefcompl, 1) AS coefcompl,
-            CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END AS peso_efectivo
-        FROM Trabajos t
-        JOIN ItemDetallePedido idp ON idp.iditempedido = t.iditempedido
-        JOIN Pedidos p             ON p.idpedido = idp.idpedido
-        LEFT JOIN TiposMaterial tm ON tm."códmaterial" = CAST(t."códdeagregados" AS TEXT)
-        LEFT JOIN NombreDePiezas np ON np.id = idp.idpieza
-        LEFT JOIN PesosDePiezas pp  ON pp.códpieza = t.idpesopieza
-        LEFT JOIN piezas_peso pz    ON pz.pieza_id = np.id
-        WHERE upper(t.estadotrabajo) IN ('P', 'F')
-          AND upper(p.estadopedido)  NOT IN ('K','D')
-          AND upper(idp.estadoitem)  NOT IN ('K','D')
-          AND t."códdeagregados" NOT IN ('--', '4', 'Ar', 'ar', 'AR')
-          AND COALESCE(t.fechacargaot, p.fechapedido) >= date('now', ? || ' months')
-    )
-"""
-_PENDIENTE_FUNDIR_KG_EXPR = """ROUND(SUM(pendientes *
-                    CASE WHEN nombrepieza LIKE '%(AD)' THEN peso_efectivo * 2
-                         WHEN nombrepieza LIKE '%(TR)' THEN peso_efectivo * 3
-                         ELSE peso_efectivo END * coefcompl), 2)"""
-
-
 @app.get("/api/dashboard/pendiente_fundir")
 def dashboard_pendiente_fundir(meses: int = 6):
     """Pendiente de fundir por material, separado en Programado (nada fundido
     todavía, falta fundir) y Fundido (ya fundido, falta entregar) -- mismo
     criterio de "pendiente" por estado que dashboard_proyeccion_pipeline, acá
-    agrupado por material además de por estado. Cada campo programado/fundido
-    trae además por_fecha: el mismo total desglosado por fecha de entrega
-    (fechaprevista), para pintar la barra en tramos por fecha en vez de un
-    color solido -- de un vistazo se ve que tan atrasado esta lo pendiente."""
+    agrupado por material además de por estado."""
     meses = max(1, min(meses, 60))
     conn = get_db()
     try:
-        rows = conn.execute(_CTE_PIEZAS_PESO + _CTE_PENDIENTE_FUNDIR_BASE + f"""
+        # Antigüedad de la OT: fechacargaot es NULL en ~93% de las OTs activas pendientes de
+        # fundir (a diferencia de datos históricas ya cerradas), así que igual que en
+        # analytics_top_defectos/analytics_top_piezas usamos p.fechapedido como respaldo.
+        rows = conn.execute(_CTE_PIEZAS_PESO + """
+            , base AS (
+                SELECT
+                    t."códdeagregados" AS codigo,
+                    COALESCE(tm.sobrenombrematerial, t."códdeagregados") AS material,
+                    t.estadotrabajo AS estado,
+                    CASE WHEN upper(t.estadotrabajo) = 'P'
+                         THEN (t.cantidad - COALESCE(t.cantidadfundida, 0))
+                         ELSE COALESCE(t.cantidadproducida, 0) END AS pendientes,
+                    np.nombrepieza AS nombrepieza,
+                    COALESCE(np.coefcompl, 1) AS coefcompl,
+                    CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END AS peso_efectivo
+                FROM Trabajos t
+                JOIN ItemDetallePedido idp ON idp.iditempedido = t.iditempedido
+                JOIN Pedidos p             ON p.idpedido = idp.idpedido
+                LEFT JOIN TiposMaterial tm ON tm."códmaterial" = CAST(t."códdeagregados" AS TEXT)
+                LEFT JOIN NombreDePiezas np ON np.id = idp.idpieza
+                LEFT JOIN PesosDePiezas pp  ON pp.códpieza = t.idpesopieza
+                LEFT JOIN piezas_peso pz    ON pz.pieza_id = np.id
+                WHERE upper(t.estadotrabajo) IN ('P', 'F')
+                  AND upper(p.estadopedido)  NOT IN ('K','D')
+                  AND upper(idp.estadoitem)  NOT IN ('K','D')
+                  AND t."códdeagregados" NOT IN ('--', '4', 'Ar', 'ar', 'AR')
+                  AND COALESCE(t.fechacargaot, p.fechapedido) >= date('now', ? || ' months')
+            )
             SELECT
                 codigo,
                 material,
                 estado,
                 COUNT(*) AS ots,
                 SUM(pendientes) AS piezas_pendientes,
-                {_PENDIENTE_FUNDIR_KG_EXPR} AS kg_pendientes,
+                ROUND(SUM(pendientes *
+                    CASE WHEN nombrepieza LIKE '%(AD)' THEN peso_efectivo * 2
+                         WHEN nombrepieza LIKE '%(TR)' THEN peso_efectivo * 3
+                         ELSE peso_efectivo END * coefcompl), 2) AS kg_pendientes,
                 SUM(CASE WHEN peso_efectivo IS NULL THEN 1 ELSE 0 END) AS ots_sin_peso,
                 SUM(CASE WHEN peso_efectivo IS NULL THEN pendientes ELSE 0 END) AS piezas_sin_peso
             FROM base
@@ -1353,47 +1342,20 @@ def dashboard_pendiente_fundir(meses: int = 6):
             ORDER BY codigo
         """, (f"-{meses}",)).fetchall()
 
-        fecha_rows = conn.execute(_CTE_PIEZAS_PESO + _CTE_PENDIENTE_FUNDIR_BASE + f"""
-            SELECT
-                codigo, estado, fecha,
-                COUNT(*) AS ots,
-                SUM(pendientes) AS piezas_pendientes,
-                {_PENDIENTE_FUNDIR_KG_EXPR} AS kg_pendientes
-            FROM base
-            GROUP BY codigo, estado, fecha
-            ORDER BY codigo, estado, fecha IS NULL, fecha
-        """, (f"-{meses}",)).fetchall()
-
-        def vacio():
-            return {"ots": 0, "piezas_pendientes": 0, "kg_pendientes": 0,
-                    "ots_sin_peso": 0, "piezas_sin_peso": 0, "por_fecha": []}
-
+        vacio = {"ots": 0, "piezas_pendientes": 0, "kg_pendientes": 0, "ots_sin_peso": 0, "piezas_sin_peso": 0}
         por_material: dict[str, dict] = {}
         for r in rows:
             d = dict(r)
             m = por_material.setdefault(d["codigo"], {
                 "codigo": d["codigo"], "material": d["material"],
-                "programado": vacio(), "fundido": vacio(),
+                "programado": dict(vacio), "fundido": dict(vacio),
             })
             campo = "programado" if d["estado"] == "P" else "fundido"
             m[campo] = {
                 "ots": d["ots"], "piezas_pendientes": d["piezas_pendientes"],
                 "kg_pendientes": d["kg_pendientes"],
                 "ots_sin_peso": d["ots_sin_peso"], "piezas_sin_peso": d["piezas_sin_peso"],
-                "por_fecha": [],
             }
-
-        for r in fecha_rows:
-            d = dict(r)
-            m = por_material.get(d["codigo"])
-            if not m:
-                continue
-            campo = "programado" if d["estado"] == "P" else "fundido"
-            m[campo]["por_fecha"].append({
-                "fecha": d["fecha"], "ots": d["ots"],
-                "piezas_pendientes": d["piezas_pendientes"], "kg_pendientes": d["kg_pendientes"],
-            })
-
         resultado = list(por_material.values())
         resultado.sort(key=lambda m: m["programado"]["ots"] + m["fundido"]["ots"], reverse=True)
         return resultado
