@@ -47,11 +47,15 @@ _vendor = FRONTEND / "vendor"
 if _vendor.exists():
     app.mount("/vendor", StaticFiles(directory=str(_vendor)), name="vendor")
 
-# Mismo frontend/js/ que sirve main.py -- una sola fuente en disco, montada
-# aca tambien porque kiosk_server corre en su propio proceso/puerto (50505).
+# Mismos frontend/js/ y frontend/css/ que sirve main.py -- una sola fuente en
+# disco, montada aca tambien porque kiosk_server corre en su propio proceso/
+# puerto (50505).
 _js = FRONTEND / "js"
 if _js.exists():
     app.mount("/js", StaticFiles(directory=str(_js)), name="js")
+_css = FRONTEND / "css"
+if _css.exists():
+    app.mount("/css", StaticFiles(directory=str(_css)), name="css")
 
 
 if __name__ == "__main__":

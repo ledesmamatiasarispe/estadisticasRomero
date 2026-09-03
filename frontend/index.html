@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>piezas.fundicionjoseromero.com</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<link rel="stylesheet" href="/css/pend_fundir.css">
 <style>
 :root {
   --bg: #0d1117;
@@ -314,35 +315,6 @@ tr:last-child td { border-bottom: none; }
 /* Charts */
 .chart-box { position: relative; height: 240px; }
 
-/* Calendario de pendiente de fundir */
-.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
-.cal-grid.cal-header { margin-bottom: 4px; }
-.cal-dow { text-align: center; font-size: 10px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; padding: 2px 0; }
-.cal-celda { min-height: 58px; background: var(--surface2); border: 1px solid var(--border); border-radius: 5px; padding: 4px 5px; display: flex; flex-direction: column; gap: 2px; }
-.cal-celda.cal-vacia { background: transparent; border-color: transparent; }
-.cal-celda.cal-hoy { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
-.cal-celda.cal-vencida { border-color: var(--red); }
-.cal-num { font-size: 11px; color: var(--muted); font-weight: 600; }
-.cal-hoy .cal-num { color: var(--accent); }
-.cal-badge { font-size: 10px; font-weight: 600; padding: 1px 4px; border-radius: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.cal-badge.cal-prog { background: #42a5f533; color: #7cc0f8; }
-.cal-badge.cal-fund { background: #ffa72633; color: #ffc477; }
-.cal-badge.cal-prog-bat { background: #00897b55; color: #64d8cb; font-weight: 700; }
-.cal-badge.cal-fund-bat { background: #e6510055; color: #ffab5e; font-weight: 700; }
-.cal-anual-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px; align-items: start; }
-.cal-mes-celda { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 8px; display: flex; flex-direction: column; gap: 6px; cursor: pointer; transition: border-color .15s; }
-.cal-mes-celda:hover { border-color: var(--accent); }
-.cal-mes-celda.cal-vencida { border-color: var(--red); }
-.cal-mes-nombre { font-size: 12px; font-weight: 600; color: var(--text); }
-.cal-mes-tabla { width: 100%; border-collapse: collapse; table-layout: fixed; }
-.cal-mes-tabla th { text-align: left; padding: 2px 5px 4px; font-size: 9px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; border-bottom: 1px solid var(--border); }
-.cal-mes-tabla th:first-child { width: 34px; }
-.cal-mes-tabla td { padding: 3px 5px; border-bottom: 1px solid var(--border); vertical-align: top; }
-.cal-mes-tabla tr:last-child td { border-bottom: none; }
-.cal-mes-td-sem { font-size: 10px; color: var(--muted); white-space: nowrap; }
-.cal-semana-vencida .cal-mes-td-sem { color: var(--red); font-weight: 700; }
-.cal-mes-td-badges { display: flex; flex-direction: column; gap: 2px; }
-.cal-mes-vacio { font-size: 11px; color: var(--muted); }
 
 /* DB card */
 .db-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; display: flex; align-items: center; gap: 16px; cursor: pointer; transition: border-color .15s; }
@@ -433,11 +405,6 @@ tr:last-child td { border-bottom: none; }
   background: rgba(0,0,0,.7); align-items: flex-start; justify-content: center; padding-top: 60px;
 }
 #sin-peso-modal.open { display: flex; }
-#pend-fundir-detalle-modal {
-  display: none; position: fixed; inset: 0; z-index: 2000;
-  background: rgba(0,0,0,.7); align-items: flex-start; justify-content: center; padding-top: 60px;
-}
-#pend-fundir-detalle-modal.open { display: flex; }
 .probeta-mbox {
   background: var(--surface); border: 1px solid rgba(167,107,250,.5);
   border-radius: 10px; width: 900px; max-width: calc(100vw - 32px);
