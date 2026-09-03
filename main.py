@@ -1290,19 +1290,25 @@ _CTE_PIEZAS_PESO = """
 
 @app.get("/api/dashboard/pendiente_fundir")
 def dashboard_pendiente_fundir(meses: int = 6):
-    """Piezas pendientes de fundir (OTs activas con cantidad aún no fundida), agrupadas por material."""
+    """Pendiente de fundir por material, separado en Programado (nada fundido
+    todavía, falta fundir) y Fundido (ya fundido, falta entregar) -- mismo
+    criterio de "pendiente" por estado que dashboard_proyeccion_pipeline, acá
+    agrupado por material además de por estado."""
     meses = max(1, min(meses, 60))
     conn = get_db()
     try:
         # Antigüedad de la OT: fechacargaot es NULL en ~93% de las OTs activas pendientes de
-        # fundir (a diferencia de datos históricos ya cerradas), así que igual que en
+        # fundir (a diferencia de datos históricas ya cerradas), así que igual que en
         # analytics_top_defectos/analytics_top_piezas usamos p.fechapedido como respaldo.
         rows = conn.execute(_CTE_PIEZAS_PESO + """
             , base AS (
                 SELECT
                     t."códdeagregados" AS codigo,
                     COALESCE(tm.sobrenombrematerial, t."códdeagregados") AS material,
-                    (t.cantidad - COALESCE(t.cantidadfundida, 0)) AS pendientes,
+                    t.estadotrabajo AS estado,
+                    CASE WHEN upper(t.estadotrabajo) = 'P'
+                         THEN (t.cantidad - COALESCE(t.cantidadfundida, 0))
+                         ELSE COALESCE(t.cantidadproducida, 0) END AS pendientes,
                     np.nombrepieza AS nombrepieza,
                     COALESCE(np.coefcompl, 1) AS coefcompl,
                     CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END AS peso_efectivo
@@ -1313,16 +1319,16 @@ def dashboard_pendiente_fundir(meses: int = 6):
                 LEFT JOIN NombreDePiezas np ON np.id = idp.idpieza
                 LEFT JOIN PesosDePiezas pp  ON pp.códpieza = t.idpesopieza
                 LEFT JOIN piezas_peso pz    ON pz.pieza_id = np.id
-                WHERE upper(t.estadotrabajo) NOT IN ('K','D','A','B')
+                WHERE upper(t.estadotrabajo) IN ('P', 'F')
                   AND upper(p.estadopedido)  NOT IN ('K','D')
                   AND upper(idp.estadoitem)  NOT IN ('K','D')
-                  AND COALESCE(t.cantidadfundida, 0) < t.cantidad
                   AND t."códdeagregados" NOT IN ('--', '4', 'Ar', 'ar', 'AR')
                   AND COALESCE(t.fechacargaot, p.fechapedido) >= date('now', ? || ' months')
             )
             SELECT
                 codigo,
                 material,
+                estado,
                 COUNT(*) AS ots,
                 SUM(pendientes) AS piezas_pendientes,
                 ROUND(SUM(pendientes *
@@ -1332,10 +1338,27 @@ def dashboard_pendiente_fundir(meses: int = 6):
                 SUM(CASE WHEN peso_efectivo IS NULL THEN 1 ELSE 0 END) AS ots_sin_peso,
                 SUM(CASE WHEN peso_efectivo IS NULL THEN pendientes ELSE 0 END) AS piezas_sin_peso
             FROM base
-            GROUP BY codigo
-            ORDER BY ots DESC
+            GROUP BY codigo, estado
+            ORDER BY codigo
         """, (f"-{meses}",)).fetchall()
-        return [dict(r) for r in rows]
+
+        vacio = {"ots": 0, "piezas_pendientes": 0, "kg_pendientes": 0, "ots_sin_peso": 0, "piezas_sin_peso": 0}
+        por_material: dict[str, dict] = {}
+        for r in rows:
+            d = dict(r)
+            m = por_material.setdefault(d["codigo"], {
+                "codigo": d["codigo"], "material": d["material"],
+                "programado": dict(vacio), "fundido": dict(vacio),
+            })
+            campo = "programado" if d["estado"] == "P" else "fundido"
+            m[campo] = {
+                "ots": d["ots"], "piezas_pendientes": d["piezas_pendientes"],
+                "kg_pendientes": d["kg_pendientes"],
+                "ots_sin_peso": d["ots_sin_peso"], "piezas_sin_peso": d["piezas_sin_peso"],
+            }
+        resultado = list(por_material.values())
+        resultado.sort(key=lambda m: m["programado"]["ots"] + m["fundido"]["ots"], reverse=True)
+        return resultado
     finally:
         conn.close()
 
