@@ -423,6 +423,11 @@ tr:last-child td { border-bottom: none; }
   background: rgba(0,0,0,.7); align-items: flex-start; justify-content: center; padding-top: 60px;
 }
 #sin-peso-modal.open { display: flex; }
+#pend-fundir-detalle-modal {
+  display: none; position: fixed; inset: 0; z-index: 2000;
+  background: rgba(0,0,0,.7); align-items: flex-start; justify-content: center; padding-top: 60px;
+}
+#pend-fundir-detalle-modal.open { display: flex; }
 .probeta-mbox {
   background: var(--surface); border: 1px solid rgba(167,107,250,.5);
   border-radius: 10px; width: 900px; max-width: calc(100vw - 32px);
@@ -680,6 +685,19 @@ tr:last-child td { border-bottom: none; }
       <button class="probeta-mclose" onclick="closeSinPesoModal()">&#10005;</button>
     </div>
     <div class="probeta-mbody" id="sin-peso-modal-body">
+      <div class="loading">Cargando...</div>
+    </div>
+  </div>
+</div>
+
+<div id="pend-fundir-detalle-modal" onclick="if(event.target===this)closePendFundirDetalleModal()">
+  <div class="probeta-mbox">
+    <div class="probeta-mhdr">
+      <span style="font-size:20px">&#128203;</span>
+      <h3 id="pend-fundir-detalle-titulo">OTs</h3>
+      <button class="probeta-mclose" onclick="closePendFundirDetalleModal()">&#10005;</button>
+    </div>
+    <div class="probeta-mbody" id="pend-fundir-detalle-modal-body">
       <div class="loading">Cargando...</div>
     </div>
   </div>
@@ -1113,7 +1131,9 @@ function _renderPendFundirCalendarioMensual(el) {
     const d = porFecha.get(fechaStr);
     const esHoy = fechaStr === hoyStr;
     const vencida = fechaStr < hoyStr && d && d.programado.ots > 0;
-    celdas += `<div class="cal-celda${esHoy ? ' cal-hoy' : ''}${vencida ? ' cal-vencida' : ''}">
+    const tieneDatos = d && (d.programado.ots || d.fundido.ots);
+    const clickAttr = tieneDatos ? ` style="cursor:pointer" onclick="_pendFundirCalAbrirDia('${fechaStr}')"` : '';
+    celdas += `<div class="cal-celda${esHoy ? ' cal-hoy' : ''}${vencida ? ' cal-vencida' : ''}"${clickAttr}>
       <div class="cal-num">${dia}</div>
       ${d ? badge(d.programado, 'cal-prog', 'Programado') : ''}
       ${d ? badge(d.fundido, 'cal-fund', 'Fundido') : ''}
@@ -1171,6 +1191,68 @@ function _renderPendFundirCalendarioAnual(el) {
     </div>
     <div class="cal-anual-grid">${celdas}</div>
     ${_pendFundirCalSinFechaHtml()}`;
+}
+
+function _pendFundirCalAbrirDia(fechaStr) {
+  const [y, m, d] = fechaStr.split('-');
+  _abrirPendFundirDetalle(`Fecha de entrega — ${d}/${m}/${y}`, { fecha: fechaStr });
+}
+
+// ── Modal de detalle: lista de OTs detras de una barra (codigo+estado) o de
+// un dia de calendario (fecha, sin estado -- trae Programadas y Fundidas
+// juntas, cada fila con la suya) -- mismo endpoint para los dos casos.
+let _pendFundirDetalleRows = [];
+
+async function _abrirPendFundirDetalle(titulo, filtros) {
+  const modal = $id('pend-fundir-detalle-modal');
+  const body = $id('pend-fundir-detalle-modal-body');
+  const tituloEl = $id('pend-fundir-detalle-titulo');
+  if (tituloEl) tituloEl.textContent = titulo;
+  if (modal) modal.classList.add('open');
+  if (body) body.innerHTML = '<div class="loading">Cargando...</div>';
+
+  const params = new URLSearchParams({ meses: S.dashMeses, ...filtros });
+  let rows;
+  try { rows = await api('/api/dashboard/pendiente_fundir/detalle?' + params.toString()); }
+  catch (e) { if (body) body.innerHTML = '<div class="empty">No se pudo cargar</div>'; return; }
+
+  _pendFundirDetalleRows = rows;
+  if (!body) return;
+  if (!rows.length) { body.innerHTML = '<div class="empty">Sin OTs</div>'; return; }
+
+  const totalPz = rows.reduce((s, r) => s + (r.pendientes || 0), 0);
+  const totalKg = rows.reduce((s, r) => s + (r.kg_pendientes || 0), 0);
+  const hayVarios = new Set(rows.map(r => r.estado)).size > 1;
+
+  body.innerHTML = `
+    <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+      ${fmt(rows.length)} OT${rows.length !== 1 ? 's' : ''} &middot; ${fmt(totalPz)} piezas &middot; ${fmtKg(totalKg)}
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>OT</th>${hayVarios ? '<th>Estado</th>' : ''}<th>Pieza</th><th>Material</th><th>Cliente</th>
+          <th style="text-align:right">Pend.</th><th style="text-align:right">Kg</th><th>Entrega</th>
+        </tr></thead>
+        <tbody>${rows.map(r => `
+          <tr class="tr-link" onclick="closePendFundirDetalleModal();go('trabajo',${r.ot_id})">
+            <td><code style="color:var(--accent)">${String(r.ot_id).padStart(6, '0')}</code></td>
+            ${hayVarios ? `<td>${r.estado_label || '—'}</td>` : ''}
+            <td>${r.nombrepieza || '—'}</td>
+            <td>${r.material || '—'}</td>
+            <td>${r.cliente_nombre || '—'}<div style="font-size:11px;color:var(--muted)">${r.codigo_cliente || ''}</div></td>
+            <td style="text-align:right">${fmt(r.pendientes)}</td>
+            <td style="text-align:right">${r.kg_pendientes != null ? fmtKg(r.kg_pendientes) : '—'}</td>
+            <td style="font-size:11px;color:var(--muted)">${r.fechaprevista ? r.fechaprevista.slice(0, 10) : '—'}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function closePendFundirDetalleModal() {
+  const modal = $id('pend-fundir-detalle-modal');
+  if (modal) modal.classList.remove('open');
 }
 
 // "Nice number" para el paso mayor de la regla: ~6 marcas mayores prolijas
@@ -1397,6 +1479,21 @@ function _pendFundirChartConfig(data, useKg, print, subtitleId) {
   // leyenda clickeable, no tiene sentido sincronizar un texto que no cambia.
   if (!print && subtitleId) opts.plugins.pendFundirSubtitulo = { data, useKg, subtitleId };
   if (print) { opts.animation = false; opts.responsive = false; }
+  // Clic en una barra -- Programado o Fundido de un material -- abre la
+  // lista de OTs detras de ese numero. No tiene sentido en la imagen impresa.
+  if (!print) {
+    opts.onHover = (evt, elements) => { evt.native.target.style.cursor = elements.length ? 'pointer' : 'default'; };
+    opts.onClick = (evt, elements) => {
+      if (!elements || !elements.length) return;
+      const { datasetIndex, index } = elements[0];
+      const d = data[index];
+      const estado = datasetIndex === 0 ? 'P' : 'F';
+      const nombre = datasetIndex === 0 ? 'Programado' : 'Fundido';
+      const seg = datasetIndex === 0 ? d.programado : d.fundido;
+      if (!seg || !seg.ots) return;
+      _abrirPendFundirDetalle(`${nombre} — Material ${d.material} (${d.codigo})`, { codigo: d.codigo, estado });
+    };
+  }
   // Eje tipo regla: paso mayor "prolijo" (1/2/5×10^n) segun el maximo actual, con
   // 5 subdivisiones menores mas finas y sin etiqueta -- las marcas mayores, mas
   // oscuras y con el numero, son las que se leen de un vistazo.

@@ -1436,6 +1436,94 @@ def dashboard_pendiente_fundir_calendario(meses: int = 6):
         conn.close()
 
 
+@app.get("/api/dashboard/pendiente_fundir/detalle")
+def dashboard_pendiente_fundir_detalle(
+    meses: int = 6,
+    codigo: Optional[str] = Query(None),
+    estado: Optional[str] = Query(None),
+    fecha: Optional[str] = Query(None),
+):
+    """Lista de OTs (Trabajos) individuales detras de un numero de
+    dashboard_pendiente_fundir (codigo+estado, clic en una barra) o de
+    dashboard_pendiente_fundir_calendario (fecha, clic en un dia del
+    calendario -- sin estado trae Programadas y Fundidas juntas, cada fila
+    ya dice la suya). Mismo criterio de "pendiente" y misma ventana de
+    antigüedad que esos dos endpoints, para que la lista SIEMPRE coincida
+    exacto con el total que el usuario tocó."""
+    meses = max(1, min(meses, 60))
+    conn = get_db()
+    try:
+        where = [
+            "upper(t.estadotrabajo) IN ('P', 'F')",
+            "upper(p.estadopedido)  NOT IN ('K','D')",
+            "upper(idp.estadoitem)  NOT IN ('K','D')",
+            "t.\"códdeagregados\" NOT IN ('--', '4', 'Ar', 'ar', 'AR')",
+            "COALESCE(t.fechacargaot, p.fechapedido) >= date('now', ? || ' months')",
+        ]
+        params: list = [f"-{meses}"]
+        if codigo:
+            where.append('t."códdeagregados" = ?')
+            params.append(codigo)
+        if estado:
+            where.append("upper(t.estadotrabajo) = ?")
+            params.append(estado.upper())
+        if fecha:
+            where.append("date(t.fechaprevista) = ?")
+            params.append(fecha)
+
+        rows = conn.execute(_CTE_PIEZAS_PESO + f"""
+            , base AS (
+                SELECT
+                    t.iditemtrabajo AS ot_id,
+                    t.estadotrabajo AS estado,
+                    t.fechaprevista,
+                    p.fechapedido,
+                    t."códdeagregados" AS codigo_material,
+                    COALESCE(tm.sobrenombrematerial, t."códdeagregados") AS material,
+                    np.nombrepieza,
+                    np.códigopiezapuestoporcliente AS codigo_pieza,
+                    p.códigocliente AS codigo_cliente,
+                    COALESCE(c.nombrefantasía, c.nombrecliente) AS cliente_nombre,
+                    COALESCE(np.coefcompl, 1) AS coefcompl,
+                    CASE WHEN upper(t.estadotrabajo) = 'P'
+                         THEN (t.cantidad - COALESCE(t.cantidadfundida, 0))
+                         ELSE COALESCE(t.cantidadproducida, 0) END AS pendientes,
+                    CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END AS peso_efectivo
+                FROM Trabajos t
+                JOIN ItemDetallePedido idp ON idp.iditempedido = t.iditempedido
+                JOIN Pedidos p             ON p.idpedido = idp.idpedido
+                JOIN Clientes c            ON c.códigocliente = p.códigocliente
+                LEFT JOIN TiposMaterial tm ON tm."códmaterial" = CAST(t."códdeagregados" AS TEXT)
+                LEFT JOIN NombreDePiezas np ON np.id = idp.idpieza
+                LEFT JOIN PesosDePiezas pp  ON pp.códpieza = t.idpesopieza
+                LEFT JOIN piezas_peso pz    ON pz.pieza_id = np.id
+                WHERE {' AND '.join(where)}
+            )
+            SELECT
+                ot_id, estado, fechaprevista, fechapedido,
+                codigo_material, material, nombrepieza, codigo_pieza,
+                codigo_cliente, cliente_nombre, pendientes,
+                CASE WHEN nombrepieza LIKE '%(AD)' THEN peso_efectivo * 2
+                     WHEN nombrepieza LIKE '%(TR)' THEN peso_efectivo * 3
+                     ELSE peso_efectivo END * coefcompl AS peso_unitario,
+                ROUND(pendientes * (CASE WHEN nombrepieza LIKE '%(AD)' THEN peso_efectivo * 2
+                     WHEN nombrepieza LIKE '%(TR)' THEN peso_efectivo * 3
+                     ELSE peso_efectivo END * coefcompl), 2) AS kg_pendientes
+            FROM base
+            ORDER BY fechaprevista IS NULL, fechaprevista, ot_id
+        """, params).fetchall()
+
+        est = _est_map(conn)
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["estado_label"] = est.get(d["estado"] or "", d["estado"] or "")
+            result.append(d)
+        return result
+    finally:
+        conn.close()
+
+
 # Compartida entre el agregado y el desglose por mes de dashboard_proyeccion_pipeline.
 # Programado: nada fundido todavia, lo pendiente es cantidad-cantidadfundida (falta
 # fundir). Fundido: ya se fundio, lo pendiente es lo YA producido (falta entregar) --
