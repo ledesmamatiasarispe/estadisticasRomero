@@ -1046,10 +1046,92 @@ const _reglaBarraPlugin = {
 };
 Chart.register(_reglaBarraPlugin);
 
+// Orden fijo pedido para agrupar materiales visualmente (no alfabetico ni por
+// cantidad) -- cada sub-lista es un grupo con su propia llave y su kg total.
+// Los materiales que no figuran acá van al final, en su orden normal.
+const _PEND_FUNDIR_GRUPOS = [
+  ['5', '1', '3', '7'],
+  ['2', '1/2'],
+  ['10', '12', '13'],
+];
+
+function _ordenarPorGrupos(data) {
+  const porCodigo = new Map(data.map(d => [d.codigo, d]));
+  const usados = new Set();
+  const ordenada = [];
+  const grupos = []; // {startIdx, endIdx, kg}
+  for (const codigos of _PEND_FUNDIR_GRUPOS) {
+    const startIdx = ordenada.length;
+    let kg = 0, huboAlguno = false;
+    for (const cod of codigos) {
+      const d = porCodigo.get(cod);
+      if (!d) continue;
+      ordenada.push(d);
+      usados.add(cod);
+      kg += (d.programado.kg_pendientes || 0) + (d.fundido.kg_pendientes || 0);
+      huboAlguno = true;
+    }
+    if (huboAlguno) grupos.push({ startIdx, endIdx: ordenada.length - 1, kg });
+  }
+  for (const d of data) { if (!usados.has(d.codigo)) ordenada.push(d); }
+  return { ordenada, grupos };
+}
+
+// Llave "{" a la izquierda de las etiquetas del eje, con el kg total del
+// grupo -- se dibuja en el margen izquierdo reservado via layout.padding.
+function _dibujarLlave(ctx, xLabel, yTop, yBottom, prof) {
+  const yMid = (yTop + yBottom) / 2;
+  const xSpine = xLabel - prof;
+  const xTip = xSpine - prof * 0.7;
+  ctx.beginPath();
+  ctx.moveTo(xLabel, yTop);
+  ctx.quadraticCurveTo(xSpine, yTop, xSpine, yTop + prof);
+  ctx.lineTo(xSpine, yMid - prof);
+  ctx.quadraticCurveTo(xSpine, yMid, xTip, yMid);
+  ctx.quadraticCurveTo(xSpine, yMid, xSpine, yMid + prof);
+  ctx.lineTo(xSpine, yBottom - prof);
+  ctx.quadraticCurveTo(xSpine, yBottom, xLabel, yBottom);
+  ctx.stroke();
+  return xTip;
+}
+
+const _grupoLlavePlugin = {
+  id: 'grupoLlave',
+  afterDraw(chart, args, opts) {
+    if (!opts || !opts.grupos || !opts.grupos.length) return;
+    const meta0 = chart.getDatasetMeta(0);
+    const meta1 = chart.getDatasetMeta(1);
+    if (!meta0 || !meta0.data.length) return;
+    const ctx = chart.ctx;
+    const xLabel = chart.chartArea.left - 6;
+    const prof = opts.print ? 10 : 8;
+    ctx.save();
+    ctx.strokeStyle = opts.print ? '#333' : '#8b929e';
+    ctx.fillStyle   = opts.print ? '#000' : '#c9d1d9';
+    ctx.lineWidth = 1.5;
+    ctx.font = (opts.print ? '700 12px' : '700 10px') + ' system-ui, -apple-system, sans-serif';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    opts.grupos.forEach((g) => {
+      const barTop = meta0.data[g.startIdx];
+      const barBottomEl = (meta1 && meta1.data[g.endIdx]) || meta0.data[g.endIdx];
+      if (!barTop || !barBottomEl) return;
+      const yTop = barTop.y - barTop.height / 2 - 3;
+      const yBottom = barBottomEl.y + barBottomEl.height / 2 + 3;
+      const xTip = _dibujarLlave(ctx, xLabel, yTop, yBottom, prof);
+      ctx.fillText(fmtKg(g.kg), xTip - 6, (yTop + yBottom) / 2);
+    });
+    ctx.restore();
+  },
+};
+Chart.register(_grupoLlavePlugin);
+
 // Config compartida entre el grafico interactivo (tema oscuro, en pantalla) y
 // el que se genera aparte para imprimir (fondo blanco, letra mas grande) --
 // print:true cambia colores/tamaños, nunca la logica de los pasos de la regla.
 function _pendFundirChartConfig(data, useKg, print) {
+  const { ordenada, grupos } = _ordenarPorGrupos(data);
+  data = ordenada;
   const valorSegmento = (seg) => useKg ? (seg.kg_pendientes || 0) : (seg.ots || 0);
   const etiquetaSegmento = (v) => useKg ? fmtKg(v) : fmt(v) + ' OT' + (v !== 1 ? 's' : '');
   const progVals = data.map(d => valorSegmento(d.programado));
@@ -1065,8 +1147,12 @@ function _pendFundirChartConfig(data, useKg, print) {
   opts.indexAxis = 'y';
   opts.plugins.legend.display = true;
   opts.plugins.legend.labels = { color: print ? '#000' : '#8b929e', font: { size: print ? 13 : 11 } };
-  opts.layout = { padding: { right: print ? 76 : 56 } }; // lugar para el numero total al final de cada barra
+  opts.layout = { padding: {
+    right: print ? 76 : 56, // lugar para el numero total al final de cada barra
+    left: grupos.length ? (print ? 95 : 75) : 0, // lugar para la llave + kg del grupo
+  } };
   opts.plugins.reglaBarra = { minor, subdiv, etiquetas, print };
+  opts.plugins.grupoLlave = { grupos, print };
   if (print) { opts.animation = false; opts.responsive = false; }
   // Eje tipo regla: paso mayor "prolijo" (1/2/5×10^n) segun el maximo actual, con
   // 5 subdivisiones menores mas finas y sin etiqueta -- las marcas mayores, mas
