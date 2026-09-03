@@ -1293,32 +1293,27 @@ _COD_CLIENTE_BATIPLANE = "BA3"
 
 
 @app.get("/api/dashboard/pendiente_fundir")
-def dashboard_pendiente_fundir(meses: int = 6, incluir_batiplane: bool = False):
+def dashboard_pendiente_fundir(meses: int = 6):
     """Pendiente de fundir por material, separado en Programado (nada fundido
     todavía, falta fundir) y Fundido (ya fundido, falta entregar) -- mismo
     criterio de "pendiente" por estado que dashboard_proyeccion_pipeline, acá
-    agrupado por material además de por estado. Batiplane (BA3) queda afuera
-    salvo que se pida explícitamente (checkbox "Batiplane", off por defecto):
-    sus OTs son un volumen aparte que distorsiona la lectura del día a día
-    en planta si se suman con el resto."""
+    agrupado por material además de por estado. Cada campo programado/fundido
+    trae además batiplane: el mismo total pero solo la porción de Batiplane
+    (BA3) -- su volumen aparte se resalta con otro color en vez de excluirse,
+    para no esconder ninguna OT pendiente de fundir de un vistazo."""
     meses = max(1, min(meses, 60))
     conn = get_db()
     try:
         # Antigüedad de la OT: fechacargaot es NULL en ~93% de las OTs activas pendientes de
         # fundir (a diferencia de datos históricas ya cerradas), así que igual que en
         # analytics_top_defectos/analytics_top_piezas usamos p.fechapedido como respaldo.
-        params: list = [f"-{meses}"]
-        clausula_batiplane = ""
-        if not incluir_batiplane:
-            clausula_batiplane = 'AND upper(p."códigocliente") <> ?'
-            params.append(_COD_CLIENTE_BATIPLANE)
-
-        rows = conn.execute(_CTE_PIEZAS_PESO + f"""
+        rows = conn.execute(_CTE_PIEZAS_PESO + """
             , base AS (
                 SELECT
                     t."códdeagregados" AS codigo,
                     COALESCE(tm.sobrenombrematerial, t."códdeagregados") AS material,
                     t.estadotrabajo AS estado,
+                    CASE WHEN upper(p."códigocliente") = ? THEN 1 ELSE 0 END AS es_batiplane,
                     CASE WHEN upper(t.estadotrabajo) = 'P'
                          THEN (t.cantidad - COALESCE(t.cantidadfundida, 0))
                          ELSE COALESCE(t.cantidadproducida, 0) END AS pendientes,
@@ -1337,12 +1332,12 @@ def dashboard_pendiente_fundir(meses: int = 6, incluir_batiplane: bool = False):
                   AND upper(idp.estadoitem)  NOT IN ('K','D')
                   AND t."códdeagregados" NOT IN ('--', '4', 'Ar', 'ar', 'AR')
                   AND COALESCE(t.fechacargaot, p.fechapedido) >= date('now', ? || ' months')
-                  {clausula_batiplane}
             )
             SELECT
                 codigo,
                 material,
                 estado,
+                es_batiplane,
                 COUNT(*) AS ots,
                 SUM(pendientes) AS piezas_pendientes,
                 ROUND(SUM(pendientes *
@@ -1352,24 +1347,37 @@ def dashboard_pendiente_fundir(meses: int = 6, incluir_batiplane: bool = False):
                 SUM(CASE WHEN peso_efectivo IS NULL THEN 1 ELSE 0 END) AS ots_sin_peso,
                 SUM(CASE WHEN peso_efectivo IS NULL THEN pendientes ELSE 0 END) AS piezas_sin_peso
             FROM base
-            GROUP BY codigo, estado
+            GROUP BY codigo, estado, es_batiplane
             ORDER BY codigo
-        """, params).fetchall()
+        """, (_COD_CLIENTE_BATIPLANE, f"-{meses}")).fetchall()
 
-        vacio = {"ots": 0, "piezas_pendientes": 0, "kg_pendientes": 0, "ots_sin_peso": 0, "piezas_sin_peso": 0}
+        def vacio():
+            return {"ots": 0, "piezas_pendientes": 0, "kg_pendientes": 0, "ots_sin_peso": 0, "piezas_sin_peso": 0}
+
         por_material: dict[str, dict] = {}
         for r in rows:
             d = dict(r)
             m = por_material.setdefault(d["codigo"], {
                 "codigo": d["codigo"], "material": d["material"],
-                "programado": dict(vacio), "fundido": dict(vacio),
+                "programado": vacio(), "fundido": vacio(),
             })
             campo = "programado" if d["estado"] == "P" else "fundido"
-            m[campo] = {
-                "ots": d["ots"], "piezas_pendientes": d["piezas_pendientes"],
-                "kg_pendientes": d["kg_pendientes"],
-                "ots_sin_peso": d["ots_sin_peso"], "piezas_sin_peso": d["piezas_sin_peso"],
-            }
+            seg = m[campo]
+            seg["ots"] += d["ots"]
+            seg["piezas_pendientes"] += d["piezas_pendientes"]
+            seg["kg_pendientes"] = round((seg["kg_pendientes"] or 0) + (d["kg_pendientes"] or 0), 2)
+            seg["ots_sin_peso"] += d["ots_sin_peso"]
+            seg["piezas_sin_peso"] += d["piezas_sin_peso"]
+            if d["es_batiplane"]:
+                seg["batiplane"] = {
+                    "ots": d["ots"], "piezas_pendientes": d["piezas_pendientes"],
+                    "kg_pendientes": d["kg_pendientes"] or 0,
+                }
+
+        for m in por_material.values():
+            for campo in ("programado", "fundido"):
+                m[campo].setdefault("batiplane", {"ots": 0, "piezas_pendientes": 0, "kg_pendientes": 0})
+
         resultado = list(por_material.values())
         resultado.sort(key=lambda m: m["programado"]["ots"] + m["fundido"]["ots"], reverse=True)
         return resultado
@@ -1378,26 +1386,22 @@ def dashboard_pendiente_fundir(meses: int = 6, incluir_batiplane: bool = False):
 
 
 @app.get("/api/dashboard/pendiente_fundir/calendario")
-def dashboard_pendiente_fundir_calendario(meses: int = 6, incluir_batiplane: bool = False):
-    """Igual base que dashboard_pendiente_fundir (mismo criterio de "pendiente",
-    misma ventana de antigüedad de OT y mismo default de excluir Batiplane)
-    pero agregado por fecha de entrega (fechaprevista) en vez de por material
-    -- para el modo calendario: cuanto Programado/Fundido (OTs y kg) vence
-    cada día, sumando todos los materiales."""
+def dashboard_pendiente_fundir_calendario(meses: int = 6):
+    """Igual base que dashboard_pendiente_fundir (mismo criterio de "pendiente"
+    y misma ventana de antigüedad de OT) pero agregado por fecha de entrega
+    (fechaprevista) en vez de por material -- para el modo calendario: cuanto
+    Programado/Fundido (OTs y kg) vence cada día, sumando todos los materiales.
+    Cada campo programado/fundido trae además batiplane, igual que en
+    dashboard_pendiente_fundir."""
     meses = max(1, min(meses, 60))
     conn = get_db()
     try:
-        params: list = [f"-{meses}"]
-        clausula_batiplane = ""
-        if not incluir_batiplane:
-            clausula_batiplane = 'AND upper(p."códigocliente") <> ?'
-            params.append(_COD_CLIENTE_BATIPLANE)
-
-        cte_base = _CTE_PIEZAS_PESO + f"""
+        cte_base = _CTE_PIEZAS_PESO + """
             , base AS (
                 SELECT
                     t.estadotrabajo AS estado,
                     date(t.fechaprevista) AS fecha,
+                    CASE WHEN upper(p."códigocliente") = ? THEN 1 ELSE 0 END AS es_batiplane,
                     CASE WHEN upper(t.estadotrabajo) = 'P'
                          THEN (t.cantidad - COALESCE(t.cantidadfundida, 0))
                          ELSE COALESCE(t.cantidadproducida, 0) END AS pendientes,
@@ -1415,43 +1419,56 @@ def dashboard_pendiente_fundir_calendario(meses: int = 6, incluir_batiplane: boo
                   AND upper(idp.estadoitem)  NOT IN ('K','D')
                   AND t."códdeagregados" NOT IN ('--', '4', 'Ar', 'ar', 'AR')
                   AND COALESCE(t.fechacargaot, p.fechapedido) >= date('now', ? || ' months')
-                  {clausula_batiplane}
             )
         """
         kg_expr = """ROUND(SUM(pendientes *
                     CASE WHEN nombrepieza LIKE '%(AD)' THEN peso_efectivo * 2
                          WHEN nombrepieza LIKE '%(TR)' THEN peso_efectivo * 3
                          ELSE peso_efectivo END * coefcompl), 2)"""
+        params = [_COD_CLIENTE_BATIPLANE, f"-{meses}"]
 
         rows = conn.execute(cte_base + f"""
-            SELECT estado, fecha, COUNT(*) AS ots, SUM(pendientes) AS piezas_pendientes, {kg_expr} AS kg_pendientes
+            SELECT estado, fecha, es_batiplane, COUNT(*) AS ots, SUM(pendientes) AS piezas_pendientes, {kg_expr} AS kg_pendientes
             FROM base
             WHERE fecha IS NOT NULL
-            GROUP BY estado, fecha
+            GROUP BY estado, fecha, es_batiplane
         """, params).fetchall()
 
         sin_fecha_rows = conn.execute(cte_base + f"""
-            SELECT estado, COUNT(*) AS ots, SUM(pendientes) AS piezas_pendientes, {kg_expr} AS kg_pendientes
+            SELECT estado, es_batiplane, COUNT(*) AS ots, SUM(pendientes) AS piezas_pendientes, {kg_expr} AS kg_pendientes
             FROM base
             WHERE fecha IS NULL
-            GROUP BY estado
+            GROUP BY estado, es_batiplane
         """, params).fetchall()
 
         def vacio():
             return {"ots": 0, "piezas_pendientes": 0, "kg_pendientes": 0}
 
+        def acumular(destino, d):
+            campo = "programado" if d["estado"] == "P" else "fundido"
+            seg = destino[campo]
+            seg["ots"] += d["ots"]
+            seg["piezas_pendientes"] += d["piezas_pendientes"]
+            seg["kg_pendientes"] = round((seg["kg_pendientes"] or 0) + (d["kg_pendientes"] or 0), 2)
+            if d["es_batiplane"]:
+                seg["batiplane"] = {
+                    "ots": d["ots"], "piezas_pendientes": d["piezas_pendientes"],
+                    "kg_pendientes": d["kg_pendientes"] or 0,
+                }
+
         por_fecha: dict[str, dict] = {}
         for r in rows:
             d = dict(r)
             dia = por_fecha.setdefault(d["fecha"], {"fecha": d["fecha"], "programado": vacio(), "fundido": vacio()})
-            campo = "programado" if d["estado"] == "P" else "fundido"
-            dia[campo] = {"ots": d["ots"], "piezas_pendientes": d["piezas_pendientes"], "kg_pendientes": d["kg_pendientes"]}
+            acumular(dia, d)
 
         sin_fecha = {"programado": vacio(), "fundido": vacio()}
         for r in sin_fecha_rows:
-            d = dict(r)
-            campo = "programado" if d["estado"] == "P" else "fundido"
-            sin_fecha[campo] = {"ots": d["ots"], "piezas_pendientes": d["piezas_pendientes"], "kg_pendientes": d["kg_pendientes"]}
+            acumular(sin_fecha, dict(r))
+
+        for dia in list(por_fecha.values()) + [sin_fecha]:
+            for campo in ("programado", "fundido"):
+                dia[campo].setdefault("batiplane", {"ots": 0, "piezas_pendientes": 0, "kg_pendientes": 0})
 
         return {"dias": sorted(por_fecha.values(), key=lambda x: x["fecha"]), "sin_fecha": sin_fecha}
     finally:
@@ -1464,15 +1481,15 @@ def dashboard_pendiente_fundir_detalle(
     codigo: Optional[str] = Query(None),
     estado: Optional[str] = Query(None),
     fecha: Optional[str] = Query(None),
-    incluir_batiplane: bool = False,
 ):
     """Lista de OTs (Trabajos) individuales detras de un numero de
     dashboard_pendiente_fundir (codigo+estado, clic en una barra) o de
     dashboard_pendiente_fundir_calendario (fecha, clic en un dia del
     calendario -- sin estado trae Programadas y Fundidas juntas, cada fila
-    ya dice la suya). Mismo criterio de "pendiente", misma ventana de
-    antigüedad y mismo default de excluir Batiplane que esos dos endpoints,
-    para que la lista SIEMPRE coincida exacto con el total que el usuario tocó."""
+    ya dice la suya). Mismo criterio de "pendiente" y misma ventana de
+    antigüedad que esos dos endpoints, para que la lista SIEMPRE coincida
+    exacto con el total que el usuario tocó. Incluye Batiplane -- cada fila
+    ya dice de qué cliente es (codigo_cliente/cliente_nombre)."""
     meses = max(1, min(meses, 60))
     conn = get_db()
     try:
@@ -1484,9 +1501,6 @@ def dashboard_pendiente_fundir_detalle(
             "COALESCE(t.fechacargaot, p.fechapedido) >= date('now', ? || ' months')",
         ]
         params: list = [f"-{meses}"]
-        if not incluir_batiplane:
-            where.append('upper(p."códigocliente") <> ?')
-            params.append(_COD_CLIENTE_BATIPLANE)
         if codigo:
             where.append('t."códdeagregados" = ?')
             params.append(codigo)

@@ -327,6 +327,8 @@ tr:last-child td { border-bottom: none; }
 .cal-badge { font-size: 10px; font-weight: 600; padding: 1px 4px; border-radius: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cal-badge.cal-prog { background: #42a5f533; color: #7cc0f8; }
 .cal-badge.cal-fund { background: #ffa72633; color: #ffc477; }
+.cal-badge.cal-prog-bat { background: #1565c055; color: #8ab4f8; font-weight: 700; }
+.cal-badge.cal-fund-bat { background: #e6510055; color: #ffab5e; font-weight: 700; }
 .cal-anual-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
 .cal-mes-celda { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 8px; display: flex; flex-direction: column; gap: 4px; cursor: pointer; transition: border-color .15s; }
 .cal-mes-celda:hover { border-color: var(--accent); }
@@ -997,17 +999,29 @@ let _pendFundirKgMode = false;
 let _pendFundirData   = null;
 let _pendFundirIds    = null;   // {canvasId, subtitleId}
 let _pendFundirCharts = {};     // {canvasId: Chart}
-// Batiplane afuera por defecto (checkbox "Batiplane", off) -- sus OTs son un
-// volumen aparte que distorsiona la lectura del dia a dia si se mezcla con
-// el resto. Compartido por el grafico, el calendario y el drill-down de OTs
-// para que los tres muestren siempre el mismo universo de datos.
-let _pendFundirIncluirBatiplane = false;
 
-function _pendFundirQS(extra) {
-  const params = new URLSearchParams(extra);
-  if (_pendFundirIncluirBatiplane) params.set('incluir_batiplane', '1');
-  return params.toString();
-}
+function _pendFundirQS(extra) { return new URLSearchParams(extra).toString(); }
+
+// Batiplane SIEMPRE esta incluido (no es un filtro) -- su volumen se resalta
+// con un color mas oscuro dentro de cada barra/celda en vez de esconderse,
+// asi ninguna OT pendiente de fundir queda fuera de la vista por defecto.
+const _COLOR_PROGRAMADO           = '#42a5f5bb';
+const _COLOR_PROGRAMADO_PRINT     = '#42a5f5';
+const _COLOR_PROGRAMADO_BATIPLANE       = '#1565c0';
+const _COLOR_PROGRAMADO_BATIPLANE_PRINT = '#0d47a1';
+const _COLOR_FUNDIDO               = '#ffa726bb';
+const _COLOR_FUNDIDO_PRINT         = '#ffa726';
+const _COLOR_FUNDIDO_BATIPLANE       = '#e65100';
+const _COLOR_FUNDIDO_BATIPLANE_PRINT = '#bf360c';
+
+const _PEND_FUNDIR_LEYENDA_BATIPLANE_HTML = `
+  <div style="display:flex;align-items:center;gap:10px;font-size:10px;color:var(--muted);margin:2px 0 8px">
+    <span style="display:inline-flex;align-items:center;gap:4px">
+      <span style="width:9px;height:9px;border-radius:2px;background:${_COLOR_PROGRAMADO_BATIPLANE};display:inline-block;flex-shrink:0"></span>
+      <span style="width:9px;height:9px;border-radius:2px;background:${_COLOR_FUNDIDO_BATIPLANE};display:inline-block;flex-shrink:0"></span>
+      Batiplane (color más oscuro, dentro de cada barra)
+    </span>
+  </div>`;
 
 async function _renderPendienteFundirChart(canvasId, subtitleId, meses) {
   const canvas = $id(canvasId);
@@ -1022,8 +1036,6 @@ async function _renderPendienteFundirChart(canvasId, subtitleId, meses) {
   // calendario nace oculto) -- si el usuario navega afuera estando en modo
   // calendario, hay que resincronizar el flag con ese estado por defecto.
   _pendFundirCalMode = false;
-  const chk = canvas.closest('.card')?.querySelector('#pend-fundir-batiplane-chk');
-  if (chk) chk.checked = _pendFundirIncluirBatiplane;
   _drawPendienteFundirChart(canvasId, subtitleId, data);
 }
 
@@ -1031,27 +1043,6 @@ function _togglePendFundirKg() {
   _pendFundirKgMode = !_pendFundirKgMode;
   if (_pendFundirData && _pendFundirIds) {
     _drawPendienteFundirChart(_pendFundirIds.canvasId, _pendFundirIds.subtitleId, _pendFundirData);
-  }
-}
-
-async function _togglePendFundirBatiplane(checked) {
-  _pendFundirIncluirBatiplane = checked;
-  if (!_pendFundirIds) return;
-  const { canvasId, subtitleId } = _pendFundirIds;
-  const m = S.dashMeses;
-  try { _pendFundirData = await api('/api/dashboard/pendiente_fundir?' + _pendFundirQS({ meses: m })); }
-  catch (e) { return; }
-  // El grafico se redibuja siempre, este o no a la vista -- el subtitulo de
-  // arriba (compartido con el calendario) lo actualiza el propio plugin de
-  // Chart.js en su afterUpdate, y sin este redibujo quedaria mostrando los
-  // numeros de antes del toggle mientras el calendario, abajo, ya cambio.
-  _drawPendienteFundirChart(canvasId, subtitleId, _pendFundirData);
-  if (_pendFundirCalMode) {
-    try { _pendFundirCalData = await api('/api/dashboard/pendiente_fundir/calendario?' + _pendFundirQS({ meses: m })); }
-    catch (e) { return; }
-    _renderPendFundirCalendario(canvasId);
-  } else {
-    _pendFundirCalData = null;
   }
 }
 
@@ -1155,8 +1146,21 @@ function _renderPendFundirCalendarioMensual(el) {
   const totalDias = ultimoDia.getDate();
   const hoyStr = _fechaISO(new Date());
 
-  const badge = (seg, clase, titulo) => !seg || !seg.ots ? '' :
-    `<div class="cal-badge ${clase}" title="${titulo}">${fmt(seg.ots)} OT &middot; ${fmtKg(seg.kg_pendientes)}</div>`;
+  // Si ese dia/estado tiene OTs de Batiplane, se parte en dos badges (resto +
+  // Batiplane en color mas oscuro) en vez de uno solo con el total mezclado.
+  const badge = (seg, clase, titulo) => {
+    if (!seg || !seg.ots) return '';
+    const bat = seg.batiplane;
+    if (!bat || !bat.ots) {
+      return `<div class="cal-badge ${clase}" title="${titulo}">${fmt(seg.ots)} OT &middot; ${fmtKg(seg.kg_pendientes)}</div>`;
+    }
+    const restoOts = seg.ots - bat.ots;
+    const restoKg = (seg.kg_pendientes || 0) - (bat.kg_pendientes || 0);
+    const restoHtml = restoOts > 0
+      ? `<div class="cal-badge ${clase}" title="${titulo}">${fmt(restoOts)} OT &middot; ${fmtKg(restoKg)}</div>` : '';
+    return restoHtml
+      + `<div class="cal-badge ${clase}-bat" title="${titulo} (Batiplane)">${fmt(bat.ots)} OT &middot; ${fmtKg(bat.kg_pendientes)}</div>`;
+  };
 
   let celdas = '';
   for (let i = 0; i < offsetInicio; i++) celdas += '<div class="cal-celda cal-vacia"></div>';
@@ -1192,7 +1196,9 @@ function _renderPendFundirCalendarioAnual(el) {
   const año = _pendFundirCalCursor.getFullYear();
   const hoyStr = _fechaISO(new Date());
   const porMes = Array.from({ length: 12 }, () => ({
-    programado: { ots: 0, kg: 0 }, fundido: { ots: 0, kg: 0 }, vencido: false,
+    programado: { ots: 0, kg: 0, batOts: 0, batKg: 0 },
+    fundido:    { ots: 0, kg: 0, batOts: 0, batKg: 0 },
+    vencido: false,
   }));
   (_pendFundirCalData.dias || []).forEach((d) => {
     const [y, m] = d.fecha.split('-').map(Number);
@@ -1200,18 +1206,32 @@ function _renderPendFundirCalendarioAnual(el) {
     const c = porMes[m - 1];
     c.programado.ots += d.programado.ots || 0;
     c.programado.kg  += d.programado.kg_pendientes || 0;
+    c.programado.batOts += (d.programado.batiplane && d.programado.batiplane.ots) || 0;
+    c.programado.batKg  += (d.programado.batiplane && d.programado.batiplane.kg_pendientes) || 0;
     c.fundido.ots    += d.fundido.ots || 0;
     c.fundido.kg     += d.fundido.kg_pendientes || 0;
+    c.fundido.batOts += (d.fundido.batiplane && d.fundido.batiplane.ots) || 0;
+    c.fundido.batKg  += (d.fundido.batiplane && d.fundido.batiplane.kg_pendientes) || 0;
     if (d.fecha < hoyStr && d.programado.ots > 0) c.vencido = true;
   });
+
+  // Mismo criterio que la vista mensual: si hay Batiplane ese mes, se parte
+  // en dos badges (resto + Batiplane en color mas oscuro).
+  const badgeMes = (seg, clase, titulo) => {
+    if (!seg.ots) return '';
+    if (!seg.batOts) return `<div class="cal-badge ${clase}" title="${titulo}">${fmt(seg.ots)} OT &middot; ${fmtKg(seg.kg)}</div>`;
+    const restoOts = seg.ots - seg.batOts, restoKg = seg.kg - seg.batKg;
+    const restoHtml = restoOts > 0 ? `<div class="cal-badge ${clase}" title="${titulo}">${fmt(restoOts)} OT &middot; ${fmtKg(restoKg)}</div>` : '';
+    return restoHtml + `<div class="cal-badge ${clase}-bat" title="${titulo} (Batiplane)">${fmt(seg.batOts)} OT &middot; ${fmtKg(seg.batKg)}</div>`;
+  };
 
   const celdas = _CAL_MESES.map((nombre, i) => {
     const c = porMes[i];
     const sinDatos = !c.programado.ots && !c.fundido.ots;
     return `<div class="cal-mes-celda${c.vencido ? ' cal-vencida' : ''}" onclick="_pendFundirCalIrAMes(${i})">
       <div class="cal-mes-nombre">${nombre}</div>
-      ${c.programado.ots ? `<div class="cal-badge cal-prog" title="Programado">${fmt(c.programado.ots)} OT &middot; ${fmtKg(c.programado.kg)}</div>` : ''}
-      ${c.fundido.ots ? `<div class="cal-badge cal-fund" title="Fundido">${fmt(c.fundido.ots)} OT &middot; ${fmtKg(c.fundido.kg)}</div>` : ''}
+      ${badgeMes(c.programado, 'cal-prog', 'Programado')}
+      ${badgeMes(c.fundido, 'cal-fund', 'Fundido')}
       ${sinDatos ? '<div class="cal-mes-vacio">&mdash;</div>' : ''}
     </div>`;
   }).join('');
@@ -1273,7 +1293,7 @@ async function _abrirPendFundirDetalle(titulo, filtros) {
             ${hayVarios ? `<td>${r.estado_label || '—'}</td>` : ''}
             <td>${r.nombrepieza || '—'}</td>
             <td>${r.material || '—'}</td>
-            <td>${r.cliente_nombre || '—'}<div style="font-size:11px;color:var(--muted)">${r.codigo_cliente || ''}</div></td>
+            <td>${r.cliente_nombre || '—'}${r.codigo_cliente === 'BA3' ? ' <span style="color:#7cc0f8;font-size:10px;font-weight:700">&#9679; Batiplane</span>' : ''}<div style="font-size:11px;color:var(--muted)">${r.codigo_cliente || ''}</div></td>
             <td style="text-align:right">${fmt(r.pendientes)}</td>
             <td style="text-align:right">${r.kg_pendientes != null ? fmtKg(r.kg_pendientes) : '—'}</td>
             <td style="font-size:11px;color:var(--muted)">${r.fechaprevista ? r.fechaprevista.slice(0, 10) : '—'}</td>
@@ -1305,11 +1325,29 @@ function _reglaPasos(maxVal) {
 // Dibuja las marcas de la regla ENCIMA de cada barra (no solo en el fondo del
 // eje, que las barras tapan) -- una linea vertical por cada paso menor dentro
 // del relleno de la barra, mas oscura/gruesa en cada paso mayor.
+// Path de rectangulo redondeado para recortar el tramo de Batiplane al mismo
+// contorno que Chart.js usa para dibujar la barra (borderRadius) -- si no,
+// cuando el tramo llega hasta la punta de la barra asoma en angulo recto.
+function _pathRectRedondeado(ctx, x1, y1, x2, y2, r) {
+  const rr = Math.max(0, Math.min(r, Math.abs(x2 - x1) / 2, Math.abs(y2 - y1) / 2));
+  ctx.beginPath();
+  if (ctx.roundRect) {
+    ctx.roundRect(Math.min(x1, x2), y1, Math.abs(x2 - x1), y2 - y1, rr);
+  } else {
+    ctx.moveTo(x1 + rr, y1);
+    ctx.arcTo(x2, y1, x2, y2, rr);
+    ctx.arcTo(x2, y2, x1, y2, rr);
+    ctx.arcTo(x1, y2, x1, y1, rr);
+    ctx.arcTo(x1, y1, x2, y1, rr);
+    ctx.closePath();
+  }
+}
+
 const _reglaBarraPlugin = {
   id: 'reglaBarra',
   afterDatasetsDraw(chart, args, opts) {
     if (!opts || !opts.minor) return;
-    const { minor, subdiv, etiquetas, print } = opts;
+    const { minor, subdiv, etiquetas, batiplaneValores, batiplaneColores, print } = opts;
     // etiquetas[datasetIndex][i]: una barra por serie (agrupadas, no apiladas)
     // -- cada una con su propia regla y su propio total, no uno combinado.
     const datasets = chart.data.datasets;
@@ -1327,6 +1365,22 @@ const _reglaBarraPlugin = {
         const top = bar.y - bar.height / 2 + 1;
         const bottom = bar.y + bar.height / 2 - 1;
         const xEnd = bar.x;
+
+        // Porcion de Batiplane -- se resalta en un color mas oscuro sobre la
+        // punta de la barra (el resto ya quedo pintado por Chart.js), en vez
+        // de excluirla: nunca esconde una OT pendiente de fundir.
+        const vBat = batiplaneValores && batiplaneValores[dsIdx] && batiplaneValores[dsIdx][i];
+        if (vBat > 0) {
+          const xBatIni = xScale.getPixelForValue(Math.max(0, v - vBat));
+          const yTop = bar.y - bar.height / 2, yBottom = bar.y + bar.height / 2;
+          ctx.save();
+          _pathRectRedondeado(ctx, x0, yTop, xEnd, yBottom, bar.options ? (bar.options.borderRadius || 0) : 4);
+          ctx.clip();
+          ctx.fillStyle = batiplaneColores[dsIdx];
+          ctx.fillRect(xBatIni, yTop, xEnd - xBatIni, yBottom - yTop);
+          ctx.restore();
+        }
+
         for (let n = 1; n * minor < v; n++) {
           const tickVal = n * minor;
           const px = xScale.getPixelForValue(tickVal);
@@ -1491,6 +1545,10 @@ function _pendFundirChartConfig(data, useKg, print, subtitleId) {
   const etiquetaSegmento = (v) => useKg ? fmtKg(v) : fmt(v) + ' OT' + (v !== 1 ? 's' : '');
   const progVals = data.map(d => valorSegmento(d.programado));
   const fundVals = data.map(d => valorSegmento(d.fundido));
+  // Batiplane, mismo valor/metrica que la barra entera (kg u OTs segun el
+  // modo) -- se resalta con otro color en la punta de la barra, nunca se resta.
+  const progBatVals = data.map(d => valorSegmento(d.programado.batiplane || {}));
+  const fundBatVals = data.map(d => valorSegmento(d.fundido.batiplane || {}));
   // Barras agrupadas (lado a lado), no apiladas -- cada una con su propio
   // total, asi que el paso de la regla sale del maximo de CUALQUIER barra
   // individual, no de la suma de las dos.
@@ -1506,7 +1564,14 @@ function _pendFundirChartConfig(data, useKg, print, subtitleId) {
     right: print ? 76 : 56, // lugar para el numero total al final de cada barra
     left: grupos.length ? (print ? 110 : 90) : 0, // lugar para la llave + kg del grupo
   } };
-  opts.plugins.reglaBarra = { minor, subdiv, etiquetas, print };
+  opts.plugins.reglaBarra = {
+    minor, subdiv, etiquetas, print,
+    batiplaneValores: [progBatVals, fundBatVals],
+    batiplaneColores: [
+      print ? _COLOR_PROGRAMADO_BATIPLANE_PRINT : _COLOR_PROGRAMADO_BATIPLANE,
+      print ? _COLOR_FUNDIDO_BATIPLANE_PRINT : _COLOR_FUNDIDO_BATIPLANE,
+    ],
+  };
   opts.plugins.grupoLlave = { grupos, print };
   // Solo en pantalla -- la imagen de impresion es una captura estatica sin
   // leyenda clickeable, no tiene sentido sincronizar un texto que no cambia.
@@ -1560,16 +1625,24 @@ function _pendFundirChartConfig(data, useKg, print, subtitleId) {
     },
     afterLabel: (ctx) => {
       const seg = ctx.datasetIndex === 0 ? data[ctx.dataIndex].programado : data[ctx.dataIndex].fundido;
-      if (!useKg || !seg.piezas_sin_peso) return undefined;
-      return seg.piezas_sin_peso >= seg.piezas_pendientes
-        ? '⚠ Sin ninguna pieza con peso cargado — kg desconocido'
-        : '⚠ ' + fmt(seg.piezas_sin_peso) + ' de ' + fmt(seg.piezas_pendientes) + ' piezas sin peso cargado — kg incompleto';
+      const lineas = [];
+      const bat = seg.batiplane;
+      if (bat && bat.ots) {
+        lineas.push('◆ De los cuales, Batiplane: ' + fmt(bat.ots) + ' OT' + (bat.ots !== 1 ? 's' : '')
+          + (useKg ? ' · ' + fmtKg(bat.kg_pendientes) : ' · ' + fmt(bat.piezas_pendientes) + ' piezas'));
+      }
+      if (useKg && seg.piezas_sin_peso) {
+        lineas.push(seg.piezas_sin_peso >= seg.piezas_pendientes
+          ? '⚠ Sin ninguna pieza con peso cargado — kg desconocido'
+          : '⚠ ' + fmt(seg.piezas_sin_peso) + ' de ' + fmt(seg.piezas_pendientes) + ' piezas sin peso cargado — kg incompleto');
+      }
+      return lineas.length ? lineas : undefined;
     }
   } };
 
   const sinPesoTotal = (d) => (d.programado.piezas_sin_peso || 0) + (d.fundido.piezas_sin_peso || 0);
-  const colorProgramado = print ? '#42a5f5' : '#42a5f5bb';
-  const colorFundido    = print ? '#ffa726' : '#ffa726bb';
+  const colorProgramado = print ? _COLOR_PROGRAMADO_PRINT : _COLOR_PROGRAMADO;
+  const colorFundido    = print ? _COLOR_FUNDIDO_PRINT : _COLOR_FUNDIDO;
 
   return {
     type: 'bar',
@@ -1748,6 +1821,11 @@ img{width:100%;display:block;background:#fff;border:1px solid #ddd;border-radius
 </style></head><body>
 <h1>Pendiente de fundir por material</h1>
 <div class="period"><span class="print-date">Impreso: ${now}</span>${subtitle ? ' &middot; ' + subtitle : ''}</div>
+<div style="display:flex;align-items:center;gap:6px;font-size:10px;color:#888;margin-bottom:10px">
+  <span style="width:9px;height:9px;border-radius:2px;background:${_COLOR_PROGRAMADO_BATIPLANE_PRINT};display:inline-block;flex-shrink:0"></span>
+  <span style="width:9px;height:9px;border-radius:2px;background:${_COLOR_FUNDIDO_BATIPLANE_PRINT};display:inline-block;flex-shrink:0"></span>
+  <span>Batiplane (color más oscuro, dentro de cada barra)</span>
+</div>
 <img src="${imgData}" alt="Pendiente de fundir por material">
 </body></html>`);
   w.document.close();
@@ -2644,13 +2722,11 @@ async function showDashboard() {
         <span>Pendiente de fundir por material</span>
         <div style="display:flex;align-items:baseline;gap:10px">
           <span id="pend-fundir-sub" style="font-size:11px;color:var(--muted);font-weight:400">Cargando&#8230;</span>
-          <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--muted);cursor:pointer;user-select:none">
-            <input type="checkbox" id="pend-fundir-batiplane-chk" onchange="_togglePendFundirBatiplane(this.checked)">Batiplane
-          </label>
           <button class="page-btn" id="pend-fundir-kg-btn" style="font-size:11px;padding:3px 9px" onclick="_togglePendFundirKg()">Ver en kg</button>
           <button class="page-btn" id="pend-fundir-cal-btn" style="font-size:11px;padding:3px 9px" onclick="_togglePendFundirCal()">&#128197; Modo calendario</button>
         </div>
       </div>
+      ${_PEND_FUNDIR_LEYENDA_BATIPLANE_HTML}
       <div class="chart-box"><canvas id="chart-pend-fundir-dash"></canvas></div>
       <div class="pend-fundir-cal" id="cal-pend-fundir-dash" style="display:none"></div>
       <div class="pend-fundir-acciones" style="text-align:right;margin-top:8px;display:flex;justify-content:flex-end;gap:8px">
@@ -7719,13 +7795,11 @@ async function showTrabajos() {
         <span>Pendiente de fundir por material</span>
         <div style="display:flex;align-items:baseline;gap:10px">
           <span id="pend-fundir-sub-tr" style="font-size:11px;color:var(--muted);font-weight:400">Cargando&#8230;</span>
-          <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--muted);cursor:pointer;user-select:none">
-            <input type="checkbox" id="pend-fundir-batiplane-chk" onchange="_togglePendFundirBatiplane(this.checked)">Batiplane
-          </label>
           <button class="page-btn" id="pend-fundir-kg-btn" style="font-size:11px;padding:3px 9px" onclick="_togglePendFundirKg()">Ver en kg</button>
           <button class="page-btn" id="pend-fundir-cal-btn" style="font-size:11px;padding:3px 9px" onclick="_togglePendFundirCal()">&#128197; Modo calendario</button>
         </div>
       </div>
+      ${_PEND_FUNDIR_LEYENDA_BATIPLANE_HTML}
       <div class="chart-box"><canvas id="chart-pend-fundir-tr"></canvas></div>
       <div class="pend-fundir-cal" id="cal-pend-fundir-tr" style="display:none"></div>
       <div class="pend-fundir-acciones" style="text-align:right;margin-top:8px;display:flex;justify-content:flex-end;gap:8px">
