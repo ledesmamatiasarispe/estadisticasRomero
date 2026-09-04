@@ -7391,6 +7391,16 @@ function _kioskGetConfig() {
     };
   } catch(e) { return { interval: 60, rows_per_page: 15, page_interval: 8, enabled: ['dash_vencidos','dash_proximos','dash_entregados','rechazos','evol_bar','evol_pct','evol_prod','ranking_rd','ranking_rep'], slidesMeses: {}, slidesModos: {}, _dfltM: 6 }; }
 }
+// Valor configurado para el modo `key` de una slide (ver KIOSK_SLIDES[].modos),
+// o el primero de sus opciones si no se configuro nada todavia.
+function _kioskModo(slideId, key) {
+  const cfg = _kioskGetConfig();
+  const guardado = cfg.slidesModos?.[slideId]?.[key];
+  if (guardado != null) return guardado;
+  const slide = KIOSK_SLIDES.find(s => s.id === slideId);
+  const modo = slide?.modos?.find(m => m.key === key);
+  return modo?.options?.[0]?.v ?? null;
+}
 function _kioskSaveConfig(interval, enabled, slidesMeses, rows_per_page, page_interval, slidesModos) {
   const cfg = { interval, enabled, slidesMeses, slidesModos: slidesModos || {}, rows_per_page: rows_per_page||15, page_interval: page_interval||8 };
   localStorage.setItem('kiosk_cfg', JSON.stringify(cfg));
@@ -8204,6 +8214,61 @@ function _kioskPageProbeta(slide, rows) {
     </tr></thead><tbody>${tbody}</tbody></table>`);
 }
 
+// ── Tendencia anual (kiosk) ─────────────────────────────────────────────────
+// Igual que en kiosk.html: _renderTendenciaBarras (compartida, ver
+// frontend/js/tendencia.js) sin Curvas ni drill-down mensual -- ninguna otra
+// slide de esta presentación tiene ese nivel de interacción.
+let _kioskTendenciaKg = false;
+let _kioskTendenciaData = null;
+let _kioskTendenciaProyeccion = null;
+
+function _kioskToggleTendenciaKg() {
+  _kioskTendenciaKg = !_kioskTendenciaKg;
+  _renderTendenciaBarras('chart-tendencia-kiosk', _kioskTendenciaData, _kioskTendenciaProyeccion, _kioskTendenciaKg, 'tendencia-kg-btn', null);
+}
+
+function _kioskShellTendencia(slide) {
+  const now = new Date().toLocaleTimeString('es-AR', {hour:'2-digit', minute:'2-digit'});
+  return `<div class="ktv">
+    <div class="ktv-head"><h2>${slide.icon} ${slide.label}</h2>
+      <div class="ktv-ts">Actualizado ${now}</div></div>
+    <div class="card">
+      <div class="card-title">
+        <span>Entregadas / Rechazadas / Devueltas por a&ntilde;o</span>
+        <button class="page-btn" id="tendencia-kg-btn" onclick="_kioskToggleTendenciaKg()">Ver kg</button>
+      </div>
+      <div class="chart-box" style="height:calc(100vh - 260px)"><canvas id="chart-tendencia-kiosk"></canvas></div>
+    </div>
+  </div>`;
+}
+
+// ── Pendiente de fundir (grafico + calendario, kiosk) ───────────────────────
+// Misma tarjeta que kiosk.html -- pend_fundir.js (compartido) hace el resto
+// via los ids/clases de siempre.
+function _kioskShellPendFundir(slide) {
+  const now = new Date().toLocaleTimeString('es-AR', {hour:'2-digit', minute:'2-digit'});
+  return `<div class="ktv">
+    <div class="ktv-head"><h2>${slide.icon} ${slide.label}</h2>
+      <div class="ktv-ts">Actualizado ${now}</div></div>
+    <div class="card">
+      <div class="card-title">
+        <span>Pendiente de fundir por material</span>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span id="kiosk-pend-fundir-sub" style="font-size:13px;color:var(--muted);font-weight:400">Cargando&#8230;</span>
+          <button class="page-btn" id="pend-fundir-kg-btn" onclick="_togglePendFundirKg()">Ver en kg</button>
+          <button class="page-btn" id="pend-fundir-cal-btn" onclick="_togglePendFundirCal()">&#128197; Modo calendario</button>
+        </div>
+      </div>
+      ${_PEND_FUNDIR_LEYENDA_BATIPLANE_HTML}
+      <div class="chart-box" style="height:calc(100vh - 280px)"><canvas id="chart-pend-fundir-kiosk"></canvas></div>
+      <div class="pend-fundir-cal" id="cal-pend-fundir-kiosk" style="display:none"></div>
+      <div class="pend-fundir-acciones">
+        <button class="page-btn" onclick="_imprimirPendienteFundir()">&#128438; Imprimir</button>
+      </div>
+    </div>
+  </div>`;
+}
+
 async function _kioskShowSlide(slide) {
   const main = $id('main');
   if (!main) return;
@@ -8231,6 +8296,36 @@ async function _kioskShowSlide(slide) {
       case 'defectos_rech':   { const m=_sM('defectos_rech');   const d = await _getKioskDefData(m);  html = _kioskPageDefectos(slide, d?.defectos,    'kiosk-def-rech'); afterRender = () => _kioskRenderDefectos('kiosk-def-rech', d?.defectos);    break; }
       case 'defectos_rep':    { const m=_sM('defectos_rep');    const d = await _getKioskDefData(m);  html = _kioskPageDefectos(slide, d?.reparaciones, 'kiosk-def-rep');  afterRender = () => _kioskRenderDefectos('kiosk-def-rep',  d?.reparaciones); break; }
       case 'probeta':         { const m=_sM('probeta');         const d = await api('/api/alertas/probeta_traccion?meses='+m); html = _kioskPageProbeta(slide, d);          break; }
+      case 'pend_fundir_grafico': {
+        const m = _sM('pend_fundir_grafico');
+        html = _kioskShellPendFundir(slide);
+        afterRender = () => {
+          _pendFundirKgMode = _kioskModo('pend_fundir_grafico', 'unidad') === 'kg';
+          _renderPendienteFundirChart('chart-pend-fundir-kiosk', 'kiosk-pend-fundir-sub', m);
+        };
+        break;
+      }
+      case 'pend_fundir_calendario': {
+        const m = _sM('pend_fundir_calendario');
+        html = _kioskShellPendFundir(slide);
+        afterRender = async () => {
+          _pendFundirCalVista = _kioskModo('pend_fundir_calendario', 'vista');
+          await _renderPendienteFundirChart('chart-pend-fundir-kiosk', 'kiosk-pend-fundir-sub', m);
+          await _togglePendFundirCal();
+        };
+        break;
+      }
+      case 'tendencia': {
+        let d, p;
+        try { d = await api('/api/analytics/overview'); } catch(_) { d = null; }
+        try { p = await api('/api/dashboard/proyeccion_pipeline'); } catch(_) { p = null; }
+        _kioskTendenciaData = d?.tendencia || [];
+        _kioskTendenciaProyeccion = p;
+        _kioskTendenciaKg = _kioskModo('tendencia', 'unidad') === 'kg';
+        html = _kioskShellTendencia(slide);
+        afterRender = () => _renderTendenciaBarras('chart-tendencia-kiosk', _kioskTendenciaData, _kioskTendenciaProyeccion, _kioskTendenciaKg, 'tendencia-kg-btn', null);
+        break;
+      }
       default: html = `<div class="ktv"><div class="ktv-head"><h2>${slide.icon} ${slide.label}</h2></div><div style="color:var(--muted);padding:40px">Vista no disponible.</div></div>`;
     }
     if (_kioskActive) {
