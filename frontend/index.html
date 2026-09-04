@@ -2109,48 +2109,13 @@ async function _onTrendRangeChange() {
   }
 }
 
-// Cuánto suman Programado + Fundido a una barra de Entregadas, en la unidad
-// que corresponda -- lo comparten el plugin de la barra fantasma y el
-// tooltip, tanto para la barra anual como para el drill-down mensual.
-function _proyeccionSuma(proyeccion, useKg) {
-  if (!proyeccion) return 0;
-  const { programado, fundido } = proyeccion;
-  return useKg
-    ? (programado.kg || 0) + (fundido.kg || 0)
-    : (programado.piezas || 0) + (fundido.piezas || 0);
-}
-
-// Encima de la barra "Entregadas" de uno o más índices (el año actual en el
-// gráfico anual; en el drill-down mensual, cada mes que tenga Programado o
-// Fundido con esa fecha de entrega): una barra fantasma punteada que llega
-// hasta la proyección de ese punto -- visual, no texto.
-const _trendProyeccionPlugin = {
-  id: 'trendProyeccion',
-  afterDatasetsDraw(chart, args, opts) {
-    if (!opts || !opts.items || !opts.items.length) return;
-    const meta = chart.getDatasetMeta(0); // dataset "Entregadas"
-    const ctx = chart.ctx;
-    ctx.save();
-    ctx.fillStyle = 'rgba(255,167,38,.3)';
-    ctx.strokeStyle = '#ffa726';
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([4, 3]);
-    for (const item of opts.items) {
-      const bar = meta && meta.data[item.index];
-      if (!bar) continue;
-      const proyectado = (item.entregadasActual || 0) + (item.suma || 0);
-      const yTop = chart.scales.y.getPixelForValue(proyectado);
-      if (yTop >= bar.y) continue; // la proyección no supera lo ya entregado
-      const halfW = bar.width / 2;
-      ctx.beginPath();
-      ctx.rect(bar.x - halfW, yTop, bar.width, bar.y - yTop);
-      ctx.fill();
-      ctx.stroke();
-    }
-    ctx.restore();
-  },
-};
-Chart.register(_trendProyeccionPlugin);
+// ── Tendencia anual (Entregadas/Rechazadas/Devueltas) ─────────────────────────
+// La vista de barras es un modulo compartido con kiosk.html -- ver
+// frontend/js/tendencia.js. Curvas y el drill-down mensual (mas abajo) se
+// quedan aca, dependen de _drillMes que usan otros graficos tambien.
+</script>
+<script src="/js/tendencia.js"></script>
+<script>
 
 function _toggleDashKg() {
   _dashKgMode = !_dashKgMode;
@@ -2159,7 +2124,6 @@ function _toggleDashKg() {
 }
 function _renderTrendBarras() {
   if (!_dashTendencia) return;
-  if (S.charts.trend) { S.charts.trend.destroy(); S.charts.trend = null; }
   if (S.charts.trendAcum) { S.charts.trendAcum.destroy(); S.charts.trendAcum = null; }
   const box = $id('trend-acum-box'); if (box) box.style.display = 'none';
   const wrap = $id('trend-drill-wrap');
@@ -2167,63 +2131,12 @@ function _renderTrendBarras() {
 
   const hasKg = _dashTendencia.some(t => (t.kg_entregadas || 0) > 0);
   const useKg = _dashKgMode && hasKg;
-  const sfx   = useKg ? ' (kg)' : '';
-  const kgBtn = $id('trend-kg-btn');
-  if (kgBtn) {
-    kgBtn.style.display = hasKg ? '' : 'none';
-    kgBtn.textContent = useKg ? 'Ver unidades' : 'Ver kg';
-  }
-
-  const canvas = $id('chart-trend'); if (!canvas) return;
-  const opts = chartDefaults();
-  opts.layout = { padding: { top: 30 } }; // lugar para la proyección arriba de la barra del año actual
-  const añoActualTT = String(new Date().getFullYear());
-  const idxActual = _dashTendencia.findIndex(t => t.año === añoActualTT);
-  const entregadasActual = idxActual >= 0
-    ? (useKg ? (_dashTendencia[idxActual].kg_entregadas || 0) : (_dashTendencia[idxActual].entregadas || 0))
-    : 0;
-  opts.plugins.trendProyeccion = (_trendProyeccion && idxActual >= 0)
-    ? { items: [{ index: idxActual, entregadasActual, suma: _proyeccionSuma(_trendProyeccion, useKg) }] }
-    : null;
-  // En la barra Entregadas del año actual, el tooltip suma la proyección
-  // (Programadas) en vez de mostrar solo "Entregadas: X" por defecto.
-  opts.plugins.tooltip = { callbacks: { label: (ctx) => {
-    const label = ctx.dataset.label || '';
-    const val = ctx.parsed.y;
-    if (ctx.datasetIndex === 0 && _trendProyeccion && ctx.dataIndex === idxActual) {
-      const prog = useKg ? _trendProyeccion.programado.kg : _trendProyeccion.programado.piezas;
-      const fmtFn = useKg ? fmtKg : fmt;
-      return label + ': ' + fmtFn(val) + ' + Programadas: ' + fmtFn(prog) + ' = ' + fmtFn(val + prog);
-    }
-    return label + ': ' + (useKg ? fmtKg(val) : fmt(val));
-  } } };
-  opts.onHover = (e, els) => { try { e.native.target.style.cursor = els.length ? 'pointer' : 'default'; } catch(_){} };
-  opts.onClick = async (evt, els) => {
-    if (!els.length) return;
-    const año = _dashTendencia[els[0].index].año;
+  S.charts.trend = _renderTendenciaBarras('chart-trend', _dashTendencia, _trendProyeccion, useKg, 'trend-kg-btn', async (año) => {
     if (!_trendMensualData) {
       try { _trendMensualData = await api(`/api/analytics/tendencia_mensual?desde=${_trendDesde}&hasta=${_trendHasta}`); } catch(_) { return; }
     }
     _drillMes('trend-drill-wrap', año, _trendMensualData, _renderTrendBarras,
       { useKg: _dashKgMode, entKey: 'kg_entregadas', rechKey: 'kg_rechazadas', proyeccion: _trendProyeccion });
-  };
-  S.charts.trend = new Chart(canvas, {
-    type: 'bar',
-    data: {
-      labels: _dashTendencia.map(t => t.año),
-      datasets: useKg ? [
-        { label: 'Entregadas'+sfx, data: _dashTendencia.map(t=>t.kg_entregadas||0), backgroundColor: '#66bb6abb', borderRadius: 4 },
-        { label: 'Rechazadas'+sfx, data: _dashTendencia.map(t=>t.kg_rechazadas||0), backgroundColor: '#ef5350bb', borderRadius: 4 },
-        { label: 'Devueltas'+sfx,  data: _dashTendencia.map(t=>t.kg_devueltas ||0), backgroundColor: '#a78bfabb', borderRadius: 4 },
-        { label: 'Entregadas - Devueltas'+sfx, data: _dashTendencia.map(t=>t.kg_neta||0), backgroundColor: '#42a5f5bb', borderRadius: 4 },
-      ] : [
-        { label: 'Entregadas', data: _dashTendencia.map(t=>t.entregadas), backgroundColor: '#66bb6abb', borderRadius: 4 },
-        { label: 'Rechazadas', data: _dashTendencia.map(t=>t.rechazadas), backgroundColor: '#ef5350bb', borderRadius: 4 },
-        { label: 'Devueltas',  data: _dashTendencia.map(t=>t.devueltas),  backgroundColor: '#a78bfabb', borderRadius: 4 },
-        { label: 'Entregadas - Devueltas', data: _dashTendencia.map(t=>t.neta), backgroundColor: '#42a5f5bb', borderRadius: 4 },
-      ],
-    },
-    options: opts,
   });
 }
 
@@ -7448,8 +7361,12 @@ const KIOSK_SLIDES = [
   { id: 'ranking_rep',     label: 'Ranking Reparadas',       icon: '🔧', group: 'Estad\xedstica', period: true },
   { id: 'defectos_rech',   label: 'Motivos de Rechazo',      icon: '⚠️', group: 'Estad\xedstica', period: true },
   { id: 'defectos_rep',    label: 'Tipos de Reparaci\xf3n',  icon: '🛠️', group: 'Estad\xedstica', period: true },
-  { id: 'pend_fundir_grafico',    label: 'Pendiente de Fundir',    icon: '⚙️', group: 'Producci\xf3n', period: true },
-  { id: 'pend_fundir_calendario', label: 'Calendario de Entregas', icon: '📅', group: 'Producci\xf3n', period: true },
+  { id: 'pend_fundir_grafico',    label: 'Pendiente de Fundir',    icon: '⚙️', group: 'Producci\xf3n', period: true,
+    modos: [{ key: 'unidad', label: 'Unidad', options: [{v:'piezas',l:'Piezas'},{v:'kg',l:'Kg'}] }] },
+  { id: 'pend_fundir_calendario', label: 'Calendario de Entregas', icon: '📅', group: 'Producci\xf3n', period: true,
+    modos: [{ key: 'vista', label: 'Vista', options: [{v:'mes',l:'Mes'},{v:'año',l:'A\xf1o'}] }] },
+  { id: 'tendencia', label: 'Tendencia Anual', icon: '📈', group: 'Producci\xf3n',
+    modos: [{ key: 'unidad', label: 'Unidad', options: [{v:'piezas',l:'Piezas'},{v:'kg',l:'Kg'}] }] },
 ];
 
 let _kioskActive    = false;
@@ -7469,12 +7386,13 @@ function _kioskGetConfig() {
       page_interval: s.page_interval  || 8,
       enabled:       s.enabled        || ['dash_vencidos','dash_proximos','dash_entregados','rechazos','evol_bar','evol_pct','evol_prod','ranking_rd','ranking_rep'],
       slidesMeses:   s.slidesMeses    || {},
+      slidesModos:   s.slidesModos    || {},   // {slideId: {modoKey: valor}} -- ver KIOSK_SLIDES[].modos
       _dfltM:        s.kioskMeses     || 6,
     };
-  } catch(e) { return { interval: 60, rows_per_page: 15, page_interval: 8, enabled: ['dash_vencidos','dash_proximos','dash_entregados','rechazos','evol_bar','evol_pct','evol_prod','ranking_rd','ranking_rep'], slidesMeses: {}, _dfltM: 6 }; }
+  } catch(e) { return { interval: 60, rows_per_page: 15, page_interval: 8, enabled: ['dash_vencidos','dash_proximos','dash_entregados','rechazos','evol_bar','evol_pct','evol_prod','ranking_rd','ranking_rep'], slidesMeses: {}, slidesModos: {}, _dfltM: 6 }; }
 }
-function _kioskSaveConfig(interval, enabled, slidesMeses, rows_per_page, page_interval) {
-  const cfg = { interval, enabled, slidesMeses, rows_per_page: rows_per_page||15, page_interval: page_interval||8 };
+function _kioskSaveConfig(interval, enabled, slidesMeses, rows_per_page, page_interval, slidesModos) {
+  const cfg = { interval, enabled, slidesMeses, slidesModos: slidesModos || {}, rows_per_page: rows_per_page||15, page_interval: page_interval||8 };
   localStorage.setItem('kiosk_cfg', JSON.stringify(cfg));
   api('/api/kiosk/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) }).catch(() => {});
 }
@@ -8354,11 +8272,20 @@ function showPresentacion() {
       <div style="display:flex;flex-direction:column;gap:7px">
         ${slides.map(s => {
           const curM = cfg.slidesMeses?.[s.id] ?? cfg._dfltM ?? 6;
-          const mSel = s.period ? `<select id="kk-meses-${s.id}" style="margin-left:auto;font-size:11px;padding:2px 6px;border:1px solid var(--border);border-radius:4px;background:var(--surface2);color:var(--fg)">${[1,2,3,6,12,24].map(v=>`<option value="${v}"${curM===v?' selected':''}>${v===1?'Este mes':v+'m'}</option>`).join('')}</select>` : '';
+          const selStyleSm = 'font-size:11px;padding:2px 6px;border:1px solid var(--border);border-radius:4px;background:var(--surface2);color:var(--fg)';
+          const mSel = s.period ? `<select id="kk-meses-${s.id}" style="${selStyleSm}">${[1,2,3,6,12,24].map(v=>`<option value="${v}"${curM===v?' selected':''}>${v===1?'Este mes':v+'m'}</option>`).join('')}</select>` : '';
+          // Para graficos con botones de modo (Ver kg, Barras/Curvas, Mes/Año) --
+          // un <select> por modo, para fijar cual se ve en la rotacion del kiosk
+          // en vez de depender de que alguien lo toque en pantalla.
+          const modosSel = (s.modos || []).map(modo => {
+            const curV = cfg.slidesModos?.[s.id]?.[modo.key] ?? modo.options[0]?.v;
+            return `<select id="kk-modo-${s.id}-${modo.key}" title="${modo.label}" style="${selStyleSm}">${modo.options.map(o=>`<option value="${o.v}"${curV===o.v?' selected':''}>${o.l}</option>`).join('')}</select>`;
+          }).join('');
           return `<label style="display:flex;align-items:center;gap:8px;cursor:pointer">
             <input type="checkbox" id="kk-${s.id}" ${cfg.enabled.includes(s.id)?'checked':''}
               style="width:16px;height:16px;cursor:pointer;accent-color:var(--accent)">
-            <span style="font-size:14px;flex:1">${s.icon} ${s.label}</span>${mSel}
+            <span style="font-size:14px;flex:1">${s.icon} ${s.label}</span>
+            ${(mSel || modosSel) ? `<div style="display:flex;align-items:center;gap:6px;margin-left:auto">${mSel}${modosSel}</div>` : ''}
           </label>`;
         }).join('')}
       </div>
@@ -8451,7 +8378,15 @@ function _kioskSaveCfg(startNow = false) {
     const el = $id('kk-meses-' + s.id);
     if (el) slidesMeses[s.id] = parseInt(el.value);
   });
-  _kioskSaveConfig(interval, enabled, slidesMeses, rows_per_page, page_interval);
+  const slidesModos = {};
+  KIOSK_SLIDES.filter(s => s.modos && s.modos.length).forEach(s => {
+    slidesModos[s.id] = {};
+    s.modos.forEach(modo => {
+      const el = $id(`kk-modo-${s.id}-${modo.key}`);
+      if (el) slidesModos[s.id][modo.key] = el.value;
+    });
+  });
+  _kioskSaveConfig(interval, enabled, slidesMeses, rows_per_page, page_interval, slidesModos);
   if (startNow) {
     kioskStart();
   } else {

@@ -6,6 +6,7 @@
 <title>Kiosk — Fundición José Romero</title>
 <script src="/vendor/chart.min.js"></script>
 <script src="/js/pend_fundir.js"></script>
+<script src="/js/tendencia.js"></script>
 <link rel="stylesheet" href="/css/pend_fundir.css">
 <style>
 :root {
@@ -268,8 +269,12 @@ const KIOSK_SLIDES = [
   { id: 'defectos_rech',   label: 'Motivos de Rechazo',   icon: '⚠️', group: 'Estadística', period: true },
   { id: 'defectos_rep',    label: 'Tipos de Reparación',  icon: '🛠️', group: 'Estadística', period: true },
   { id: 'probeta',         label: 'Probetas de Tracción', icon: '🔬', group: 'Calidad',     period: true },
-  { id: 'pend_fundir_grafico',    label: 'Pendiente de Fundir',     icon: '⚙️', group: 'Producción', period: true },
-  { id: 'pend_fundir_calendario', label: 'Calendario de Entregas',  icon: '📅', group: 'Producción', period: true },
+  { id: 'pend_fundir_grafico',    label: 'Pendiente de Fundir',     icon: '⚙️', group: 'Producción', period: true,
+    modos: [{ key: 'unidad', label: 'Unidad', options: [{v:'piezas',l:'Piezas'},{v:'kg',l:'Kg'}] }] },
+  { id: 'pend_fundir_calendario', label: 'Calendario de Entregas',  icon: '📅', group: 'Producción', period: true,
+    modos: [{ key: 'vista', label: 'Vista', options: [{v:'mes',l:'Mes'},{v:'año',l:'Año'}] }] },
+  { id: 'tendencia', label: 'Tendencia Anual', icon: '📈', group: 'Producción',
+    modos: [{ key: 'unidad', label: 'Unidad', options: [{v:'piezas',l:'Piezas'},{v:'kg',l:'Kg'}] }] },
 ];
 
 function _kioskGetConfig() {
@@ -281,11 +286,22 @@ function _kioskGetConfig() {
       page_interval: s.page_interval  || 8,
       enabled:       s.enabled        || ['dash_vencidos','dash_proximos','dash_entregados','rechazos','evol_bar','evol_pct','evol_prod','ranking_rd','ranking_rep'],
       slidesMeses:   s.slidesMeses    || {},
+      slidesModos:   s.slidesModos    || {},   // {slideId: {modoKey: valor}} -- ver KIOSK_SLIDES[].modos
       _dfltM:        s.kioskMeses     || 6,
     };
   } catch(e) {
-    return { interval: 60, rows_per_page: 15, page_interval: 8, enabled: ['dash_vencidos','dash_proximos','dash_entregados','rechazos','evol_bar','evol_pct','evol_prod','ranking_rd','ranking_rep'], slidesMeses: {}, _dfltM: 6 };
+    return { interval: 60, rows_per_page: 15, page_interval: 8, enabled: ['dash_vencidos','dash_proximos','dash_entregados','rechazos','evol_bar','evol_pct','evol_prod','ranking_rd','ranking_rep'], slidesMeses: {}, slidesModos: {}, _dfltM: 6 };
   }
+}
+// Valor configurado para el modo `key` de una slide (ver KIOSK_SLIDES[].modos),
+// o el primero de sus opciones si no se configuro nada todavia.
+function _kioskModo(slideId, key) {
+  const cfg = _kioskGetConfig();
+  const guardado = cfg.slidesModos?.[slideId]?.[key];
+  if (guardado != null) return guardado;
+  const slide = KIOSK_SLIDES.find(s => s.id === slideId);
+  const modo = slide?.modos?.find(m => m.key === key);
+  return modo?.options?.[0]?.v ?? null;
 }
 function _kioskDateQS(meses) {
   const now = new Date();
@@ -1014,6 +1030,39 @@ function _kioskPageProbeta(slide, rows) {
     </tr></thead><tbody>${tbody}</tbody></table>`);
 }
 
+// ── Tendencia anual ──────────────────────────────────────────────────────────
+// Barra anual (Entregadas/Rechazadas/Devueltas + proyeccion) via
+// _renderTendenciaBarras, compartida con index.html -- ver frontend/js/
+// tendencia.js. Sin Curvas ni drill-down mensual: ninguna otra slide de
+// kiosk tiene ese nivel de interaccion, y ambos dependen de piezas de
+// index.html (_drillMes, el selector de rango) que no tiene sentido portar
+// para una pantalla que rota sola. El modo piezas/kg se fija en la config de
+// Presentacion (ver _kioskModo) y ademas queda como boton por si se quiere
+// tocar la pantalla.
+let _kioskTendenciaKg = false;
+let _kioskTendenciaData = null;
+let _kioskTendenciaProyeccion = null;
+
+function _kioskToggleTendenciaKg() {
+  _kioskTendenciaKg = !_kioskTendenciaKg;
+  _renderTendenciaBarras('chart-tendencia-kiosk', _kioskTendenciaData, _kioskTendenciaProyeccion, _kioskTendenciaKg, 'tendencia-kg-btn', null);
+}
+
+function _kioskShellTendencia(slide) {
+  const now = new Date().toLocaleTimeString('es-AR', {hour:'2-digit', minute:'2-digit'});
+  return `<div class="ktv">
+    <div class="ktv-head"><h2>${slide.icon} ${slide.label}</h2>
+      <div class="ktv-ts">Actualizado ${now}</div></div>
+    <div class="card">
+      <div class="card-title">
+        <span>Entregadas / Rechazadas / Devueltas por a&ntilde;o</span>
+        <button class="page-btn" id="tendencia-kg-btn" onclick="_kioskToggleTendenciaKg()">Ver kg</button>
+      </div>
+      <div class="chart-box" style="height:calc(100vh - 260px)"><canvas id="chart-tendencia-kiosk"></canvas></div>
+    </div>
+  </div>`;
+}
+
 // ── Pendiente de fundir (grafico + calendario) ──────────────────────────────────
 // Misma tarjeta que index.html: card-title con el toggle Ver en kg/Modo
 // calendario, .chart-box con el canvas, el div del calendario al lado (oculto
@@ -1074,7 +1123,10 @@ async function _kioskShowSlide(slide) {
       case 'pend_fundir_grafico': {
         const m = _sM('pend_fundir_grafico');
         html = _kioskShellPendFundir(slide);
-        afterRender = () => _renderPendienteFundirChart('chart-pend-fundir-kiosk', 'kiosk-pend-fundir-sub', m);
+        afterRender = () => {
+          _pendFundirKgMode = _kioskModo('pend_fundir_grafico', 'unidad') === 'kg';
+          _renderPendienteFundirChart('chart-pend-fundir-kiosk', 'kiosk-pend-fundir-sub', m);
+        };
         break;
       }
       case 'pend_fundir_calendario': {
@@ -1083,9 +1135,21 @@ async function _kioskShowSlide(slide) {
         // El calendario se apoya en el grafico ya inicializado (_pendFundirIds) --
         // se crea igual que en index.html y despues se togglea a modo calendario.
         afterRender = async () => {
+          _pendFundirCalVista = _kioskModo('pend_fundir_calendario', 'vista');
           await _renderPendienteFundirChart('chart-pend-fundir-kiosk', 'kiosk-pend-fundir-sub', m);
           await _togglePendFundirCal();
         };
+        break;
+      }
+      case 'tendencia': {
+        let d, p;
+        try { d = await api('/api/analytics/overview'); } catch(_) { d = null; }
+        try { p = await api('/api/dashboard/proyeccion_pipeline'); } catch(_) { p = null; }
+        _kioskTendenciaData = d?.tendencia || [];
+        _kioskTendenciaProyeccion = p;
+        _kioskTendenciaKg = _kioskModo('tendencia', 'unidad') === 'kg';
+        html = _kioskShellTendencia(slide);
+        afterRender = () => _renderTendenciaBarras('chart-tendencia-kiosk', _kioskTendenciaData, _kioskTendenciaProyeccion, _kioskTendenciaKg, 'tendencia-kg-btn', null);
         break;
       }
       default: html = `<div class="ktv"><div class="ktv-head"><h2>${slide.icon} ${slide.label}</h2></div><div style="color:var(--muted);padding:40px">Vista no disponible.</div></div>`;
