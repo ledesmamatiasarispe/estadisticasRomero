@@ -463,6 +463,18 @@ def _seed_lookups():
         ('{"interval":60,"enabled":["dash_vencidos","dash_proximos","dash_entregados","rechazos","evol_bar","evol_pct","evol_prod","ranking_rd","ranking_rep"]}',)
     )
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS _launcher_config (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
+    # launcher.py lee esta tabla directo con sqlite3 (corre antes de que este
+    # servidor exista), asi que el toggle de Administracion pega en el proximo
+    # arranque sin depender de la API.
+    conn.execute(
+        "INSERT OR IGNORE INTO _launcher_config (key, value) VALUES ('auto_update_enabled', '1')"
+    )
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS _usuarios (
             legajo        INTEGER PRIMARY KEY,
             nombre        TEXT NOT NULL,
@@ -526,6 +538,17 @@ def _seed_lookups():
             llegada_tarde     INTEGER NOT NULL DEFAULT 0,
             retiro_anticipado INTEGER NOT NULL DEFAULT 0,
             UNIQUE(access_id, fecha)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _produccion_moldeo (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha             TEXT    NOT NULL,
+            trabajo_id        INTEGER NOT NULL,
+            operario_id       INTEGER NOT NULL,
+            cantidad_cajas    INTEGER NOT NULL,
+            creado_por_legajo INTEGER,
+            creado_en         TEXT    NOT NULL
         )
     """)
     conn.execute("""
@@ -981,6 +1004,36 @@ def admin_secciones(admin: dict = Depends(_require_admin)):
     return _ALL_SECCIONES
 
 
+# ── Admin: launcher (auto-actualización) ───────────────────────────────────────
+
+@app.get("/api/launcher/config")
+def get_launcher_config(admin: dict = Depends(_require_admin)):
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT value FROM _launcher_config WHERE key = 'auto_update_enabled'"
+        ).fetchone()
+        return {"auto_update_enabled": row is None or row["value"] == "1"}
+    finally:
+        conn.close()
+
+
+@app.put("/api/launcher/config")
+async def put_launcher_config(request: Request, admin: dict = Depends(_require_admin)):
+    body = await request.json()
+    enabled = bool(body.get("auto_update_enabled", True))
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO _launcher_config (key, value) VALUES ('auto_update_enabled', ?)",
+            ("1" if enabled else "0",),
+        )
+        conn.commit()
+        return {"auto_update_enabled": enabled}
+    finally:
+        conn.close()
+
+
 @app.get("/api/tables")
 def get_tables():
     conn = get_db()
@@ -1304,9 +1357,9 @@ _COD_CLIENTE_BATIPLANE = "BA3"
 
 @app.get("/api/dashboard/pendiente_fundir")
 def dashboard_pendiente_fundir(meses: int = 6):
-    """Pendiente de fundir por material, separado en Programado (nada fundido
-    todavía, falta fundir) y Fundido (ya fundido, falta entregar) -- mismo
-    criterio de "pendiente" por estado que dashboard_proyeccion_pipeline, acá
+    """Pendiente de fundir por material para todas las OTs activas, separado
+    en Programado (nada fundido todavía) y Fundido (ya fundido, falta entregar).
+    Usa el mismo criterio por estado que dashboard_proyeccion_pipeline, acá
     agrupado por material además de por estado. Cada campo programado/fundido
     trae además batiplane: el mismo total pero solo la porción de Batiplane
     (BA3) -- su volumen aparte se resalta con otro color en vez de excluirse,
@@ -1324,7 +1377,7 @@ def dashboard_pendiente_fundir(meses: int = 6):
                     COALESCE(tm.sobrenombrematerial, t."códdeagregados") AS material,
                     t.estadotrabajo AS estado,
                     CASE WHEN upper(p."códigocliente") = ? THEN 1 ELSE 0 END AS es_batiplane,
-                    CASE WHEN upper(t.estadotrabajo) = 'P'
+                    CASE WHEN upper(t.estadotrabajo) IN ('I', 'P')
                          THEN (t.cantidad - COALESCE(t.cantidadfundida, 0))
                          ELSE COALESCE(t.cantidadproducida, 0) END AS pendientes,
                     np.nombrepieza AS nombrepieza,
@@ -1337,11 +1390,13 @@ def dashboard_pendiente_fundir(meses: int = 6):
                 LEFT JOIN NombreDePiezas np ON np.id = idp.idpieza
                 LEFT JOIN PesosDePiezas pp  ON pp.códpieza = t.idpesopieza
                 LEFT JOIN piezas_peso pz    ON pz.pieza_id = np.id
-                WHERE upper(t.estadotrabajo) IN ('P', 'F')
+                WHERE upper(t.estadotrabajo) IN ('I', 'P', 'F')
                   AND upper(p.estadopedido)  NOT IN ('K','D')
                   AND upper(idp.estadoitem)  NOT IN ('K','D')
                   AND t."códdeagregados" NOT IN ('--', '4', 'Ar', 'ar', 'AR')
-                  AND COALESCE(t.fechacargaot, p.fechapedido) >= date('now', ? || ' months')
+                  AND (upper(t.estadotrabajo) = 'F'
+                       OR t.fechaprevista IS NULL
+                       OR date(t.fechaprevista) >= date('now', '-1 month'))
             )
             SELECT
                 codigo,
@@ -1359,7 +1414,7 @@ def dashboard_pendiente_fundir(meses: int = 6):
             FROM base
             GROUP BY codigo, estado, es_batiplane
             ORDER BY codigo
-        """, (_COD_CLIENTE_BATIPLANE, f"-{meses}")).fetchall()
+        """, (_COD_CLIENTE_BATIPLANE,)).fetchall()
 
         def vacio():
             return {"ots": 0, "piezas_pendientes": 0, "kg_pendientes": 0, "ots_sin_peso": 0, "piezas_sin_peso": 0}
@@ -1369,9 +1424,9 @@ def dashboard_pendiente_fundir(meses: int = 6):
             d = dict(r)
             m = por_material.setdefault(d["codigo"], {
                 "codigo": d["codigo"], "material": d["material"],
-                "programado": vacio(), "fundido": vacio(),
+                "inicial": vacio(), "programado": vacio(), "fundido": vacio(),
             })
-            campo = "programado" if d["estado"] == "P" else "fundido"
+            campo = {"I": "inicial", "P": "programado", "F": "fundido"}[d["estado"]]
             seg = m[campo]
             seg["ots"] += d["ots"]
             seg["piezas_pendientes"] += d["piezas_pendientes"]
@@ -1385,11 +1440,11 @@ def dashboard_pendiente_fundir(meses: int = 6):
                 }
 
         for m in por_material.values():
-            for campo in ("programado", "fundido"):
+            for campo in ("inicial", "programado", "fundido"):
                 m[campo].setdefault("batiplane", {"ots": 0, "piezas_pendientes": 0, "kg_pendientes": 0})
 
         resultado = list(por_material.values())
-        resultado.sort(key=lambda m: m["programado"]["ots"] + m["fundido"]["ots"], reverse=True)
+        resultado.sort(key=lambda m: m["inicial"]["ots"] + m["programado"]["ots"] + m["fundido"]["ots"], reverse=True)
         return resultado
     finally:
         conn.close()
@@ -1412,7 +1467,7 @@ def dashboard_pendiente_fundir_calendario(meses: int = 6):
                     t.estadotrabajo AS estado,
                     date(t.fechaprevista) AS fecha,
                     CASE WHEN upper(p."códigocliente") = ? THEN 1 ELSE 0 END AS es_batiplane,
-                    CASE WHEN upper(t.estadotrabajo) = 'P'
+                    CASE WHEN upper(t.estadotrabajo) IN ('I', 'P')
                          THEN (t.cantidad - COALESCE(t.cantidadfundida, 0))
                          ELSE COALESCE(t.cantidadproducida, 0) END AS pendientes,
                     np.nombrepieza AS nombrepieza,
@@ -1424,11 +1479,14 @@ def dashboard_pendiente_fundir_calendario(meses: int = 6):
                 LEFT JOIN NombreDePiezas np ON np.id = idp.idpieza
                 LEFT JOIN PesosDePiezas pp  ON pp.códpieza = t.idpesopieza
                 LEFT JOIN piezas_peso pz    ON pz.pieza_id = np.id
-                WHERE upper(t.estadotrabajo) IN ('P', 'F')
+                WHERE upper(t.estadotrabajo) IN ('I', 'P', 'F')
                   AND upper(p.estadopedido)  NOT IN ('K','D')
                   AND upper(idp.estadoitem)  NOT IN ('K','D')
                   AND t."códdeagregados" NOT IN ('--', '4', 'Ar', 'ar', 'AR')
                   AND COALESCE(t.fechacargaot, p.fechapedido) >= date('now', ? || ' months')
+                  AND (upper(t.estadotrabajo) = 'F'
+                       OR t.fechaprevista IS NULL
+                       OR date(t.fechaprevista) >= date('now', '-1 month'))
             )
         """
         kg_expr = """ROUND(SUM(pendientes *
@@ -1455,7 +1513,7 @@ def dashboard_pendiente_fundir_calendario(meses: int = 6):
             return {"ots": 0, "piezas_pendientes": 0, "kg_pendientes": 0}
 
         def acumular(destino, d):
-            campo = "programado" if d["estado"] == "P" else "fundido"
+            campo = {"I": "inicial", "P": "programado", "F": "fundido"}[d["estado"]]
             seg = destino[campo]
             seg["ots"] += d["ots"]
             seg["piezas_pendientes"] += d["piezas_pendientes"]
@@ -1469,15 +1527,15 @@ def dashboard_pendiente_fundir_calendario(meses: int = 6):
         por_fecha: dict[str, dict] = {}
         for r in rows:
             d = dict(r)
-            dia = por_fecha.setdefault(d["fecha"], {"fecha": d["fecha"], "programado": vacio(), "fundido": vacio()})
+            dia = por_fecha.setdefault(d["fecha"], {"fecha": d["fecha"], "inicial": vacio(), "programado": vacio(), "fundido": vacio()})
             acumular(dia, d)
 
-        sin_fecha = {"programado": vacio(), "fundido": vacio()}
+        sin_fecha = {"inicial": vacio(), "programado": vacio(), "fundido": vacio()}
         for r in sin_fecha_rows:
             acumular(sin_fecha, dict(r))
 
         for dia in list(por_fecha.values()) + [sin_fecha]:
-            for campo in ("programado", "fundido"):
+            for campo in ("inicial", "programado", "fundido"):
                 dia[campo].setdefault("batiplane", {"ots": 0, "piezas_pendientes": 0, "kg_pendientes": 0})
 
         return {"dias": sorted(por_fecha.values(), key=lambda x: x["fecha"]), "sin_fecha": sin_fecha}
@@ -1491,26 +1549,33 @@ def dashboard_pendiente_fundir_detalle(
     codigo: Optional[str] = Query(None),
     estado: Optional[str] = Query(None),
     fecha: Optional[str] = Query(None),
+    olvidadas: bool = Query(False),
 ):
     """Lista de OTs (Trabajos) individuales detras de un numero de
     dashboard_pendiente_fundir (codigo+estado, clic en una barra) o de
     dashboard_pendiente_fundir_calendario (fecha, clic en un dia del
     calendario -- sin estado trae Programadas y Fundidas juntas, cada fila
-    ya dice la suya). Mismo criterio de "pendiente" y misma ventana de
-    antigüedad que esos dos endpoints, para que la lista SIEMPRE coincida
+    ya dice la suya). Usa el mismo criterio de OT activa que los gráficos,
+    para que la lista SIEMPRE coincida
     exacto con el total que el usuario tocó. Incluye Batiplane -- cada fila
     ya dice de qué cliente es (codigo_cliente/cliente_nombre)."""
-    meses = max(1, min(meses, 60))
     conn = get_db()
     try:
         where = [
-            "upper(t.estadotrabajo) IN ('P', 'F')",
+            "upper(t.estadotrabajo) IN ('I', 'P', 'F')",
             "upper(p.estadopedido)  NOT IN ('K','D')",
             "upper(idp.estadoitem)  NOT IN ('K','D')",
             "t.\"códdeagregados\" NOT IN ('--', '4', 'Ar', 'ar', 'AR')",
-            "COALESCE(t.fechacargaot, p.fechapedido) >= date('now', ? || ' months')",
         ]
-        params: list = [f"-{meses}"]
+        params: list = []
+        if olvidadas:
+            where.extend([
+                "upper(t.estadotrabajo) = 'P'",
+                "t.fechaprevista IS NOT NULL",
+                "date(t.fechaprevista) < date('now', '-1 month')",
+            ])
+        else:
+            where.append("(upper(t.estadotrabajo) = 'F' OR t.fechaprevista IS NULL OR date(t.fechaprevista) >= date('now', '-1 month'))")
         if codigo:
             where.append('t."códdeagregados" = ?')
             params.append(codigo)
@@ -1535,7 +1600,7 @@ def dashboard_pendiente_fundir_detalle(
                     p.códigocliente AS codigo_cliente,
                     COALESCE(c.nombrefantasía, c.nombrecliente) AS cliente_nombre,
                     COALESCE(np.coefcompl, 1) AS coefcompl,
-                    CASE WHEN upper(t.estadotrabajo) = 'P'
+                    CASE WHEN upper(t.estadotrabajo) IN ('I', 'P')
                          THEN (t.cantidad - COALESCE(t.cantidadfundida, 0))
                          ELSE COALESCE(t.cantidadproducida, 0) END AS pendientes,
                     CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END AS peso_efectivo
@@ -1585,7 +1650,7 @@ _CTE_PROYECCION_BASE = """
             t.estadotrabajo AS estado,
             strftime('%Y', t.fechaprevista) AS año,
             strftime('%m', t.fechaprevista) AS mes,
-            CASE WHEN upper(t.estadotrabajo) = 'P'
+            CASE WHEN upper(t.estadotrabajo) IN ('I', 'P')
                  THEN (t.cantidad - COALESCE(t.cantidadfundida, 0))
                  ELSE COALESCE(t.cantidadproducida, 0) END AS pendientes,
             np.nombrepieza AS nombrepieza,
@@ -1597,10 +1662,13 @@ _CTE_PROYECCION_BASE = """
         LEFT JOIN NombreDePiezas np ON np.id = idp.idpieza
         LEFT JOIN PesosDePiezas pp  ON pp.códpieza = t.idpesopieza
         LEFT JOIN piezas_peso pz    ON pz.pieza_id = np.id
-        WHERE upper(t.estadotrabajo) IN ('P', 'F')
+        WHERE upper(t.estadotrabajo) IN ('I', 'P', 'F')
           AND upper(p.estadopedido)  NOT IN ('K','D')
           AND upper(idp.estadoitem)  NOT IN ('K','D')
           AND t."códdeagregados" NOT IN ('--', '4', 'Ar', 'ar', 'AR')
+          AND (upper(t.estadotrabajo) = 'F'
+               OR t.fechaprevista IS NULL
+               OR date(t.fechaprevista) >= date('now', '-1 month'))
     )
 """
 _KG_EXPR = """ROUND(SUM(pendientes *
@@ -1611,9 +1679,9 @@ _KG_EXPR = """ROUND(SUM(pendientes *
 
 @app.get("/api/dashboard/proyeccion_pipeline")
 def dashboard_proyeccion_pipeline():
-    """OTs Programadas y Fundidas (todo el pipeline activo, sin ventana de meses --
-    es una foto de hoy, no algo historico) con su kg, mismo peso_efectivo que
-    dashboard_pendiente_fundir. El agregado alimenta la tarjeta KPI y la barra
+    """Todas las OTs activas Programadas y Fundidas, sin límite de antigüedad,
+    con idéntico criterio de estado y peso efectivo que dashboard_pendiente_fundir.
+    El agregado alimenta la tarjeta KPI y la barra
     anual de Tendencia; por_mes (agrupado por año/mes de fechaprevista, la OT
     puede ser de cualquier año si esta atrasada) alimenta el drill-down mensual,
     para poner cada Programada/Fundida en su mes de entrega en vez de todas
@@ -1637,6 +1705,7 @@ def dashboard_proyeccion_pipeline():
         """).fetchall()
 
         return {
+            "inicial":    por_estado.get("I", vacio),
             "programado": por_estado.get("P", vacio),
             "fundido":    por_estado.get("F", vacio),
             "por_mes":    [dict(r) for r in mes_rows],
@@ -5195,6 +5264,133 @@ def get_trabajo_detail(trabajo_id: int):
             "produccion": dict(prod) if prod else None,
             "peso_molde": peso_molde,
         }
+    finally:
+        conn.close()
+
+
+# ── Trabajos: carga de moldeo diario ────────────────────────────────────────
+# _produccion_moldeo es una tabla propia (no sincronizada desde Access, sobrevive
+# al sync igual que _personal_ausentismo): cajas moldeadas por operario/OT/día.
+# Access nunca capturó esto -- EstadisticaMoldeo solo tiene timestamps de inicio/
+# fin de moldeo por OT, sin cantidad ni operario.
+
+def _moldeo_row(conn: sqlite3.Connection, entry_id: int) -> Optional[dict]:
+    r = conn.execute("""
+        SELECT m.id, m.fecha, m.trabajo_id, m.operario_id, m.cantidad_cajas,
+               m.creado_por_legajo, m.creado_en,
+               v.apellidoynombre AS operario_nombre,
+               np.nombrepieza, np.códigopiezapuestoporcliente AS codigo_pieza
+        FROM _produccion_moldeo m
+        LEFT JOIN _v_responsables v      ON v.codigoresponsable = m.operario_id
+        LEFT JOIN Trabajos t             ON t.iditemtrabajo = m.trabajo_id
+        LEFT JOIN ItemDetallePedido idp  ON t.iditempedido = idp.iditempedido
+        LEFT JOIN NombreDePiezas np      ON idp.idpieza = np.id
+        WHERE m.id = ?
+    """, (entry_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def _moldeo_validar_body(conn: sqlite3.Connection, body: dict) -> tuple:
+    fecha = str(body.get("fecha") or "").strip()
+    if not fecha:
+        raise HTTPException(400, "fecha requerida (YYYY-MM-DD)")
+    try:
+        trabajo_id = int(body.get("trabajo_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "OT requerida")
+    try:
+        operario_id = int(body.get("operario_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "operario requerido")
+    try:
+        cantidad = int(body.get("cantidad_cajas"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "cantidad de cajas inválida")
+    if cantidad <= 0:
+        raise HTTPException(400, "la cantidad de cajas debe ser mayor a 0")
+    if not conn.execute("SELECT 1 FROM Trabajos WHERE iditemtrabajo=?", (trabajo_id,)).fetchone():
+        raise HTTPException(404, f"OT {trabajo_id} no encontrada")
+    if not conn.execute("SELECT 1 FROM _v_responsables WHERE codigoresponsable=?", (operario_id,)).fetchone():
+        raise HTTPException(404, f"Operario {operario_id} no encontrado")
+    return fecha, trabajo_id, operario_id, cantidad
+
+
+@app.get("/api/produccion_moldeo")
+def get_produccion_moldeo(
+    fecha:       Optional[str] = Query(None),
+    trabajo_id:  Optional[int] = Query(None),
+    operario_id: Optional[int] = Query(None),
+    user: dict = Depends(_get_auth_user),
+):
+    conn = get_db()
+    try:
+        where, params = [], []
+        if fecha:       where.append("m.fecha = ?");       params.append(fecha)
+        if trabajo_id:  where.append("m.trabajo_id = ?");  params.append(trabajo_id)
+        if operario_id: where.append("m.operario_id = ?"); params.append(operario_id)
+        wsql = ("WHERE " + " AND ".join(where)) if where else ""
+        rows = conn.execute(f"""
+            SELECT m.id, m.fecha, m.trabajo_id, m.operario_id, m.cantidad_cajas,
+                   m.creado_por_legajo, m.creado_en,
+                   v.apellidoynombre AS operario_nombre,
+                   np.nombrepieza, np.códigopiezapuestoporcliente AS codigo_pieza
+            FROM _produccion_moldeo m
+            LEFT JOIN _v_responsables v      ON v.codigoresponsable = m.operario_id
+            LEFT JOIN Trabajos t             ON t.iditemtrabajo = m.trabajo_id
+            LEFT JOIN ItemDetallePedido idp  ON t.iditempedido = idp.iditempedido
+            LEFT JOIN NombreDePiezas np       ON idp.idpieza = np.id
+            {wsql}
+            ORDER BY m.id DESC
+        """, params).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@app.post("/api/produccion_moldeo")
+async def post_produccion_moldeo(req: Request, user: dict = Depends(_get_auth_user)):
+    body = await req.json()
+    conn = get_db()
+    try:
+        fecha, trabajo_id, operario_id, cantidad = _moldeo_validar_body(conn, body)
+        conn.execute(
+            "INSERT INTO _produccion_moldeo "
+            "(fecha, trabajo_id, operario_id, cantidad_cajas, creado_por_legajo, creado_en) "
+            "VALUES (?,?,?,?,?,?)",
+            (fecha, trabajo_id, operario_id, cantidad, user["legajo"], datetime.now().isoformat())
+        )
+        conn.commit()
+        new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        return _moldeo_row(conn, new_id)
+    finally:
+        conn.close()
+
+
+@app.put("/api/produccion_moldeo/{entry_id}")
+async def put_produccion_moldeo(entry_id: int, req: Request, user: dict = Depends(_get_auth_user)):
+    body = await req.json()
+    conn = get_db()
+    try:
+        if not conn.execute("SELECT 1 FROM _produccion_moldeo WHERE id=?", (entry_id,)).fetchone():
+            raise HTTPException(404, "Registro no encontrado")
+        fecha, trabajo_id, operario_id, cantidad = _moldeo_validar_body(conn, body)
+        conn.execute(
+            "UPDATE _produccion_moldeo SET fecha=?, trabajo_id=?, operario_id=?, cantidad_cajas=? WHERE id=?",
+            (fecha, trabajo_id, operario_id, cantidad, entry_id)
+        )
+        conn.commit()
+        return _moldeo_row(conn, entry_id)
+    finally:
+        conn.close()
+
+
+@app.delete("/api/produccion_moldeo/{entry_id}")
+def delete_produccion_moldeo(entry_id: int, user: dict = Depends(_get_auth_user)):
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM _produccion_moldeo WHERE id=?", (entry_id,))
+        conn.commit()
+        return {"ok": True}
     finally:
         conn.close()
 

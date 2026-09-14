@@ -26,6 +26,10 @@ function _pendFundirQS(extra) { return new URLSearchParams(extra).toString(); }
 // asi ninguna OT pendiente de fundir queda fuera de la vista por defecto.
 const _COLOR_PROGRAMADO           = '#42a5f5bb';
 const _COLOR_PROGRAMADO_PRINT     = '#42a5f5';
+const _COLOR_INICIAL              = '#9575cdbb';
+const _COLOR_INICIAL_PRINT        = '#7e57c2';
+const _COLOR_INICIAL_BATIPLANE       = '#5e35b1';
+const _COLOR_INICIAL_BATIPLANE_PRINT = '#4527a0';
 const _COLOR_PROGRAMADO_BATIPLANE       = '#00897b';
 const _COLOR_PROGRAMADO_BATIPLANE_PRINT = '#00695c';
 const _COLOR_FUNDIDO               = '#ffa726bb';
@@ -36,6 +40,7 @@ const _COLOR_FUNDIDO_BATIPLANE_PRINT = '#bf360c';
 const _PEND_FUNDIR_LEYENDA_BATIPLANE_HTML = `
   <div style="display:flex;align-items:center;gap:10px;font-size:10px;color:var(--muted);margin:2px 0 8px">
     <span style="display:inline-flex;align-items:center;gap:4px">
+      <span style="width:9px;height:9px;border-radius:2px;background:${_COLOR_INICIAL_BATIPLANE};display:inline-block;flex-shrink:0"></span>
       <span style="width:9px;height:9px;border-radius:2px;background:${_COLOR_PROGRAMADO_BATIPLANE};display:inline-block;flex-shrink:0"></span>
       <span style="width:9px;height:9px;border-radius:2px;background:${_COLOR_FUNDIDO_BATIPLANE};display:inline-block;flex-shrink:0"></span>
       Batiplane (color más oscuro, dentro de cada barra)
@@ -141,11 +146,14 @@ function _pendFundirCalImprimirBtnHtml() {
 
 function _pendFundirCalSinFechaHtml() {
   const sf = _pendFundirCalData.sin_fecha;
+  const sfIni = sf && sf.inicial.ots;
   const sfProg = sf && sf.programado.ots;
   const sfFund = sf && sf.fundido.ots;
-  if (!sfProg && !sfFund) return '';
+  if (!sfIni && !sfProg && !sfFund) return '';
   return `<div style="font-size:11px;color:var(--muted);margin-top:10px">
       &#9888; Sin fecha de entrega cargada:
+      ${sfIni ? fmt(sf.inicial.ots) + ' OT iniciales (' + fmtKg(sf.inicial.kg_pendientes) + ')' : ''}
+      ${sfIni && (sfProg || sfFund) ? ' &middot; ' : ''}
       ${sfProg ? fmt(sf.programado.ots) + ' OT programadas (' + fmtKg(sf.programado.kg_pendientes) + ')' : ''}
       ${sfProg && sfFund ? ' &middot; ' : ''}
       ${sfFund ? fmt(sf.fundido.ots) + ' OT fundidas (' + fmtKg(sf.fundido.kg_pendientes) + ')' : ''}
@@ -199,11 +207,12 @@ function _renderPendFundirCalendarioMensual(el) {
     const fechaStr = _fechaISO(new Date(año, mes, dia));
     const d = porFecha.get(fechaStr);
     const esHoy = fechaStr === hoyStr;
-    const vencida = fechaStr < hoyStr && d && d.programado.ots > 0;
-    const tieneDatos = d && (d.programado.ots || d.fundido.ots);
+    const vencida = fechaStr < hoyStr && d && (d.inicial.ots > 0 || d.programado.ots > 0);
+    const tieneDatos = d && (d.inicial.ots || d.programado.ots || d.fundido.ots);
     const clickAttr = tieneDatos ? ` style="cursor:pointer" onclick="_pendFundirCalAbrirDia('${fechaStr}')"` : '';
     celdas += `<div class="cal-celda${esHoy ? ' cal-hoy' : ''}${vencida ? ' cal-vencida' : ''}"${clickAttr}>
       <div class="cal-num">${dia}</div>
+      ${d ? _pendFundirCalBadgeHtml(_pendFundirCalNormSeg(d.inicial), 'cal-ini', 'Inicial') : ''}
       ${d ? _pendFundirCalBadgeHtml(_pendFundirCalNormSeg(d.programado), 'cal-prog', 'Programado') : ''}
       ${d ? _pendFundirCalBadgeHtml(_pendFundirCalNormSeg(d.fundido), 'cal-fund', 'Fundido') : ''}
     </div>`;
@@ -245,7 +254,7 @@ function _pendFundirCalAgruparAnual(año) {
       totalDias,
       semanas: rangos.map(([diaMin, diaMax]) => ({
         diaMin, diaMax, vencido: false,
-        programado: { ots: 0, kg: 0, batOts: 0, batKg: 0 }, fundido: { ots: 0, kg: 0, batOts: 0, batKg: 0 },
+        inicial: { ots: 0, kg: 0, batOts: 0, batKg: 0 }, programado: { ots: 0, kg: 0, batOts: 0, batKg: 0 }, fundido: { ots: 0, kg: 0, batOts: 0, batKg: 0 },
       })),
       vencido: false,
     };
@@ -261,9 +270,10 @@ function _pendFundirCalAgruparAnual(año) {
       seg.batOts += (raw.batiplane && raw.batiplane.ots) || 0;
       seg.batKg  += (raw.batiplane && raw.batiplane.kg_pendientes) || 0;
     };
+    acumular(sem.inicial, d.inicial);
     acumular(sem.programado, d.programado);
     acumular(sem.fundido, d.fundido);
-    if (d.fecha < hoyStr && d.programado.ots > 0) { sem.vencido = true; mesInfo.vencido = true; }
+    if (d.fecha < hoyStr && (d.inicial.ots > 0 || d.programado.ots > 0)) { sem.vencido = true; mesInfo.vencido = true; }
   });
   return meses;
 }
@@ -274,17 +284,18 @@ function _renderPendFundirCalendarioAnual(el) {
 
   const celdas = _CAL_MESES.map((nombre, i) => {
     const mesInfo = meses[i];
-    const tieneDatos = mesInfo.semanas.some(sem => sem.programado.ots || sem.fundido.ots);
+    const tieneDatos = mesInfo.semanas.some(sem => sem.inicial.ots || sem.programado.ots || sem.fundido.ots);
     const filas = mesInfo.semanas.map((sem) => {
       const rango = sem.diaMin === sem.diaMax ? `${sem.diaMin}` : `${sem.diaMin}-${sem.diaMax}`;
       return `<tr class="${sem.vencido ? 'cal-semana-vencida' : ''}">
         <td class="cal-mes-td-sem">${rango}</td>
+        <td><div class="cal-mes-td-badges">${_pendFundirCalBadgeHtml(sem.inicial, 'cal-ini', 'Inicial')}</div></td>
         <td><div class="cal-mes-td-badges">${_pendFundirCalBadgeHtml(sem.programado, 'cal-prog', 'Programado')}</div></td>
         <td><div class="cal-mes-td-badges">${_pendFundirCalBadgeHtml(sem.fundido, 'cal-fund', 'Fundido')}</div></td>
       </tr>`;
     }).join('');
     const tabla = tieneDatos ? `<table class="cal-mes-tabla">
-      <thead><tr><th>Sem.</th><th>Programado</th><th>Fundido</th></tr></thead>
+      <thead><tr><th>Sem.</th><th>Inicial</th><th>Programado</th><th>Fundido</th></tr></thead>
       <tbody>${filas}</tbody>
     </table>` : '<div class="cal-mes-vacio">&mdash;</div>';
     return `<div class="cal-mes-celda${mesInfo.vencido ? ' cal-vencida' : ''}" onclick="_pendFundirCalIrAMes(${i})">
@@ -421,11 +432,13 @@ ${cuerpo}
 // un dia de calendario (fecha, sin estado -- trae Programadas y Fundidas
 // juntas, cada fila con la suya) -- mismo endpoint para los dos casos.
 let _pendFundirDetalleRows = [];
+let _pendFundirDetalleTitulo = 'OTs';
 
 async function _abrirPendFundirDetalle(titulo, filtros) {
   const modal = $id('pend-fundir-detalle-modal');
   const body = $id('pend-fundir-detalle-modal-body');
   const tituloEl = $id('pend-fundir-detalle-titulo');
+  _pendFundirDetalleTitulo = titulo || 'OTs';
   if (tituloEl) tituloEl.textContent = titulo;
   if (modal) modal.classList.add('open');
   if (body) body.innerHTML = '<div class="loading">Cargando...</div>';
@@ -466,6 +479,44 @@ async function _abrirPendFundirDetalle(titulo, filtros) {
         </tbody>
       </table>
     </div>`;
+}
+
+function _imprimirPendFundirDetalle() {
+  const rows = _pendFundirDetalleRows;
+  if (!rows.length) return;
+  const now = new Date().toLocaleString('es-AR');
+  const totalPz = rows.reduce((s, r) => s + (r.pendientes || 0), 0);
+  const totalKg = rows.reduce((s, r) => s + (r.kg_pendientes || 0), 0);
+  const cuerpo = rows.map(r => `
+    <tr>
+      <td><strong>${String(r.ot_id).padStart(6, '0')}</strong></td>
+      <td>${r.estado_label || r.estado || '—'}</td>
+      <td>${r.nombrepieza || '—'}<div class="sub">${r.codigo_pieza || ''}</div></td>
+      <td>${r.material || '—'}</td>
+      <td>${r.cliente_nombre || '—'}<div class="sub">${r.codigo_cliente || ''}</div></td>
+      <td class="num">${fmt(r.pendientes)}</td>
+      <td class="num">${r.kg_pendientes != null ? fmtKg(r.kg_pendientes) : '—'}</td>
+      <td>${r.fechaprevista ? r.fechaprevista.slice(0, 10) : '—'}</td>
+      <td class="obs"></td>
+    </tr>`).join('');
+
+  const w = window.open('', '_blank', 'width=1100,height=760,scrollbars=yes');
+  if (!w) { alert('Permití ventanas emergentes para imprimir.'); return; }
+  w.document.open();
+  w.document.write(`<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
+<title>${_pendFundirDetalleTitulo}</title><style>
+*{box-sizing:border-box}body{font-family:Arial,sans-serif;color:#111;padding:18px;font-size:10px}
+h1{font-size:17px;margin:0 0 4px}.resumen{color:#555;margin-bottom:14px}
+table{width:100%;border-collapse:collapse}th{background:#eee;text-align:left;font-size:9px;text-transform:uppercase}
+th,td{border:1px solid #ccc;padding:5px;vertical-align:top}.num{text-align:right;white-space:nowrap}.sub{font-size:8px;color:#666;margin-top:2px}.obs{min-width:90px}
+@media print{body{padding:0}@page{size:A4 landscape;margin:10mm}}
+</style></head><body>
+<h1>${_pendFundirDetalleTitulo}</h1>
+<div class="resumen">Impreso: ${now} · ${fmt(rows.length)} OTs · ${fmt(totalPz)} piezas · ${fmtKg(totalKg)}</div>
+<table><thead><tr><th>OT</th><th>Estado</th><th>Pieza</th><th>Material</th><th>Cliente</th><th>Pend.</th><th>Kg</th><th>Vencimiento</th><th>Observaciones</th></tr></thead>
+<tbody>${cuerpo}</tbody></table></body></html>`);
+  w.document.close();
+  setTimeout(() => w.print(), 500);
 }
 
 function closePendFundirDetalleModal() {
@@ -595,24 +646,26 @@ function _ordenarPorGrupos(data) {
   const porCodigo = new Map(data.map(d => [d.codigo, d]));
   const usados = new Set();
   const ordenada = [];
-  const grupos = []; // {startIdx, endIdx, kgProgramado, kgFundido, kgProgramadoBatiplane, kgFundidoBatiplane}
+  const grupos = [];
   for (const codigos of _PEND_FUNDIR_GRUPOS) {
     const startIdx = ordenada.length;
-    let kgProgramado = 0, kgFundido = 0, kgProgramadoBatiplane = 0, kgFundidoBatiplane = 0, huboAlguno = false;
+    let kgInicial = 0, kgProgramado = 0, kgFundido = 0, kgInicialBatiplane = 0, kgProgramadoBatiplane = 0, kgFundidoBatiplane = 0, huboAlguno = false;
     for (const cod of codigos) {
       const d = porCodigo.get(cod);
       if (!d) continue;
       ordenada.push(d);
       usados.add(cod);
+      kgInicial += d.inicial.kg_pendientes || 0;
       kgProgramado += d.programado.kg_pendientes || 0;
       kgFundido += d.fundido.kg_pendientes || 0;
+      kgInicialBatiplane += (d.inicial.batiplane && d.inicial.batiplane.kg_pendientes) || 0;
       kgProgramadoBatiplane += (d.programado.batiplane && d.programado.batiplane.kg_pendientes) || 0;
       kgFundidoBatiplane += (d.fundido.batiplane && d.fundido.batiplane.kg_pendientes) || 0;
       huboAlguno = true;
     }
     // kg separado por serie -- el plugin suma solo lo que este visible segun
     // la leyenda, asi apagar "Fundido" tambien saca su parte del total de la llave.
-    if (huboAlguno) grupos.push({ startIdx, endIdx: ordenada.length - 1, kgProgramado, kgFundido, kgProgramadoBatiplane, kgFundidoBatiplane });
+    if (huboAlguno) grupos.push({ startIdx, endIdx: ordenada.length - 1, kgInicial, kgProgramado, kgFundido, kgInicialBatiplane, kgProgramadoBatiplane, kgFundidoBatiplane });
   }
   for (const d of data) { if (!usados.has(d.codigo)) ordenada.push(d); }
   return { ordenada, grupos };
@@ -638,6 +691,7 @@ const _grupoLlavePlugin = {
     if (!opts || !opts.grupos || !opts.grupos.length) return;
     const meta0 = chart.getDatasetMeta(0);
     const meta1 = chart.getDatasetMeta(1);
+    const meta2 = chart.getDatasetMeta(2);
     if (!meta0 || !meta0.data.length) return;
     const ctx = chart.ctx;
     // chart.scales.y.left es el borde del margen reservado por layout.padding.left
@@ -647,8 +701,9 @@ const _grupoLlavePlugin = {
     const prof = opts.print ? 10 : 8;
     // Togglear una serie en la leyenda saca su parte del kg de la llave --
     // el total mostrado siempre coincide con lo que las barras estan mostrando.
-    const progVisible = chart.isDatasetVisible(0);
-    const fundVisible = chart.isDatasetVisible(1);
+    const inicialVisible = chart.isDatasetVisible(0);
+    const progVisible = chart.isDatasetVisible(1);
+    const fundVisible = chart.isDatasetVisible(2);
     ctx.save();
     ctx.strokeStyle = opts.print ? '#333' : '#8b929e';
     ctx.lineWidth = 1.5;
@@ -658,11 +713,12 @@ const _grupoLlavePlugin = {
     ctx.textBaseline = 'middle';
     const colorProg    = opts.print ? _COLOR_PROGRAMADO_PRINT : '#7cc0f8';
     const colorFund     = opts.print ? _COLOR_FUNDIDO_PRINT : '#ffc477';
+    const colorInicial  = opts.print ? _COLOR_INICIAL_PRINT : '#b39ddb';
     const colorProgBat = opts.print ? _COLOR_PROGRAMADO_BATIPLANE_PRINT : _COLOR_PROGRAMADO_BATIPLANE;
     const colorFundBat  = opts.print ? _COLOR_FUNDIDO_BATIPLANE_PRINT : _COLOR_FUNDIDO_BATIPLANE;
     opts.grupos.forEach((g) => {
       const barTop = meta0.data[g.startIdx];
-      const barBottomEl = (meta1 && meta1.data[g.endIdx]) || meta0.data[g.endIdx];
+      const barBottomEl = (meta2 && meta2.data[g.endIdx]) || (meta1 && meta1.data[g.endIdx]) || meta0.data[g.endIdx];
       if (!barTop || !barBottomEl) return;
       const yTop = barTop.y - barTop.height / 2 - 3;
       const yBottom = barBottomEl.y + barBottomEl.height / 2 + 3;
@@ -673,6 +729,12 @@ const _grupoLlavePlugin = {
       // numero mezclado.
       const yMid = (yTop + yBottom) / 2;
       const lineas = [];
+      if (inicialVisible) {
+        const bat = g.kgInicialBatiplane || 0;
+        const resto = g.kgInicial - bat;
+        if (resto > 0) lineas.push({ texto: fmtKg(resto), color: colorInicial });
+        if (bat > 0) lineas.push({ texto: fmtKg(bat), color: _COLOR_INICIAL_BATIPLANE });
+      }
       if (progVisible) {
         const bat = g.kgProgramadoBatiplane || 0;
         const resto = g.kgProgramado - bat;
@@ -701,10 +763,11 @@ Chart.register(_grupoLlavePlugin);
 // la leyenda saca esa serie de los totales y de su propio renglon, no solo
 // de las barras -- son los mismos numeros, calculados con la misma logica.
 function _pendFundirResumenTexto(chart, data, useKg) {
-  const progVisible = chart.isDatasetVisible(0);
-  const fundVisible = chart.isDatasetVisible(1);
+  const inicialVisible = chart.isDatasetVisible(0);
+  const progVisible = chart.isDatasetVisible(1);
+  const fundVisible = chart.isDatasetVisible(2);
   const segTotal = (d, campo) =>
-    (progVisible ? (d.programado[campo] || 0) : 0) + (fundVisible ? (d.fundido[campo] || 0) : 0);
+    (inicialVisible ? (d.inicial[campo] || 0) : 0) + (progVisible ? (d.programado[campo] || 0) : 0) + (fundVisible ? (d.fundido[campo] || 0) : 0);
   const grupoTotal = (grupo, campo) => data.reduce((s, d) => s + (d[grupo][campo] || 0), 0);
   const totalPzsSinPeso = data.reduce((s, d) => s + segTotal(d, 'piezas_sin_peso'), 0);
   const totalOts = data.reduce((s, d) => s + segTotal(d, 'ots'), 0);
@@ -714,6 +777,7 @@ function _pendFundirResumenTexto(chart, data, useKg) {
     + ' · ' + fmt(grupoTotal(grupo, 'piezas_pendientes')) + ' piezas'
     + (useKg ? ' · ' + fmtKg(grupoTotal(grupo, 'kg_pendientes')) : '');
   const partes = [];
+  if (inicialVisible) partes.push(resumenGrupo('inicial', 'Inicial'));
   if (progVisible) partes.push(resumenGrupo('programado', 'Programado'));
   if (fundVisible) partes.push(resumenGrupo('fundido', 'Fundido'));
   return totalOts + ' OT' + (totalOts !== 1 ? 's' : '') + ' activas · ' + fmt(totalPzs) + ' piezas'
@@ -743,17 +807,19 @@ function _pendFundirChartConfig(data, useKg, print, subtitleId) {
   data = ordenada;
   const valorSegmento = (seg) => useKg ? (seg.kg_pendientes || 0) : (seg.ots || 0);
   const etiquetaSegmento = (v) => useKg ? fmtKg(v) : fmt(v) + ' OT' + (v !== 1 ? 's' : '');
+  const inicialVals = data.map(d => valorSegmento(d.inicial));
   const progVals = data.map(d => valorSegmento(d.programado));
   const fundVals = data.map(d => valorSegmento(d.fundido));
   // Batiplane, mismo valor/metrica que la barra entera (kg u OTs segun el
   // modo) -- se resalta con otro color en la punta de la barra, nunca se resta.
+  const inicialBatVals = data.map(d => valorSegmento(d.inicial.batiplane || {}));
   const progBatVals = data.map(d => valorSegmento(d.programado.batiplane || {}));
   const fundBatVals = data.map(d => valorSegmento(d.fundido.batiplane || {}));
   // Barras agrupadas (lado a lado), no apiladas -- cada una con su propio
   // total, asi que el paso de la regla sale del maximo de CUALQUIER barra
   // individual, no de la suma de las dos.
-  const etiquetas = [progVals.map(etiquetaSegmento), fundVals.map(etiquetaSegmento)];
-  const { major, minor, subdiv } = _reglaPasos(Math.max(...progVals, ...fundVals, 0));
+  const etiquetas = [inicialVals.map(etiquetaSegmento), progVals.map(etiquetaSegmento), fundVals.map(etiquetaSegmento)];
+  const { major, minor, subdiv } = _reglaPasos(Math.max(...inicialVals, ...progVals, ...fundVals, 0));
   const esMayor = (val) => Math.round(val / minor) % subdiv === 0;
 
   const opts = chartDefaults();
@@ -766,8 +832,9 @@ function _pendFundirChartConfig(data, useKg, print, subtitleId) {
   } };
   opts.plugins.reglaBarra = {
     minor, subdiv, etiquetas, print,
-    batiplaneValores: [progBatVals, fundBatVals],
+    batiplaneValores: [inicialBatVals, progBatVals, fundBatVals],
     batiplaneColores: [
+      print ? _COLOR_INICIAL_BATIPLANE_PRINT : _COLOR_INICIAL_BATIPLANE,
       print ? _COLOR_PROGRAMADO_BATIPLANE_PRINT : _COLOR_PROGRAMADO_BATIPLANE,
       print ? _COLOR_FUNDIDO_BATIPLANE_PRINT : _COLOR_FUNDIDO_BATIPLANE,
     ],
@@ -785,9 +852,12 @@ function _pendFundirChartConfig(data, useKg, print, subtitleId) {
       if (!elements || !elements.length) return;
       const { datasetIndex, index } = elements[0];
       const d = data[index];
-      const estado = datasetIndex === 0 ? 'P' : 'F';
-      const nombre = datasetIndex === 0 ? 'Programado' : 'Fundido';
-      const seg = datasetIndex === 0 ? d.programado : d.fundido;
+      const estados = ['I', 'P', 'F'];
+      const nombres = ['Inicial', 'Programado', 'Fundido'];
+      const campos = ['inicial', 'programado', 'fundido'];
+      const estado = estados[datasetIndex];
+      const nombre = nombres[datasetIndex];
+      const seg = d[campos[datasetIndex]];
       if (!seg || !seg.ots) return;
       _abrirPendFundirDetalle(`${nombre} — Material ${d.material} (${d.codigo})`, { codigo: d.codigo, estado });
     };
@@ -817,14 +887,16 @@ function _pendFundirChartConfig(data, useKg, print, subtitleId) {
   opts.plugins.tooltip = { callbacks: {
     title: (items) => data[items[0].dataIndex].material,
     label: (ctx) => {
-      const seg = ctx.datasetIndex === 0 ? data[ctx.dataIndex].programado : data[ctx.dataIndex].fundido;
-      const nombre = ctx.datasetIndex === 0 ? 'Programado' : 'Fundido';
+      const campos = ['inicial', 'programado', 'fundido'];
+      const nombres = ['Inicial', 'Programado', 'Fundido'];
+      const seg = data[ctx.dataIndex][campos[ctx.datasetIndex]];
+      const nombre = nombres[ctx.datasetIndex];
       return useKg
         ? nombre + ': ' + fmt(seg.piezas_pendientes) + ' piezas · ' + fmtKg(seg.kg_pendientes)
         : nombre + ': ' + fmt(seg.ots) + ' OT' + (seg.ots !== 1 ? 's' : '') + ' · ' + fmt(seg.piezas_pendientes) + ' piezas';
     },
     afterLabel: (ctx) => {
-      const seg = ctx.datasetIndex === 0 ? data[ctx.dataIndex].programado : data[ctx.dataIndex].fundido;
+      const seg = data[ctx.dataIndex][['inicial', 'programado', 'fundido'][ctx.datasetIndex]];
       const lineas = [];
       const bat = seg.batiplane;
       if (bat && bat.ots) {
@@ -840,7 +912,8 @@ function _pendFundirChartConfig(data, useKg, print, subtitleId) {
     }
   } };
 
-  const sinPesoTotal = (d) => (d.programado.piezas_sin_peso || 0) + (d.fundido.piezas_sin_peso || 0);
+  const sinPesoTotal = (d) => (d.inicial.piezas_sin_peso || 0) + (d.programado.piezas_sin_peso || 0) + (d.fundido.piezas_sin_peso || 0);
+  const colorInicial    = print ? _COLOR_INICIAL_PRINT : _COLOR_INICIAL;
   const colorProgramado = print ? _COLOR_PROGRAMADO_PRINT : _COLOR_PROGRAMADO;
   const colorFundido    = print ? _COLOR_FUNDIDO_PRINT : _COLOR_FUNDIDO;
 
@@ -849,6 +922,7 @@ function _pendFundirChartConfig(data, useKg, print, subtitleId) {
     data: {
       labels: data.map(d => d.codigo + ((useKg && sinPesoTotal(d) > 0) ? ' ⚠' : '')),
       datasets: [
+        { label: 'Inicial',    data: inicialVals, backgroundColor: colorInicial,    borderRadius: 4 },
         { label: 'Programado', data: progVals, backgroundColor: colorProgramado, borderRadius: 4 },
         { label: 'Fundido',    data: fundVals, backgroundColor: colorFundido,    borderRadius: 4 },
       ],

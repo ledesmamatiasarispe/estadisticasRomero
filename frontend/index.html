@@ -297,7 +297,7 @@ tr:last-child td { border-bottom: none; }
 .tag-m { background: var(--surface2); color: var(--muted); }
 
 /* Inputs */
-.row-gap { display: flex; gap: 10px; margin-bottom: 14px; align-items: center; }
+.row-gap { display: flex; gap: 10px; margin-bottom: 14px; align-items: center; flex-wrap: wrap; }
 .inp { background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 7px 12px; border-radius: 6px; font-size: 13px; outline: none; }
 .inp:focus { border-color: var(--accent); }
 .inp-grow { flex: 1; }
@@ -405,6 +405,11 @@ tr:last-child td { border-bottom: none; }
   background: rgba(0,0,0,.7); align-items: flex-start; justify-content: center; padding-top: 60px;
 }
 #sin-peso-modal.open { display: flex; }
+#moldeo-modal {
+  display: none; position: fixed; inset: 0; z-index: 2000;
+  background: rgba(0,0,0,.7); align-items: flex-start; justify-content: center; padding-top: 60px;
+}
+#moldeo-modal.open { display: flex; }
 .probeta-mbox {
   background: var(--surface); border: 1px solid rgba(167,107,250,.5);
   border-radius: 10px; width: 900px; max-width: calc(100vw - 32px);
@@ -672,9 +677,23 @@ tr:last-child td { border-bottom: none; }
     <div class="probeta-mhdr">
       <span style="font-size:20px">&#128203;</span>
       <h3 id="pend-fundir-detalle-titulo">OTs</h3>
+      <button class="page-btn" id="pend-fundir-detalle-imprimir" style="font-size:11px;padding:4px 10px" onclick="_imprimirPendFundirDetalle()">&#128438; Imprimir</button>
       <button class="probeta-mclose" onclick="closePendFundirDetalleModal()">&#10005;</button>
     </div>
     <div class="probeta-mbody" id="pend-fundir-detalle-modal-body">
+      <div class="loading">Cargando...</div>
+    </div>
+  </div>
+</div>
+
+<div id="moldeo-modal" onclick="if(event.target===this)closeMoldeoModal()">
+  <div class="probeta-mbox" style="width:640px">
+    <div class="probeta-mhdr">
+      <span style="font-size:20px">&#127959;</span>
+      <h3>Carga de producción diaria &mdash; Moldeo</h3>
+      <button class="probeta-mclose" onclick="closeMoldeoModal()">&#10005;</button>
+    </div>
+    <div class="probeta-mbody" id="moldeo-modal-body">
       <div class="loading">Cargando...</div>
     </div>
   </div>
@@ -973,7 +992,7 @@ function chartDefaults() {
 // Modulo compartido con kiosk.html -- ver frontend/js/pend_fundir.js, unica
 // fuente de esta funcionalidad (grafico, calendario, impresion, drill-down).
 </script>
-<script src="/js/pend_fundir.js"></script>
+<script src="/js/pend_fundir.js?v=20260909-1"></script>
 <script>
 
 let _sinPesoRows = [];
@@ -1132,26 +1151,29 @@ function _drillMes(wrapId, año, rows, backFn, kgOpts) {
   // trae cualquier año (una OT Programada puede estar atrasada de un año
   // viejo), así que se filtra al año que se está mirando.
   const proyeccion = kgOpts?.proyeccion || null;
-  const porMes = {}; // {mesIdx: {programado:{piezas,kg}, fundido:{piezas,kg}}}
+  const porMes = {}; // {mesIdx: {inicial, programado, fundido}}
   if (proyeccion?.por_mes) {
     for (const r of proyeccion.por_mes) {
       if (String(r.año) !== String(año)) continue;
       const mIdx = parseInt(r.mes, 10) - 1;
       if (mIdx < 0 || mIdx > 11) continue;
-      if (!porMes[mIdx]) porMes[mIdx] = { programado: { piezas: 0, kg: 0 }, fundido: { piezas: 0, kg: 0 } };
-      const campo = r.estado === 'P' ? 'programado' : 'fundido';
+      if (!porMes[mIdx]) porMes[mIdx] = { inicial: { piezas: 0, kg: 0 }, programado: { piezas: 0, kg: 0 }, fundido: { piezas: 0, kg: 0 } };
+      const campo = r.estado === 'I' ? 'inicial' : (r.estado === 'P' ? 'programado' : 'fundido');
       porMes[mIdx][campo].piezas += r.piezas || 0;
       porMes[mIdx][campo].kg += r.kg || 0;
     }
   }
   const items = [];
-  const progPorMes = {}; // mesIdx -> Programadas (solo, para el tooltip), en la unidad de useKg
+  const proyPorMes = {}; // mesIdx -> Programado/Fundido, en la unidad de useKg
   for (const mIdx of Object.keys(porMes).map(Number)) {
-    const { programado, fundido } = porMes[mIdx];
-    const suma = useKg ? (programado.kg + fundido.kg) : (programado.piezas + fundido.piezas);
+    const { inicial, programado, fundido } = porMes[mIdx];
+    const suma = useKg ? (inicial.kg + programado.kg + fundido.kg) : (inicial.piezas + programado.piezas + fundido.piezas);
     if (suma <= 0) continue;
-    items.push({ index: mIdx, entregadasActual: ent[mIdx] || 0, suma });
-    progPorMes[mIdx] = useKg ? programado.kg : programado.piezas;
+    const partes = useKg
+      ? { inicial: inicial.kg, programado: programado.kg, fundido: fundido.kg }
+      : { inicial: inicial.piezas, programado: programado.piezas, fundido: fundido.piezas };
+    items.push({ index: mIdx, entregadasActual: ent[mIdx] || 0, ...partes });
+    proyPorMes[mIdx] = partes;
   }
 
   const opts = chartDefaults();
@@ -1161,10 +1183,16 @@ function _drillMes(wrapId, año, rows, backFn, kgOpts) {
     opts.plugins.tooltip = { callbacks: { label: (ctx) => {
       const label = ctx.dataset.label || '';
       const v = ctx.parsed.y;
-      if (ctx.datasetIndex === 0 && progPorMes[ctx.dataIndex] != null) {
-        const prog = progPorMes[ctx.dataIndex];
+      if (ctx.datasetIndex === 0 && proyPorMes[ctx.dataIndex] != null) {
+        const partes = proyPorMes[ctx.dataIndex];
         const fmtFn = useKg ? fmtKg : fmt;
-        return label + ': ' + fmtFn(v) + ' + Programadas: ' + fmtFn(prog) + ' = ' + fmtFn(v + prog);
+        return [
+          label + ': ' + fmtFn(v),
+          'Inicial: ' + fmtFn(partes.inicial),
+          'Programado: ' + fmtFn(partes.programado),
+          'Fundido: ' + fmtFn(partes.fundido),
+          'Total proyectado: ' + fmtFn(v + partes.inicial + partes.programado + partes.fundido),
+        ];
       }
       return label + ': ' + (useKg ? fmtKg(v) : fmt(v));
     } } };
@@ -1989,6 +2017,7 @@ async function showDashboard() {
       <div class="chart-box"><canvas id="chart-pend-fundir-dash"></canvas></div>
       <div class="pend-fundir-cal" id="cal-pend-fundir-dash" style="display:none"></div>
       <div class="pend-fundir-acciones" style="text-align:right;margin-top:8px;display:flex;justify-content:flex-end;gap:8px">
+        <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="_abrirPendFundirDetalle('OTs olvidadas — programadas con más de un mes de atraso',{olvidadas:1})">&#9200; Ver OTs olvidadas</button>
         <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="_imprimirPendienteFundir()">&#128438; Imprimir</button>
         <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="openSinPesoModal()">&#9888; Ver piezas sin peso</button>
       </div>
@@ -2045,16 +2074,16 @@ async function showDashboard() {
   _updateTrendRangeLabel();
 
   // Proyección sobre la barra de Entregadas del año actual: cuánto se sumaría
-  // si se entrega todo lo Programado (nada fundido todavía, lo que falta
+  // si se entrega todo lo Inicial y Programado (nada fundido todavía, lo que falta
   // fundir) y todo lo ya Fundido (lo ya producido, esperando pasar a
   // entrega) -- piezas y kg, mismo peso_efectivo que Pendiente de fundir.
   _trendProyeccion = null;
-  api('/api/dashboard/proyeccion_pipeline').then(p => {
-    _trendProyeccion = p; // {programado:{ots,piezas,kg}, fundido:{ots,piezas,kg}}
+  api('/api/dashboard/proyeccion_pipeline?meses=' + S.dashMeses).then(p => {
+    _trendProyeccion = p; // {inicial, programado, fundido}
     const subEl = $id('kpi-entregadas-sub');
     if (subEl) {
-      const totalProg = entregadas_año + p.programado.piezas;
-      subEl.textContent = 'Entregadas: ' + fmt(entregadas_año) + ' + Programadas: ' + fmt(p.programado.piezas) + ' = ' + fmt(totalProg);
+      const totalProg = entregadas_año + (p.inicial?.piezas || 0) + p.programado.piezas + p.fundido.piezas;
+      subEl.textContent = 'Entregadas: ' + fmt(entregadas_año) + ' + Inicial: ' + fmt(p.inicial?.piezas || 0) + ' + Programado: ' + fmt(p.programado.piezas) + ' + Fundido: ' + fmt(p.fundido.piezas) + ' = ' + fmt(totalProg);
     }
     if (_trendMode === 'barras') _renderTrendBarras();
   }).catch(() => {});
@@ -2114,7 +2143,7 @@ async function _onTrendRangeChange() {
 // frontend/js/tendencia.js. Curvas y el drill-down mensual (mas abajo) se
 // quedan aca, dependen de _drillMes que usan otros graficos tambien.
 </script>
-<script src="/js/tendencia.js"></script>
+<script src="/js/tendencia.js?v=20260909-1"></script>
 <script>
 
 function _toggleDashKg() {
@@ -6943,6 +6972,14 @@ async function showTrabajos() {
   ].join('');
 
   setMain(`
+    <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:14px">
+      <button onclick="openMoldeoModal()" style="display:flex;align-items:center;gap:10px;
+        padding:14px 24px;border-radius:8px;border:1px solid var(--accent);
+        background:var(--accent-dim);color:var(--accent);cursor:pointer;
+        font-size:15px;font-weight:700">
+        <span style="font-size:20px">&#127959;</span> Cargar moldeo
+      </button>
+    </div>
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:14px">
       <div class="sec-title" style="margin-bottom:0">Trabajos &mdash; &#211;rdenes de trabajo</div>
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
@@ -7053,6 +7090,218 @@ async function showTrabajos() {
   api('/api/dashboard/entregados?meses=' + S.dashMeses)
     .then(r => { S._dashRows.entregados = r; _renderDashTable('entregados', 'dash-entregados'); })
     .catch(() => { const e=$id('dash-entregados'); if(e) e.innerHTML='<div class="empty">No se pudo cargar</div>'; });
+}
+
+// ── Carga de moldeo diario ──────────────────────────────────────────────────
+// Tabla propia (_produccion_moldeo, backend) -- cajas moldeadas por operario/OT/
+// día. No hay equivalente en Access (EstadisticaMoldeo solo tiene timestamps,
+// sin cantidad ni operario), así que esto vive enteramente en GNC_API.
+let _moldeoPersonal    = null;
+let _moldeoOT          = null;  // {id, pieza, codigo} elegida en el form
+let _moldeoEditId      = null;  // id de _produccion_moldeo en edición, null = alta nueva
+let _moldeoSearchTimer = null;
+let _moldeoOTResults   = [];
+let _moldeoListaCache  = [];
+
+async function openMoldeoModal() {
+  const modal = $id('moldeo-modal');
+  if (modal) modal.classList.add('open');
+  const body = $id('moldeo-modal-body');
+  if (!body) return;
+  body.innerHTML = '<div class="loading">Cargando...</div>';
+
+  if (!_moldeoPersonal) {
+    try { _moldeoPersonal = await api('/api/personal?meses=1'); }
+    catch(e) { _moldeoPersonal = []; }
+  }
+  _moldeoOT = null;
+  _moldeoEditId = null;
+
+  const hoy = new Date().toISOString().slice(0, 10);
+  // Solo sector Producción (códsector < 2 -- /api/personal ya excluye el 0).
+  const moldeadores = _moldeoPersonal.filter(p => p.sector < 2);
+  const opsOpts = ['<option value="">Elegir operario&#8230;</option>',
+    ...moldeadores.map(p => `<option value="${p.id}">${p.nombre}</option>`)
+  ].join('');
+
+  body.innerHTML = `
+    <div id="moldeo-form-title" style="font-size:12px;color:var(--accent);margin-bottom:8px;min-height:15px"></div>
+    <div class="grid-2" style="gap:10px;margin-bottom:10px">
+      <div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Fecha</div>
+        <input class="inp" type="date" id="moldeo-fecha" value="${hoy}" style="width:100%" onchange="_moldeoLoadLista()">
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Operario</div>
+        <select class="inp" id="moldeo-operario" style="width:100%">${opsOpts}</select>
+      </div>
+    </div>
+    <div style="margin-bottom:10px">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Orden de trabajo (OT)</div>
+      <div style="position:relative">
+        <input id="moldeo-ot-q" class="inp" type="text" placeholder="Buscar OT por n&#250;mero, pieza o cliente&#8230;"
+          style="width:100%;box-sizing:border-box" autocomplete="off"
+          oninput="_moldeoSearchOT(this.value)"
+          onkeydown="if(event.key==='Escape'){$id('moldeo-ot-dropdown').style.display='none';this.value=''}">
+        <div id="moldeo-ot-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;z-index:50;
+          background:var(--surface2);border:1px solid var(--border);border-radius:0 0 6px 6px;
+          max-height:220px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.18)"></div>
+      </div>
+      <div id="moldeo-ot-chip" style="margin-top:8px"></div>
+    </div>
+    <div style="display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+      <div style="flex:1;min-width:140px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Cajas moldeadas</div>
+        <input class="inp" type="number" id="moldeo-cantidad" min="1" step="1" style="width:100%">
+      </div>
+      <button class="page-btn" id="moldeo-guardar-btn" style="padding:9px 18px;font-size:13px;font-weight:600;background:var(--accent-dim);border-color:var(--accent);color:var(--accent)" onclick="_moldeoGuardar()">Guardar</button>
+      <button class="page-btn" id="moldeo-cancelar-btn" style="display:none;padding:9px 14px;font-size:13px" onclick="_moldeoResetForm()">Cancelar</button>
+    </div>
+    <div style="font-size:12px;font-weight:600;color:var(--fg);margin-bottom:6px">Cargas del d&#237;a</div>
+    <div id="moldeo-lista"><div class="loading" style="padding:8px 0">Cargando...</div></div>
+  `;
+  _moldeoLoadLista();
+}
+
+function closeMoldeoModal() {
+  const modal = $id('moldeo-modal');
+  if (modal) modal.classList.remove('open');
+}
+
+function _moldeoSearchOT(val) {
+  const dd = $id('moldeo-ot-dropdown');
+  if (!dd) return;
+  clearTimeout(_moldeoSearchTimer);
+  if (!val.trim()) { dd.style.display = 'none'; return; }
+  _moldeoSearchTimer = setTimeout(async () => {
+    try {
+      const data = await api('/api/trabajos?search=' + encodeURIComponent(val.trim()) + '&page_size=8');
+      _moldeoOTResults = data.rows || [];
+      if (!_moldeoOTResults.length) {
+        dd.innerHTML = '<div style="padding:8px 12px;font-size:12px;color:var(--muted)">Sin resultados</div>';
+        dd.style.display = 'block';
+        return;
+      }
+      dd.innerHTML = _moldeoOTResults.map((r, i) => `
+        <div class="tend-dd-item" onclick="_moldeoPickOT(${i})"
+          style="padding:7px 12px;cursor:pointer;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:2px">
+          <span style="font-size:13px">OT ${r.iditemtrabajo} &mdash; ${r.nombrepieza||''}</span>
+          <span style="font-size:11px;color:var(--muted)">${r.cliente_nombre||''} &middot; ${r.estado_label||''}</span>
+        </div>`).join('');
+      dd.style.display = 'block';
+    } catch(e) {}
+  }, 200);
+}
+
+function _moldeoPickOT(idx) {
+  const r = _moldeoOTResults[idx];
+  if (!r) return;
+  _moldeoOT = { id: r.iditemtrabajo, pieza: r.nombrepieza || '', codigo: r.codigo_pieza || '' };
+  const dd = $id('moldeo-ot-dropdown');
+  if (dd) dd.style.display = 'none';
+  const q = $id('moldeo-ot-q');
+  if (q) q.value = '';
+  _moldeoRenderOTChip();
+}
+
+function _moldeoRenderOTChip() {
+  const chip = $id('moldeo-ot-chip');
+  if (!chip) return;
+  if (!_moldeoOT) { chip.innerHTML = ''; return; }
+  chip.innerHTML = `
+    <span style="display:inline-flex;align-items:center;gap:6px;padding:4px 8px 4px 12px;
+      border-radius:10px;background:var(--surface2);border:1px solid var(--border);font-size:12px">
+      OT ${_moldeoOT.id} &mdash; ${_moldeoOT.pieza}${_moldeoOT.codigo ? ' <span style="color:var(--muted)">('+_moldeoOT.codigo+')</span>' : ''}
+      <span onclick="_moldeoOT=null;_moldeoRenderOTChip()" style="cursor:pointer;opacity:.5;font-size:16px;line-height:1;padding:0 2px">&times;</span>
+    </span>`;
+}
+
+async function _moldeoGuardar() {
+  const fecha = $id('moldeo-fecha').value;
+  const operario_id = $id('moldeo-operario').value;
+  const cantidad_cajas = $id('moldeo-cantidad').value;
+  if (!fecha) { alert('Elegí una fecha.'); return; }
+  if (!operario_id) { alert('Elegí un operario.'); return; }
+  if (!_moldeoOT) { alert('Elegí una OT.'); return; }
+  if (!cantidad_cajas || Number(cantidad_cajas) <= 0) { alert('Ingresá la cantidad de cajas moldeadas.'); return; }
+
+  const body = { fecha, operario_id: Number(operario_id), trabajo_id: _moldeoOT.id, cantidad_cajas: Number(cantidad_cajas) };
+  try {
+    if (_moldeoEditId) {
+      await api('/api/produccion_moldeo/' + _moldeoEditId, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    } else {
+      await api('/api/produccion_moldeo', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    }
+  } catch(e) { alert('No se pudo guardar: ' + e.message); return; }
+  _moldeoResetForm(false);
+  _moldeoLoadLista();
+}
+
+function _moldeoResetForm(clearOperario) {
+  _moldeoEditId = null;
+  _moldeoOT = null;
+  _moldeoRenderOTChip();
+  const q = $id('moldeo-ot-q'); if (q) q.value = '';
+  const cant = $id('moldeo-cantidad'); if (cant) cant.value = '';
+  if (clearOperario !== false) { const op = $id('moldeo-operario'); if (op) op.value = ''; }
+  const title = $id('moldeo-form-title'); if (title) title.textContent = '';
+  const cancelBtn = $id('moldeo-cancelar-btn'); if (cancelBtn) cancelBtn.style.display = 'none';
+  const saveBtn = $id('moldeo-guardar-btn'); if (saveBtn) saveBtn.textContent = 'Guardar';
+}
+
+async function _moldeoLoadLista() {
+  const el = $id('moldeo-lista');
+  const fechaEl = $id('moldeo-fecha');
+  if (!el || !fechaEl) return;
+  el.innerHTML = '<div class="loading" style="padding:8px 0">Cargando...</div>';
+  let rows;
+  try { rows = await api('/api/produccion_moldeo?fecha=' + fechaEl.value); }
+  catch(e) { el.innerHTML = '<div class="empty">No se pudo cargar</div>'; return; }
+  _moldeoListaCache = rows;
+  if (!rows.length) {
+    el.innerHTML = '<div class="empty" style="padding:8px 0;font-size:12px">Sin cargas para este d&#237;a todav&#237;a.</div>';
+    return;
+  }
+  el.innerHTML = `
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Operario</th><th>OT</th><th>Pieza</th><th style="text-align:right">Cajas</th><th></th></tr></thead>
+        <tbody>${rows.map((r, i) => `
+          <tr>
+            <td>${r.operario_nombre || r.operario_id}</td>
+            <td>${r.trabajo_id}</td>
+            <td>${r.nombrepieza || '—'}</td>
+            <td style="text-align:right;font-weight:600">${fmt(r.cantidad_cajas)}</td>
+            <td style="white-space:nowrap">
+              <span onclick="_moldeoEditar(${i})" style="cursor:pointer;padding:0 4px" title="Editar">&#9998;</span>
+              <span onclick="_moldeoBorrar(${r.id})" style="cursor:pointer;padding:0 4px;opacity:.6" title="Eliminar">&#10005;</span>
+            </td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function _moldeoEditar(idx) {
+  const r = _moldeoListaCache[idx];
+  if (!r) return;
+  _moldeoEditId = r.id;
+  _moldeoOT = { id: r.trabajo_id, pieza: r.nombrepieza || '', codigo: r.codigo_pieza || '' };
+  $id('moldeo-fecha').value = r.fecha;
+  $id('moldeo-operario').value = r.operario_id;
+  $id('moldeo-cantidad').value = r.cantidad_cajas;
+  _moldeoRenderOTChip();
+  const title = $id('moldeo-form-title'); if (title) title.textContent = 'Editando carga #' + r.id;
+  const cancelBtn = $id('moldeo-cancelar-btn'); if (cancelBtn) cancelBtn.style.display = '';
+  const saveBtn = $id('moldeo-guardar-btn'); if (saveBtn) saveBtn.textContent = 'Guardar cambios';
+}
+
+async function _moldeoBorrar(id) {
+  if (!confirm('¿Eliminar esta carga de moldeo?')) return;
+  try { await api('/api/produccion_moldeo/' + id, { method: 'DELETE' }); }
+  catch(e) { alert('No se pudo eliminar: ' + e.message); return; }
+  if (_moldeoEditId === id) _moldeoResetForm();
+  _moldeoLoadLista();
 }
 
 async function loadPipeline() {
@@ -8317,8 +8566,9 @@ async function _kioskShowSlide(slide) {
       }
       case 'tendencia': {
         let d, p;
+        const m = _sM('tendencia');
         try { d = await api('/api/analytics/overview'); } catch(_) { d = null; }
-        try { p = await api('/api/dashboard/proyeccion_pipeline'); } catch(_) { p = null; }
+        try { p = await api('/api/dashboard/proyeccion_pipeline?meses=' + m); } catch(_) { p = null; }
         _kioskTendenciaData = d?.tendencia || [];
         _kioskTendenciaProyeccion = p;
         _kioskTendenciaKg = _kioskModo('tendencia', 'unidad') === 'kg';
@@ -8505,8 +8755,13 @@ async function showAdmin() {
 }
 
 async function _admShowList(m) {
-  let users = [];
-  try { users = await api('/api/admin/usuarios'); } catch(e) { m.innerHTML = `<div class="loading">${e.message}</div>`; return; }
+  let users = [], launcherCfg = { auto_update_enabled: true };
+  try {
+    [users, launcherCfg] = await Promise.all([
+      api('/api/admin/usuarios'),
+      api('/api/launcher/config').catch(() => launcherCfg),
+    ]);
+  } catch(e) { m.innerHTML = `<div class="loading">${e.message}</div>`; return; }
   const rows = users.map(u => `
     <tr>
       <td><code style="color:var(--accent)">${u.legajo}</code></td>
@@ -8521,12 +8776,37 @@ async function _admShowList(m) {
       <h2 style="font-size:18px">&#128274; Administración de usuarios</h2>
       <button onclick="_admOpenEdit(null)" style="background:var(--accent);color:#000;border:none;border-radius:6px;padding:7px 16px;cursor:pointer;font-weight:600;font-size:13px">+ Nuevo usuario</button>
     </div>
+    <div class="card" style="padding:14px 16px;margin-bottom:18px;display:flex;align-items:center;justify-content:space-between;gap:14px">
+      <div>
+        <div style="font-size:13px;font-weight:600">&#128260; Auto-actualización</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px">
+          Al iniciar, la app busca actualizaciones en GitHub y pide confirmación antes de instalarlas. Desactivá esto para que arranque siempre con la versión local.
+        </div>
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);cursor:pointer;white-space:nowrap">
+        <input type="checkbox" id="adm-auto-update" ${launcherCfg.auto_update_enabled ? 'checked' : ''} onchange="_admToggleAutoUpdate(this.checked)">
+        Habilitada
+      </label>
+    </div>
     <div class="card" style="overflow:auto">
       <table class="adm-tbl">
         <thead><tr><th>Legajo</th><th>Nombre</th><th>Rol</th><th>Estado</th><th>Permisos</th><th></th></tr></thead>
         <tbody>${rows || '<tr><td colspan="6" style="color:var(--muted);text-align:center;padding:20px">Sin usuarios</td></tr>'}</tbody>
       </table>
     </div>`;
+}
+
+async function _admToggleAutoUpdate(enabled) {
+  const chk = $id('adm-auto-update');
+  try {
+    await api('/api/launcher/config', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ auto_update_enabled: enabled }),
+    });
+  } catch(e) {
+    if (chk) chk.checked = !enabled;
+    alert('No se pudo guardar: ' + e.message);
+  }
 }
 
 function _admOpenEdit(legajo) {

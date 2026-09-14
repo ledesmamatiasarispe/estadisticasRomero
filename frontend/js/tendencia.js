@@ -11,19 +11,15 @@
 // su callback de drill-down); kiosk.html la llama sin callback.
 //
 // Dependencias que el documento que lo carga debe definir ANTES de este script:
-//   $id(id), api(path), fmt(n), fmtKg(n), chartDefaults()
+//   $id(id), api(path), fmt(n), fmtKg(n), chartDefaults() y los colores
+//   _COLOR_PROGRAMADO/_COLOR_FUNDIDO definidos por pend_fundir.js.
 //   Chart (Chart.js UMD, cargado por <script> aparte)
 
-// Cuánto suman Programado + Fundido a una barra de Entregadas, en la unidad
-// que corresponda -- lo comparten el plugin de la barra fantasma y el
-// tooltip, tanto para la barra anual como para el drill-down mensual (que
-// se queda en index.html pero reusa esta misma funcion).
-function _proyeccionSuma(proyeccion, useKg) {
-  if (!proyeccion) return 0;
-  const { programado, fundido } = proyeccion;
+function _proyeccionPartes(proyeccion, useKg) {
+  if (!proyeccion) return { inicial: 0, programado: 0, fundido: 0 };
   return useKg
-    ? (programado.kg || 0) + (fundido.kg || 0)
-    : (programado.piezas || 0) + (fundido.piezas || 0);
+    ? { inicial: proyeccion.inicial?.kg || 0, programado: proyeccion.programado.kg || 0, fundido: proyeccion.fundido.kg || 0 }
+    : { inicial: proyeccion.inicial?.piezas || 0, programado: proyeccion.programado.piezas || 0, fundido: proyeccion.fundido.piezas || 0 };
 }
 
 // Encima de la barra "Entregadas" de uno o más índices (el año actual en el
@@ -37,21 +33,29 @@ const _trendProyeccionPlugin = {
     const meta = chart.getDatasetMeta(0); // dataset "Entregadas"
     const ctx = chart.ctx;
     ctx.save();
-    ctx.fillStyle = 'rgba(255,167,38,.3)';
-    ctx.strokeStyle = '#ffa726';
     ctx.lineWidth = 1.5;
     ctx.setLineDash([4, 3]);
     for (const item of opts.items) {
       const bar = meta && meta.data[item.index];
       if (!bar) continue;
-      const proyectado = (item.entregadasActual || 0) + (item.suma || 0);
-      const yTop = chart.scales.y.getPixelForValue(proyectado);
-      if (yTop >= bar.y) continue; // la proyección no supera lo ya entregado
       const halfW = bar.width / 2;
-      ctx.beginPath();
-      ctx.rect(bar.x - halfW, yTop, bar.width, bar.y - yTop);
-      ctx.fill();
-      ctx.stroke();
+      let acumulado = item.entregadasActual || 0;
+      for (const segmento of [
+        { valor: item.inicial || 0, color: _COLOR_INICIAL, borde: _COLOR_INICIAL_PRINT },
+        { valor: item.programado || 0, color: _COLOR_PROGRAMADO, borde: _COLOR_PROGRAMADO_PRINT },
+        { valor: item.fundido || 0, color: _COLOR_FUNDIDO, borde: _COLOR_FUNDIDO_PRINT },
+      ]) {
+        if (segmento.valor <= 0) continue;
+        const yBase = chart.scales.y.getPixelForValue(acumulado);
+        acumulado += segmento.valor;
+        const yTop = chart.scales.y.getPixelForValue(acumulado);
+        ctx.fillStyle = segmento.color;
+        ctx.strokeStyle = segmento.borde;
+        ctx.beginPath();
+        ctx.rect(bar.x - halfW, yTop, bar.width, yBase - yTop);
+        ctx.fill();
+        ctx.stroke();
+      }
     }
     ctx.restore();
   },
@@ -84,18 +88,24 @@ function _renderTendenciaBarras(canvasId, data, proyeccion, useKg, kgBtnId, onBa
   const entregadasActual = idxActual >= 0
     ? (useKg ? (data[idxActual].kg_entregadas || 0) : (data[idxActual].entregadas || 0))
     : 0;
+  const partes = _proyeccionPartes(proyeccion, useKg);
   opts.plugins.trendProyeccion = (proyeccion && idxActual >= 0)
-    ? { items: [{ index: idxActual, entregadasActual, suma: _proyeccionSuma(proyeccion, useKg) }] }
+    ? { items: [{ index: idxActual, entregadasActual, ...partes }] }
     : null;
-  // En la barra Entregadas del año actual, el tooltip suma la proyección
-  // (Programadas) en vez de mostrar solo "Entregadas: X" por defecto.
+  // En la barra Entregadas del año actual, el tooltip desglosa la proyección
+  // en Programado y Fundido, igual que Pendientes de fundir.
   opts.plugins.tooltip = { callbacks: { label: (ctx) => {
     const label = ctx.dataset.label || '';
     const val = ctx.parsed.y;
     if (ctx.datasetIndex === 0 && proyeccion && ctx.dataIndex === idxActual) {
-      const prog = useKg ? proyeccion.programado.kg : proyeccion.programado.piezas;
       const fmtFn = useKg ? fmtKg : fmt;
-      return label + ': ' + fmtFn(val) + ' + Programadas: ' + fmtFn(prog) + ' = ' + fmtFn(val + prog);
+      return [
+        label + ': ' + fmtFn(val),
+        'Inicial: ' + fmtFn(partes.inicial),
+        'Programado: ' + fmtFn(partes.programado),
+        'Fundido: ' + fmtFn(partes.fundido),
+        'Total proyectado: ' + fmtFn(val + partes.inicial + partes.programado + partes.fundido),
+      ];
     }
     return label + ': ' + (useKg ? fmtKg(val) : fmt(val));
   } } };

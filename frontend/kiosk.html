@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Kiosk — Fundición José Romero</title>
 <script src="/vendor/chart.min.js"></script>
-<script src="/js/pend_fundir.js"></script>
-<script src="/js/tendencia.js"></script>
+<script src="/js/pend_fundir.js?v=20260909-1"></script>
+<script src="/js/tendencia.js?v=20260909-1"></script>
 <link rel="stylesheet" href="/css/pend_fundir.css">
 <style>
 :root {
@@ -1143,8 +1143,9 @@ async function _kioskShowSlide(slide) {
       }
       case 'tendencia': {
         let d, p;
+        const m = _sM('tendencia');
         try { d = await api('/api/analytics/overview'); } catch(_) { d = null; }
-        try { p = await api('/api/dashboard/proyeccion_pipeline'); } catch(_) { p = null; }
+        try { p = await api('/api/dashboard/proyeccion_pipeline?meses=' + m); } catch(_) { p = null; }
         _kioskTendenciaData = d?.tendencia || [];
         _kioskTendenciaProyeccion = p;
         _kioskTendenciaKg = _kioskModo('tendencia', 'unidad') === 'kg';

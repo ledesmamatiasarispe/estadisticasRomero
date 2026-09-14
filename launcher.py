@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import shutil
+import sqlite3
 import zipfile
 import tempfile
 import subprocess
@@ -13,6 +14,7 @@ from pathlib import Path
 ROOT     = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
 VENV_PY  = ROOT / ".venv" / "Scripts" / "python.exe"
 SHA_FILE = ROOT / "_version.txt"
+DB_PATH  = ROOT / "data" / "gnc.db"
 
 GITHUB_REPO   = "ledesmamatiasarispe/estadisticasRomero"
 GITHUB_BRANCH = "master"
@@ -77,6 +79,49 @@ def _local_sha():
     return SHA_FILE.read_text().strip() if SHA_FILE.exists() else None
 
 
+def _auto_update_enabled():
+    """Lee el toggle que se apaga desde Administracion en la app web (tabla
+    _launcher_config de gnc.db). Se lee con sqlite3 directo porque el launcher
+    corre ANTES de que el servidor exista -- no hay API todavia a la que pegarle.
+    Sin base (primera instalacion) o ante cualquier error, se asume habilitado."""
+    if not DB_PATH.exists():
+        return True
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            row = conn.execute(
+                "SELECT value FROM _launcher_config WHERE key = 'auto_update_enabled'"
+            ).fetchone()
+            return row is None or row[0] == "1"
+        finally:
+            conn.close()
+    except Exception:
+        return True
+
+
+def _confirm_update(local, remote):
+    """Prompt bloqueante en consola -- solo se llama cuando YA se encontro una
+    actualizacion real. Espera indefinidamente una respuesta: este launcher se
+    auto-inicia sin nadie mirando (iniciar_auto.vbs), pero eso ya vale para el
+    caso 'sin actualizacion' (el camino comun), que nunca llega hasta aca."""
+    print()
+    print("  " + "-" * 51)
+    if local:
+        print(f"  Hay una actualizacion disponible ({local[:8]} -> {remote[:8]}).")
+    else:
+        print(f"  Hay una actualizacion disponible ({remote[:8]}).")
+    print("  (La auto-actualizacion se puede desactivar desde Administracion")
+    print("   en la app web.)")
+    print("  " + "-" * 51)
+    while True:
+        resp = input("  ¿Descargar e instalar ahora? [S/n]: ").strip().lower()
+        if resp in ("", "s", "si", "sí", "y", "yes"):
+            return True
+        if resp in ("n", "no"):
+            return False
+        print("  Respuesta no reconocida, escribi S o N.")
+
+
 def _download_update(sha):
     url = f"https://github.com/{GITHUB_REPO}/archive/refs/heads/{GITHUB_BRANCH}.zip"
     print("  Descargando actualizacion desde GitHub...")
@@ -136,6 +181,10 @@ def _local_git_has_unpublished_work():
 
 def auto_update():
     print("Verificando actualizaciones...")
+    if not _auto_update_enabled():
+        print("  Auto-actualizacion desactivada desde Administracion. Usando version local.")
+        return False
+
     if _local_git_has_unpublished_work():
         print("  Hay cambios locales (git) sin pushear a origin/master.")
         print("  Se omite la actualizacion automatica para no pisarlos.")
@@ -155,6 +204,10 @@ def auto_update():
         print("  Primera verificacion de version...")
     else:
         print(f"  Nueva version disponible ({local[:8]} -> {remote[:8]})")
+
+    if not _confirm_update(local, remote):
+        print("  Actualizacion pospuesta. Usando version local.")
+        return False
 
     updated = _download_update(remote)
     if updated:

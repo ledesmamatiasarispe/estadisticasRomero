@@ -15,6 +15,7 @@
 .cal-num { font-size: 11px; color: var(--muted); font-weight: 600; }
 .cal-hoy .cal-num { color: var(--accent); }
 .cal-badge { font-size: 10px; font-weight: 600; padding: 1px 4px; border-radius: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cal-badge.cal-ini { background: #9575cd33; color: #b39ddb; }
 .cal-badge.cal-prog { background: #42a5f533; color: #7cc0f8; }
 .cal-badge.cal-fund { background: #ffa72633; color: #ffc477; }
 .cal-badge.cal-prog-bat { background: #00897b55; color: #64d8cb; font-weight: 700; }
@@ -42,3 +43,4 @@
   background: rgba(0,0,0,.7); align-items: flex-start; justify-content: center; padding-top: 60px;
 }
 #pend-fundir-detalle-modal.open { display: flex; }
+.cal-badge.cal-ini-bat { background: #5e35b155; color: #c7a9ff; font-weight: 700; }
