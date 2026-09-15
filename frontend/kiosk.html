@@ -190,6 +190,7 @@ function fmt(n) { return n == null ? '—' : Number(n).toLocaleString('es-AR'); 
 // las necesita, asi que quedan como un shim chico en vez de sumar un archivo
 // mas para dos funciones.
 function fmtKg(n) { return n == null ? '—' : Number(n).toLocaleString('es-AR', {minimumFractionDigits:1, maximumFractionDigits:1}) + ' kg'; }
+function fmtPesos(n) { return n == null ? '—' : '$' + Number(n).toLocaleString('es-AR', {maximumFractionDigits:0}); }
 function chartDefaults() {
   return {
     responsive: true, maintainAspectRatio: false,
@@ -270,11 +271,11 @@ const KIOSK_SLIDES = [
   { id: 'defectos_rep',    label: 'Tipos de Reparación',  icon: '🛠️', group: 'Estadística', period: true },
   { id: 'probeta',         label: 'Probetas de Tracción', icon: '🔬', group: 'Calidad',     period: true },
   { id: 'pend_fundir_grafico',    label: 'Pendiente de Fundir',     icon: '⚙️', group: 'Producción', period: true,
-    modos: [{ key: 'unidad', label: 'Unidad', options: [{v:'piezas',l:'Piezas'},{v:'kg',l:'Kg'}] }] },
+    modos: [{ key: 'unidad', label: 'Unidad', options: [{v:'piezas',l:'Piezas'},{v:'kg',l:'Kg'},{v:'pesos',l:'Pesos ($)'}] }] },
   { id: 'pend_fundir_calendario', label: 'Calendario de Entregas',  icon: '📅', group: 'Producción', period: true,
     modos: [{ key: 'vista', label: 'Vista', options: [{v:'mes',l:'Mes'},{v:'año',l:'Año'}] }] },
   { id: 'tendencia', label: 'Tendencia Anual', icon: '📈', group: 'Producción',
-    modos: [{ key: 'unidad', label: 'Unidad', options: [{v:'piezas',l:'Piezas'},{v:'kg',l:'Kg'}] }] },
+    modos: [{ key: 'unidad', label: 'Unidad', options: [{v:'piezas',l:'Piezas'},{v:'kg',l:'Kg'},{v:'pesos',l:'Pesos ($)'}] }] },
 ];
 
 function _kioskGetConfig() {
@@ -1039,13 +1040,13 @@ function _kioskPageProbeta(slide, rows) {
 // para una pantalla que rota sola. El modo piezas/kg se fija en la config de
 // Presentacion (ver _kioskModo) y ademas queda como boton por si se quiere
 // tocar la pantalla.
-let _kioskTendenciaKg = false;
+let _kioskTendenciaModo = 'piezas'; // 'piezas' | 'kg' | 'pesos'
 let _kioskTendenciaData = null;
 let _kioskTendenciaProyeccion = null;
 
 function _kioskToggleTendenciaKg() {
-  _kioskTendenciaKg = !_kioskTendenciaKg;
-  _renderTendenciaBarras('chart-tendencia-kiosk', _kioskTendenciaData, _kioskTendenciaProyeccion, _kioskTendenciaKg, 'tendencia-kg-btn', null);
+  _kioskTendenciaModo = _kioskTendenciaModo === 'piezas' ? 'kg' : _kioskTendenciaModo === 'kg' ? 'pesos' : 'piezas';
+  _renderTendenciaBarras('chart-tendencia-kiosk', _kioskTendenciaData, _kioskTendenciaProyeccion, _kioskTendenciaModo, 'tendencia-kg-btn', null);
 }
 
 function _kioskShellTendencia(slide) {
@@ -1078,7 +1079,7 @@ function _kioskShellPendFundir(slide) {
         <span>Pendiente de fundir por material</span>
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <span id="kiosk-pend-fundir-sub" style="font-size:13px;color:var(--muted);font-weight:400">Cargando&#8230;</span>
-          <button class="page-btn" id="pend-fundir-kg-btn" onclick="_togglePendFundirKg()">Ver en kg</button>
+          <button class="page-btn" id="pend-fundir-kg-btn" onclick="_ciclarPendFundirModo()">Ver en kg</button>
           <button class="page-btn" id="pend-fundir-cal-btn" onclick="_togglePendFundirCal()">&#128197; Modo calendario</button>
         </div>
       </div>
@@ -1124,7 +1125,7 @@ async function _kioskShowSlide(slide) {
         const m = _sM('pend_fundir_grafico');
         html = _kioskShellPendFundir(slide);
         afterRender = () => {
-          _pendFundirKgMode = _kioskModo('pend_fundir_grafico', 'unidad') === 'kg';
+          _pendFundirModo = _kioskModo('pend_fundir_grafico', 'unidad') || 'piezas';
           _renderPendienteFundirChart('chart-pend-fundir-kiosk', 'kiosk-pend-fundir-sub', m);
         };
         break;
@@ -1148,9 +1149,9 @@ async function _kioskShowSlide(slide) {
         try { p = await api('/api/dashboard/proyeccion_pipeline?meses=' + m); } catch(_) { p = null; }
         _kioskTendenciaData = d?.tendencia || [];
         _kioskTendenciaProyeccion = p;
-        _kioskTendenciaKg = _kioskModo('tendencia', 'unidad') === 'kg';
+        _kioskTendenciaModo = _kioskModo('tendencia', 'unidad') || 'piezas';
         html = _kioskShellTendencia(slide);
-        afterRender = () => _renderTendenciaBarras('chart-tendencia-kiosk', _kioskTendenciaData, _kioskTendenciaProyeccion, _kioskTendenciaKg, 'tendencia-kg-btn', null);
+        afterRender = () => _renderTendenciaBarras('chart-tendencia-kiosk', _kioskTendenciaData, _kioskTendenciaProyeccion, _kioskTendenciaModo, 'tendencia-kg-btn', null);
         break;
       }
       default: html = `<div class="ktv"><div class="ktv-head"><h2>${slide.icon} ${slide.label}</h2></div><div style="color:var(--muted);padding:40px">Vista no disponible.</div></div>`;

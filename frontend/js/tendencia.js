@@ -11,15 +11,22 @@
 // su callback de drill-down); kiosk.html la llama sin callback.
 //
 // Dependencias que el documento que lo carga debe definir ANTES de este script:
-//   $id(id), api(path), fmt(n), fmtKg(n), chartDefaults() y los colores
-//   _COLOR_PROGRAMADO/_COLOR_FUNDIDO definidos por pend_fundir.js.
+//   $id(id), api(path), fmt(n), fmtKg(n), fmtPesos(n), chartDefaults() y los
+//   colores _COLOR_PROGRAMADO/_COLOR_FUNDIDO definidos por pend_fundir.js.
 //   Chart (Chart.js UMD, cargado por <script> aparte)
 
-function _proyeccionPartes(proyeccion, useKg) {
+// modo: 'piezas' | 'kg' | 'pesos'. "pesos" usa el precio VIGENTE aplicado a
+// cantidades historicas (Precios no guarda que se cobro en cada año) -- sirve
+// para comparar volumen entre años a plata de hoy, no como ingreso historico
+// real (eso esta en RemitosHistoricos, otro dato).
+function _proyeccionPartes(proyeccion, modo) {
   if (!proyeccion) return { inicial: 0, programado: 0, fundido: 0 };
-  return useKg
-    ? { inicial: proyeccion.inicial?.kg || 0, programado: proyeccion.programado.kg || 0, fundido: proyeccion.fundido.kg || 0 }
-    : { inicial: proyeccion.inicial?.piezas || 0, programado: proyeccion.programado.piezas || 0, fundido: proyeccion.fundido.piezas || 0 };
+  const campo = modo === 'kg' ? 'kg' : modo === 'pesos' ? 'pesos' : 'piezas';
+  return {
+    inicial: proyeccion.inicial?.[campo] || 0,
+    programado: proyeccion.programado[campo] || 0,
+    fundido: proyeccion.fundido[campo] || 0,
+  };
 }
 
 // Encima de la barra "Entregadas" de uno o más índices (el año actual en el
@@ -62,33 +69,36 @@ const _trendProyeccionPlugin = {
 };
 Chart.register(_trendProyeccionPlugin);
 
-// Dibuja la barra anual en canvasId. kgBtnId (opcional): boton "Ver kg" a
-// sincronizar (texto + oculto si no hay datos en kg). onBarClick(año)
+// Dibuja la barra anual en canvasId. kgBtnId (opcional): boton "Ver kg"/"Ver $"
+// a sincronizar (texto + oculto si no hay ni kg ni pesos). onBarClick(año)
 // (opcional): index.html lo usa para el drill-down mensual; kiosk no pasa
 // nada, ahi las barras no son clickeables. Devuelve el Chart creado (o null
 // si no habia datos/canvas) -- el llamador decide si lo guarda en algun lado.
-function _renderTendenciaBarras(canvasId, data, proyeccion, useKg, kgBtnId, onBarClick) {
+// modo: 'piezas' | 'kg' | 'pesos'.
+function _renderTendenciaBarras(canvasId, data, proyeccion, modo, kgBtnId, onBarClick) {
   const canvas = $id(canvasId);
   if (!canvas || !data || !data.length) return null;
   try { Chart.getChart(canvas)?.destroy(); } catch (_) {}
 
   const hasKg = data.some(t => (t.kg_entregadas || 0) > 0);
-  useKg = useKg && hasKg;
-  const sfx = useKg ? ' (kg)' : '';
+  const hasPesos = data.some(t => (t.pesos_entregadas || 0) > 0);
+  if (modo === 'kg' && !hasKg) modo = 'piezas';
+  if (modo === 'pesos' && !hasPesos) modo = 'piezas';
+  const sfx = modo === 'kg' ? ' (kg)' : modo === 'pesos' ? ' ($)' : '';
+  const campo = (base) => modo === 'piezas' ? base : modo + '_' + base;
+  const fmtFn = modo === 'kg' ? fmtKg : modo === 'pesos' ? fmtPesos : fmt;
   const kgBtn = kgBtnId ? $id(kgBtnId) : null;
   if (kgBtn) {
-    kgBtn.style.display = hasKg ? '' : 'none';
-    kgBtn.textContent = useKg ? 'Ver unidades' : 'Ver kg';
+    kgBtn.style.display = (hasKg || hasPesos) ? '' : 'none';
+    kgBtn.textContent = modo === 'piezas' ? 'Ver kg' : modo === 'kg' ? 'Ver $' : 'Ver piezas';
   }
 
   const opts = chartDefaults();
   opts.layout = { padding: { top: 30 } }; // lugar para la proyección arriba de la barra del año actual
   const añoActualTT = String(new Date().getFullYear());
   const idxActual = data.findIndex(t => t.año === añoActualTT);
-  const entregadasActual = idxActual >= 0
-    ? (useKg ? (data[idxActual].kg_entregadas || 0) : (data[idxActual].entregadas || 0))
-    : 0;
-  const partes = _proyeccionPartes(proyeccion, useKg);
+  const entregadasActual = idxActual >= 0 ? (data[idxActual][campo('entregadas')] || 0) : 0;
+  const partes = _proyeccionPartes(proyeccion, modo);
   opts.plugins.trendProyeccion = (proyeccion && idxActual >= 0)
     ? { items: [{ index: idxActual, entregadasActual, ...partes }] }
     : null;
@@ -98,7 +108,6 @@ function _renderTendenciaBarras(canvasId, data, proyeccion, useKg, kgBtnId, onBa
     const label = ctx.dataset.label || '';
     const val = ctx.parsed.y;
     if (ctx.datasetIndex === 0 && proyeccion && ctx.dataIndex === idxActual) {
-      const fmtFn = useKg ? fmtKg : fmt;
       return [
         label + ': ' + fmtFn(val),
         'Inicial: ' + fmtFn(partes.inicial),
@@ -107,7 +116,7 @@ function _renderTendenciaBarras(canvasId, data, proyeccion, useKg, kgBtnId, onBa
         'Total proyectado: ' + fmtFn(val + partes.inicial + partes.programado + partes.fundido),
       ];
     }
-    return label + ': ' + (useKg ? fmtKg(val) : fmt(val));
+    return label + ': ' + fmtFn(val);
   } } };
   if (onBarClick) {
     opts.onHover = (e, els) => { try { e.native.target.style.cursor = els.length ? 'pointer' : 'default'; } catch (_) {} };
@@ -118,16 +127,11 @@ function _renderTendenciaBarras(canvasId, data, proyeccion, useKg, kgBtnId, onBa
     type: 'bar',
     data: {
       labels: data.map(t => t.año),
-      datasets: useKg ? [
-        { label: 'Entregadas'+sfx, data: data.map(t=>t.kg_entregadas||0), backgroundColor: '#66bb6abb', borderRadius: 4 },
-        { label: 'Rechazadas'+sfx, data: data.map(t=>t.kg_rechazadas||0), backgroundColor: '#ef5350bb', borderRadius: 4 },
-        { label: 'Devueltas'+sfx,  data: data.map(t=>t.kg_devueltas ||0), backgroundColor: '#a78bfabb', borderRadius: 4 },
-        { label: 'Entregadas - Devueltas'+sfx, data: data.map(t=>t.kg_neta||0), backgroundColor: '#42a5f5bb', borderRadius: 4 },
-      ] : [
-        { label: 'Entregadas', data: data.map(t=>t.entregadas), backgroundColor: '#66bb6abb', borderRadius: 4 },
-        { label: 'Rechazadas', data: data.map(t=>t.rechazadas), backgroundColor: '#ef5350bb', borderRadius: 4 },
-        { label: 'Devueltas',  data: data.map(t=>t.devueltas),  backgroundColor: '#a78bfabb', borderRadius: 4 },
-        { label: 'Entregadas - Devueltas', data: data.map(t=>t.neta), backgroundColor: '#42a5f5bb', borderRadius: 4 },
+      datasets: [
+        { label: 'Entregadas'+sfx, data: data.map(t=>t[campo('entregadas')]||0), backgroundColor: '#66bb6abb', borderRadius: 4 },
+        { label: 'Rechazadas'+sfx, data: data.map(t=>t[campo('rechazadas')]||0), backgroundColor: '#ef5350bb', borderRadius: 4 },
+        { label: 'Devueltas'+sfx,  data: data.map(t=>t[campo('devueltas')]||0), backgroundColor: '#a78bfabb', borderRadius: 4 },
+        { label: 'Entregadas - Devueltas'+sfx, data: data.map(t=>t[campo('neta')]||0), backgroundColor: '#42a5f5bb', borderRadius: 4 },
       ],
     },
     options: opts,

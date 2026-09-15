@@ -3,13 +3,17 @@
 // UNICA fuente de esta funcionalidad, no se duplica en ninguno de los dos.
 //
 // Dependencias que el documento que lo carga debe definir ANTES de este script:
-//   $id(id), api(path), fmt(n), fmtKg(n)  -- helpers ya presentes en index.html y kiosk.html
+//   $id(id), api(path), fmt(n), fmtKg(n), fmtPesos(n)  -- helpers ya presentes en index.html y kiosk.html
 //   Chart (Chart.js UMD, cargado por <script> aparte)
 //   go(pagina, id)  -- navegacion opcional; index.html la tiene (clic en una OT del
 //     detalle abre su ficha). kiosk.html no la define -- ver _pendFundirIrATrabajo,
 //     que revisa que exista antes de llamarla y en kiosk simplemente no navega.
 
-let _pendFundirKgMode = false;
+// 'piezas' | 'kg' | 'pesos' -- que unidad muestran las barras/tooltip/subtitulo.
+// El nombre viejo (_pendFundirKgMode, booleano) se reemplaza por este modo de 3
+// estados; pesos_pendientes viene de la misma resolucion de precio que usa
+// /api/dashboard/pendiente_fundir/sin_precio (ver ese endpoint en main.py).
+let _pendFundirModo = 'piezas';
 let _pendFundirData   = null;
 let _pendFundirIds    = null;   // {canvasId, subtitleId}
 let _pendFundirCharts = {};     // {canvasId: Chart}
@@ -64,8 +68,11 @@ async function _renderPendienteFundirChart(canvasId, subtitleId, meses) {
   _drawPendienteFundirChart(canvasId, subtitleId, data);
 }
 
-function _togglePendFundirKg() {
-  _pendFundirKgMode = !_pendFundirKgMode;
+const _PEND_FUNDIR_MODOS = ['piezas', 'kg', 'pesos'];
+
+function _ciclarPendFundirModo() {
+  const i = _PEND_FUNDIR_MODOS.indexOf(_pendFundirModo);
+  _pendFundirModo = _PEND_FUNDIR_MODOS[(i + 1) % _PEND_FUNDIR_MODOS.length];
   if (_pendFundirData && _pendFundirIds) {
     _drawPendienteFundirChart(_pendFundirIds.canvasId, _pendFundirIds.subtitleId, _pendFundirData);
   }
@@ -453,17 +460,18 @@ async function _abrirPendFundirDetalle(titulo, filtros) {
 
   const totalPz = rows.reduce((s, r) => s + (r.pendientes || 0), 0);
   const totalKg = rows.reduce((s, r) => s + (r.kg_pendientes || 0), 0);
+  const totalPesos = rows.reduce((s, r) => s + (r.pesos_pendientes || 0), 0);
   const hayVarios = new Set(rows.map(r => r.estado)).size > 1;
 
   body.innerHTML = `
     <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
-      ${fmt(rows.length)} OT${rows.length !== 1 ? 's' : ''} &middot; ${fmt(totalPz)} piezas &middot; ${fmtKg(totalKg)}
+      ${fmt(rows.length)} OT${rows.length !== 1 ? 's' : ''} &middot; ${fmt(totalPz)} piezas &middot; ${fmtKg(totalKg)} &middot; ${fmtPesos(totalPesos)}
     </div>
     <div class="tbl-wrap">
       <table>
         <thead><tr>
           <th>OT</th>${hayVarios ? '<th>Estado</th>' : ''}<th>Pieza</th><th>Material</th><th>Cliente</th>
-          <th style="text-align:right">Pend.</th><th style="text-align:right">Kg</th><th>Entrega</th>
+          <th style="text-align:right">Pend.</th><th style="text-align:right">Kg</th><th style="text-align:right">$</th><th>Entrega</th>
         </tr></thead>
         <tbody>${rows.map(r => `
           <tr class="tr-link" onclick="closePendFundirDetalleModal();_pendFundirIrATrabajo(${r.ot_id})">
@@ -474,6 +482,7 @@ async function _abrirPendFundirDetalle(titulo, filtros) {
             <td>${r.cliente_nombre || '—'}${r.codigo_cliente === 'BA3' ? ' <span style="color:#7cc0f8;font-size:10px;font-weight:700">&#9679; Batiplane</span>' : ''}<div style="font-size:11px;color:var(--muted)">${r.codigo_cliente || ''}</div></td>
             <td style="text-align:right">${fmt(r.pendientes)}</td>
             <td style="text-align:right">${r.kg_pendientes != null ? fmtKg(r.kg_pendientes) : '—'}</td>
+            <td style="text-align:right">${r.pesos_pendientes != null ? fmtPesos(r.pesos_pendientes) : '—'}</td>
             <td style="font-size:11px;color:var(--muted)">${r.fechaprevista ? r.fechaprevista.slice(0, 10) : '—'}</td>
           </tr>`).join('')}
         </tbody>
@@ -487,6 +496,7 @@ function _imprimirPendFundirDetalle() {
   const now = new Date().toLocaleString('es-AR');
   const totalPz = rows.reduce((s, r) => s + (r.pendientes || 0), 0);
   const totalKg = rows.reduce((s, r) => s + (r.kg_pendientes || 0), 0);
+  const totalPesos = rows.reduce((s, r) => s + (r.pesos_pendientes || 0), 0);
   const cuerpo = rows.map(r => `
     <tr>
       <td><strong>${String(r.ot_id).padStart(6, '0')}</strong></td>
@@ -496,6 +506,7 @@ function _imprimirPendFundirDetalle() {
       <td>${r.cliente_nombre || '—'}<div class="sub">${r.codigo_cliente || ''}</div></td>
       <td class="num">${fmt(r.pendientes)}</td>
       <td class="num">${r.kg_pendientes != null ? fmtKg(r.kg_pendientes) : '—'}</td>
+      <td class="num">${r.pesos_pendientes != null ? fmtPesos(r.pesos_pendientes) : '—'}</td>
       <td>${r.fechaprevista ? r.fechaprevista.slice(0, 10) : '—'}</td>
       <td class="obs"></td>
     </tr>`).join('');
@@ -512,8 +523,8 @@ th,td{border:1px solid #ccc;padding:5px;vertical-align:top}.num{text-align:right
 @media print{body{padding:0}@page{size:A4 landscape;margin:10mm}}
 </style></head><body>
 <h1>${_pendFundirDetalleTitulo}</h1>
-<div class="resumen">Impreso: ${now} · ${fmt(rows.length)} OTs · ${fmt(totalPz)} piezas · ${fmtKg(totalKg)}</div>
-<table><thead><tr><th>OT</th><th>Estado</th><th>Pieza</th><th>Material</th><th>Cliente</th><th>Pend.</th><th>Kg</th><th>Vencimiento</th><th>Observaciones</th></tr></thead>
+<div class="resumen">Impreso: ${now} · ${fmt(rows.length)} OTs · ${fmt(totalPz)} piezas · ${fmtKg(totalKg)} · ${fmtPesos(totalPesos)}</div>
+<table><thead><tr><th>OT</th><th>Estado</th><th>Pieza</th><th>Material</th><th>Cliente</th><th>Pend.</th><th>Kg</th><th>$</th><th>Vencimiento</th><th>Observaciones</th></tr></thead>
 <tbody>${cuerpo}</tbody></table></body></html>`);
   w.document.close();
   setTimeout(() => w.print(), 500);
@@ -649,23 +660,35 @@ function _ordenarPorGrupos(data) {
   const grupos = [];
   for (const codigos of _PEND_FUNDIR_GRUPOS) {
     const startIdx = ordenada.length;
-    let kgInicial = 0, kgProgramado = 0, kgFundido = 0, kgInicialBatiplane = 0, kgProgramadoBatiplane = 0, kgFundidoBatiplane = 0, huboAlguno = false;
+    // kg y pesos por serie -- el plugin suma solo lo que este visible segun la
+    // leyenda, asi apagar "Fundido" tambien saca su parte del total de la llave.
+    const tot = {
+      kgInicial: 0, kgProgramado: 0, kgFundido: 0,
+      kgInicialBatiplane: 0, kgProgramadoBatiplane: 0, kgFundidoBatiplane: 0,
+      pesosInicial: 0, pesosProgramado: 0, pesosFundido: 0,
+      pesosInicialBatiplane: 0, pesosProgramadoBatiplane: 0, pesosFundidoBatiplane: 0,
+    };
+    let huboAlguno = false;
     for (const cod of codigos) {
       const d = porCodigo.get(cod);
       if (!d) continue;
       ordenada.push(d);
       usados.add(cod);
-      kgInicial += d.inicial.kg_pendientes || 0;
-      kgProgramado += d.programado.kg_pendientes || 0;
-      kgFundido += d.fundido.kg_pendientes || 0;
-      kgInicialBatiplane += (d.inicial.batiplane && d.inicial.batiplane.kg_pendientes) || 0;
-      kgProgramadoBatiplane += (d.programado.batiplane && d.programado.batiplane.kg_pendientes) || 0;
-      kgFundidoBatiplane += (d.fundido.batiplane && d.fundido.batiplane.kg_pendientes) || 0;
+      tot.kgInicial += d.inicial.kg_pendientes || 0;
+      tot.kgProgramado += d.programado.kg_pendientes || 0;
+      tot.kgFundido += d.fundido.kg_pendientes || 0;
+      tot.kgInicialBatiplane += (d.inicial.batiplane && d.inicial.batiplane.kg_pendientes) || 0;
+      tot.kgProgramadoBatiplane += (d.programado.batiplane && d.programado.batiplane.kg_pendientes) || 0;
+      tot.kgFundidoBatiplane += (d.fundido.batiplane && d.fundido.batiplane.kg_pendientes) || 0;
+      tot.pesosInicial += d.inicial.pesos_pendientes || 0;
+      tot.pesosProgramado += d.programado.pesos_pendientes || 0;
+      tot.pesosFundido += d.fundido.pesos_pendientes || 0;
+      tot.pesosInicialBatiplane += (d.inicial.batiplane && d.inicial.batiplane.pesos_pendientes) || 0;
+      tot.pesosProgramadoBatiplane += (d.programado.batiplane && d.programado.batiplane.pesos_pendientes) || 0;
+      tot.pesosFundidoBatiplane += (d.fundido.batiplane && d.fundido.batiplane.pesos_pendientes) || 0;
       huboAlguno = true;
     }
-    // kg separado por serie -- el plugin suma solo lo que este visible segun
-    // la leyenda, asi apagar "Fundido" tambien saca su parte del total de la llave.
-    if (huboAlguno) grupos.push({ startIdx, endIdx: ordenada.length - 1, kgInicial, kgProgramado, kgFundido, kgInicialBatiplane, kgProgramadoBatiplane, kgFundidoBatiplane });
+    if (huboAlguno) grupos.push({ startIdx, endIdx: ordenada.length - 1, ...tot });
   }
   for (const d of data) { if (!usados.has(d.codigo)) ordenada.push(d); }
   return { ordenada, grupos };
@@ -716,6 +739,11 @@ const _grupoLlavePlugin = {
     const colorInicial  = opts.print ? _COLOR_INICIAL_PRINT : '#b39ddb';
     const colorProgBat = opts.print ? _COLOR_PROGRAMADO_BATIPLANE_PRINT : _COLOR_PROGRAMADO_BATIPLANE;
     const colorFundBat  = opts.print ? _COLOR_FUNDIDO_BATIPLANE_PRINT : _COLOR_FUNDIDO_BATIPLANE;
+    // La llave siempre muestra $ en modo pesos, kg en los otros dos modos --
+    // es una anotacion secundaria (no la metrica principal de las barras), y
+    // kg es el dato mas accionable salvo cuando el usuario pidio ver plata.
+    const f = opts.modo === 'pesos' ? fmtPesos : fmtKg;
+    const pfx = opts.modo === 'pesos' ? 'pesos' : 'kg';
     opts.grupos.forEach((g) => {
       const barTop = meta0.data[g.startIdx];
       const barBottomEl = (meta2 && meta2.data[g.endIdx]) || (meta1 && meta1.data[g.endIdx]) || meta0.data[g.endIdx];
@@ -730,22 +758,22 @@ const _grupoLlavePlugin = {
       const yMid = (yTop + yBottom) / 2;
       const lineas = [];
       if (inicialVisible) {
-        const bat = g.kgInicialBatiplane || 0;
-        const resto = g.kgInicial - bat;
-        if (resto > 0) lineas.push({ texto: fmtKg(resto), color: colorInicial });
-        if (bat > 0) lineas.push({ texto: fmtKg(bat), color: _COLOR_INICIAL_BATIPLANE });
+        const bat = g[pfx + 'InicialBatiplane'] || 0;
+        const resto = g[pfx + 'Inicial'] - bat;
+        if (resto > 0) lineas.push({ texto: f(resto), color: colorInicial });
+        if (bat > 0) lineas.push({ texto: f(bat), color: _COLOR_INICIAL_BATIPLANE });
       }
       if (progVisible) {
-        const bat = g.kgProgramadoBatiplane || 0;
-        const resto = g.kgProgramado - bat;
-        if (resto > 0) lineas.push({ texto: fmtKg(resto), color: colorProg });
-        if (bat > 0) lineas.push({ texto: fmtKg(bat), color: colorProgBat });
+        const bat = g[pfx + 'ProgramadoBatiplane'] || 0;
+        const resto = g[pfx + 'Programado'] - bat;
+        if (resto > 0) lineas.push({ texto: f(resto), color: colorProg });
+        if (bat > 0) lineas.push({ texto: f(bat), color: colorProgBat });
       }
       if (fundVisible) {
-        const bat = g.kgFundidoBatiplane || 0;
-        const resto = g.kgFundido - bat;
-        if (resto > 0) lineas.push({ texto: fmtKg(resto), color: colorFund });
-        if (bat > 0) lineas.push({ texto: fmtKg(bat), color: colorFundBat });
+        const bat = g[pfx + 'FundidoBatiplane'] || 0;
+        const resto = g[pfx + 'Fundido'] - bat;
+        if (resto > 0) lineas.push({ texto: f(resto), color: colorFund });
+        if (bat > 0) lineas.push({ texto: f(bat), color: colorFundBat });
       }
       const gap = fontSize + 2;
       const yIni = yMid - (lineas.length - 1) * gap / 2;
@@ -762,7 +790,7 @@ Chart.register(_grupoLlavePlugin);
 // Texto de resumen (arriba del grafico): togglear "Programado"/"Fundido" en
 // la leyenda saca esa serie de los totales y de su propio renglon, no solo
 // de las barras -- son los mismos numeros, calculados con la misma logica.
-function _pendFundirResumenTexto(chart, data, useKg) {
+function _pendFundirResumenTexto(chart, data, modo) {
   const inicialVisible = chart.isDatasetVisible(0);
   const progVisible = chart.isDatasetVisible(1);
   const fundVisible = chart.isDatasetVisible(2);
@@ -770,19 +798,24 @@ function _pendFundirResumenTexto(chart, data, useKg) {
     (inicialVisible ? (d.inicial[campo] || 0) : 0) + (progVisible ? (d.programado[campo] || 0) : 0) + (fundVisible ? (d.fundido[campo] || 0) : 0);
   const grupoTotal = (grupo, campo) => data.reduce((s, d) => s + (d[grupo][campo] || 0), 0);
   const totalPzsSinPeso = data.reduce((s, d) => s + segTotal(d, 'piezas_sin_peso'), 0);
+  const totalPzsSinPrecio = data.reduce((s, d) => s + segTotal(d, 'piezas_sin_precio'), 0);
   const totalOts = data.reduce((s, d) => s + segTotal(d, 'ots'), 0);
   const totalPzs = data.reduce((s, d) => s + segTotal(d, 'piezas_pendientes'), 0);
   const totalKg  = data.reduce((s, d) => s + segTotal(d, 'kg_pendientes'), 0);
+  const totalPesos = data.reduce((s, d) => s + segTotal(d, 'pesos_pendientes'), 0);
+  const sufijoMonto = modo === 'kg' ? (' · ' + fmtKg(totalKg)) : modo === 'pesos' ? (' · ' + fmtPesos(totalPesos)) : '';
   const resumenGrupo = (grupo, nombre) => nombre + ': ' + fmt(grupoTotal(grupo, 'ots')) + ' OT' + (grupoTotal(grupo, 'ots') !== 1 ? 's' : '')
     + ' · ' + fmt(grupoTotal(grupo, 'piezas_pendientes')) + ' piezas'
-    + (useKg ? ' · ' + fmtKg(grupoTotal(grupo, 'kg_pendientes')) : '');
+    + (modo === 'kg' ? ' · ' + fmtKg(grupoTotal(grupo, 'kg_pendientes'))
+       : modo === 'pesos' ? ' · ' + fmtPesos(grupoTotal(grupo, 'pesos_pendientes')) : '');
   const partes = [];
   if (inicialVisible) partes.push(resumenGrupo('inicial', 'Inicial'));
   if (progVisible) partes.push(resumenGrupo('programado', 'Programado'));
   if (fundVisible) partes.push(resumenGrupo('fundido', 'Fundido'));
   return totalOts + ' OT' + (totalOts !== 1 ? 's' : '') + ' activas · ' + fmt(totalPzs) + ' piezas'
-    + (useKg ? ' · ' + fmtKg(totalKg) : '')
-    + (useKg && totalPzsSinPeso > 0 ? ' · ⚠ ' + fmt(totalPzsSinPeso) + ' sin peso cargado (kg incompleto)' : '')
+    + sufijoMonto
+    + (modo === 'kg' && totalPzsSinPeso > 0 ? ' · ⚠ ' + fmt(totalPzsSinPeso) + ' sin peso cargado (kg incompleto)' : '')
+    + (modo === 'pesos' && totalPzsSinPrecio > 0 ? ' · ⚠ ' + fmt(totalPzsSinPrecio) + ' sin precio cargado ($ incompleto)' : '')
     + (partes.length ? ' — ' + partes.join(' · ') : '');
 }
 
@@ -794,7 +827,7 @@ const _pendFundirSubtituloPlugin = {
   afterUpdate(chart, args, opts) {
     if (!opts || !opts.subtitleId) return;
     const sub = $id(opts.subtitleId);
-    if (sub) sub.textContent = _pendFundirResumenTexto(chart, opts.data, opts.useKg);
+    if (sub) sub.textContent = _pendFundirResumenTexto(chart, opts.data, opts.modo);
   },
 };
 Chart.register(_pendFundirSubtituloPlugin);
@@ -802,11 +835,13 @@ Chart.register(_pendFundirSubtituloPlugin);
 // Config compartida entre el grafico interactivo (tema oscuro, en pantalla) y
 // el que se genera aparte para imprimir (fondo blanco, letra mas grande) --
 // print:true cambia colores/tamaños, nunca la logica de los pasos de la regla.
-function _pendFundirChartConfig(data, useKg, print, subtitleId) {
+// modo: 'piezas' | 'kg' | 'pesos'.
+function _pendFundirChartConfig(data, modo, print, subtitleId) {
   const { ordenada, grupos } = _ordenarPorGrupos(data);
   data = ordenada;
-  const valorSegmento = (seg) => useKg ? (seg.kg_pendientes || 0) : (seg.ots || 0);
-  const etiquetaSegmento = (v) => useKg ? fmtKg(v) : fmt(v) + ' OT' + (v !== 1 ? 's' : '');
+  const campoValor = { piezas: 'ots', kg: 'kg_pendientes', pesos: 'pesos_pendientes' }[modo];
+  const valorSegmento = (seg) => seg[campoValor] || 0;
+  const etiquetaSegmento = (v) => modo === 'kg' ? fmtKg(v) : modo === 'pesos' ? fmtPesos(v) : fmt(v) + ' OT' + (v !== 1 ? 's' : '');
   const inicialVals = data.map(d => valorSegmento(d.inicial));
   const progVals = data.map(d => valorSegmento(d.programado));
   const fundVals = data.map(d => valorSegmento(d.fundido));
@@ -839,10 +874,10 @@ function _pendFundirChartConfig(data, useKg, print, subtitleId) {
       print ? _COLOR_FUNDIDO_BATIPLANE_PRINT : _COLOR_FUNDIDO_BATIPLANE,
     ],
   };
-  opts.plugins.grupoLlave = { grupos, print };
+  opts.plugins.grupoLlave = { grupos, print, modo };
   // Solo en pantalla -- la imagen de impresion es una captura estatica sin
   // leyenda clickeable, no tiene sentido sincronizar un texto que no cambia.
-  if (!print && subtitleId) opts.plugins.pendFundirSubtitulo = { data, useKg, subtitleId };
+  if (!print && subtitleId) opts.plugins.pendFundirSubtitulo = { data, modo, subtitleId };
   if (print) { opts.animation = false; opts.responsive = false; }
   // Clic en una barra -- Programado o Fundido de un material -- abre la
   // lista de OTs detras de ese numero. No tiene sentido en la imagen impresa.
@@ -891,28 +926,38 @@ function _pendFundirChartConfig(data, useKg, print, subtitleId) {
       const nombres = ['Inicial', 'Programado', 'Fundido'];
       const seg = data[ctx.dataIndex][campos[ctx.datasetIndex]];
       const nombre = nombres[ctx.datasetIndex];
-      return useKg
-        ? nombre + ': ' + fmt(seg.piezas_pendientes) + ' piezas · ' + fmtKg(seg.kg_pendientes)
-        : nombre + ': ' + fmt(seg.ots) + ' OT' + (seg.ots !== 1 ? 's' : '') + ' · ' + fmt(seg.piezas_pendientes) + ' piezas';
+      if (modo === 'piezas') {
+        return nombre + ': ' + fmt(seg.ots) + ' OT' + (seg.ots !== 1 ? 's' : '') + ' · ' + fmt(seg.piezas_pendientes) + ' piezas';
+      }
+      const f = modo === 'kg' ? fmtKg : fmtPesos;
+      return nombre + ': ' + fmt(seg.piezas_pendientes) + ' piezas · ' + f(seg[campoValor]);
     },
     afterLabel: (ctx) => {
       const seg = data[ctx.dataIndex][['inicial', 'programado', 'fundido'][ctx.datasetIndex]];
       const lineas = [];
       const bat = seg.batiplane;
       if (bat && bat.ots) {
+        const f = modo === 'kg' ? fmtKg : modo === 'pesos' ? fmtPesos : null;
         lineas.push('◆ De los cuales, Batiplane: ' + fmt(bat.ots) + ' OT' + (bat.ots !== 1 ? 's' : '')
-          + (useKg ? ' · ' + fmtKg(bat.kg_pendientes) : ' · ' + fmt(bat.piezas_pendientes) + ' piezas'));
+          + (f ? ' · ' + f(bat[campoValor]) : ' · ' + fmt(bat.piezas_pendientes) + ' piezas'));
       }
-      if (useKg && seg.piezas_sin_peso) {
+      if (modo === 'kg' && seg.piezas_sin_peso) {
         lineas.push(seg.piezas_sin_peso >= seg.piezas_pendientes
           ? '⚠ Sin ninguna pieza con peso cargado — kg desconocido'
           : '⚠ ' + fmt(seg.piezas_sin_peso) + ' de ' + fmt(seg.piezas_pendientes) + ' piezas sin peso cargado — kg incompleto');
+      }
+      if (modo === 'pesos' && seg.piezas_sin_precio) {
+        lineas.push(seg.piezas_sin_precio >= seg.piezas_pendientes
+          ? '⚠ Sin ninguna pieza con precio cargado — $ desconocido'
+          : '⚠ ' + fmt(seg.piezas_sin_precio) + ' de ' + fmt(seg.piezas_pendientes) + ' piezas sin precio cargado — $ incompleto');
       }
       return lineas.length ? lineas : undefined;
     }
   } };
 
   const sinPesoTotal = (d) => (d.inicial.piezas_sin_peso || 0) + (d.programado.piezas_sin_peso || 0) + (d.fundido.piezas_sin_peso || 0);
+  const sinPrecioTotal = (d) => (d.inicial.piezas_sin_precio || 0) + (d.programado.piezas_sin_precio || 0) + (d.fundido.piezas_sin_precio || 0);
+  const faltaDato = (d) => (modo === 'kg' && sinPesoTotal(d) > 0) || (modo === 'pesos' && sinPrecioTotal(d) > 0);
   const colorInicial    = print ? _COLOR_INICIAL_PRINT : _COLOR_INICIAL;
   const colorProgramado = print ? _COLOR_PROGRAMADO_PRINT : _COLOR_PROGRAMADO;
   const colorFundido    = print ? _COLOR_FUNDIDO_PRINT : _COLOR_FUNDIDO;
@@ -920,7 +965,7 @@ function _pendFundirChartConfig(data, useKg, print, subtitleId) {
   return {
     type: 'bar',
     data: {
-      labels: data.map(d => d.codigo + ((useKg && sinPesoTotal(d) > 0) ? ' ⚠' : '')),
+      labels: data.map(d => d.codigo + (faltaDato(d) ? ' ⚠' : '')),
       datasets: [
         { label: 'Inicial',    data: inicialVals, backgroundColor: colorInicial,    borderRadius: 4 },
         { label: 'Programado', data: progVals, backgroundColor: colorProgramado, borderRadius: 4 },
@@ -938,9 +983,9 @@ function _drawPendienteFundirChart(canvasId, subtitleId, data) {
     canvas.closest('.chart-box').innerHTML = '<div class="empty">Sin piezas pendientes de fundir</div>';
     return;
   }
-  const useKg = _pendFundirKgMode;
+  const modo = _pendFundirModo;
   const kgBtn = $id('pend-fundir-kg-btn');
-  if (kgBtn) kgBtn.textContent = useKg ? 'Ver en piezas' : 'Ver en kg';
+  if (kgBtn) kgBtn.textContent = { piezas: 'Ver en kg', kg: 'Ver en $', pesos: 'Ver en piezas' }[modo];
 
   // .chart-box trae una altura fija (240px) pensada para los demas graficos
   // de la app -- ahi, con Programado y Fundido lado a lado por cada material,
@@ -951,7 +996,7 @@ function _drawPendienteFundirChart(canvasId, subtitleId, data) {
   if (chartBox) chartBox.style.height = Math.max(240, data.length * 46 + 60) + 'px';
 
   if (_pendFundirCharts[canvasId]) { _pendFundirCharts[canvasId].destroy(); _pendFundirCharts[canvasId] = null; }
-  _pendFundirCharts[canvasId] = new Chart(canvas, _pendFundirChartConfig(data, useKg, false, subtitleId));
+  _pendFundirCharts[canvasId] = new Chart(canvas, _pendFundirChartConfig(data, modo, false, subtitleId));
 }
 
 
@@ -969,7 +1014,7 @@ function _imprimirPendienteFundir() {
   const printCanvas = document.createElement('canvas');
   printCanvas.width = 1600;
   printCanvas.height = 800;
-  const printChart = new Chart(printCanvas, _pendFundirChartConfig(data, _pendFundirKgMode, true));
+  const printChart = new Chart(printCanvas, _pendFundirChartConfig(data, _pendFundirModo, true));
   const imgData = printCanvas.toDataURL('image/png');
   printChart.destroy();
 

@@ -25,7 +25,13 @@
   --header-h: 52px;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 14px; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+/* 100vh en mobile no coincide con el viewport real (la barra de direcciones
+   del navegador lo infla) -- body queda mas alto que lo visible y, como no
+   scrollea (solo #main lo hace por dentro), la franja de mas queda inalcanzable
+   por abajo. 100dvh (dynamic viewport height) se ajusta al alto real visible;
+   se declara DESPUES de 100vh a proposito -- un navegador viejo que no entienda
+   dvh ignora esa linea y se queda con el 100vh de antes, no rompe nada. */
+body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 14px; height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
 
 /* Header */
 #header { height: var(--header-h); background: var(--surface); border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 16px; gap: 12px; flex-shrink: 0; }
@@ -54,7 +60,14 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .nav-icon { width: 18px; text-align: center; }
 
 /* Main panel */
-#main { flex: 1; overflow-y: auto; padding: 20px 24px; }
+/* min-width:0 -- sin esto, un item flex no encoge mas alla del ancho
+   intrinseco de su contenido (regla por defecto de flexbox): una tabla ancha
+   adentro empuja a #main mas alla de lo que le toca en #layout, y como
+   #layout tiene overflow:hidden, ese excedente queda recortado e inalcanzable
+   en vez de scrollear -- exactamente lo que le pasaba en mobile a las tablas
+   de Cargar moldeo (7 y 6 columnas). Cada tabla ya scrollea sola via
+   .tbl-wrap { overflow-x: auto } -- esto es lo que le permite hacerlo. */
+#main { flex: 1; min-width: 0; overflow-y: auto; padding: 20px 24px; }
 
 /* ── Kiosk mode ──────────────────────────────────────────────────────────── */
 body.kiosk #sidebar  { display: none !important; }
@@ -287,6 +300,9 @@ th.sort:hover { color: var(--text); }
 td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
 tr:last-child td { border-bottom: none; }
 .tr-link { cursor: pointer; }
+/* Fila activa en Cargar moldeo -- outline (no background) para no pisar el
+   color de fondo por estado que cada fila ya trae inline. */
+.moldeo-fila-activa { outline: 2px solid var(--accent); outline-offset: -2px; }
 .tr-link:hover td { background: #1a2744; }
 .ped-group-start td { border-top: 2px solid var(--accent); }
 .tag { display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; }
@@ -405,11 +421,31 @@ tr:last-child td { border-bottom: none; }
   background: rgba(0,0,0,.7); align-items: flex-start; justify-content: center; padding-top: 60px;
 }
 #sin-peso-modal.open { display: flex; }
-#moldeo-modal {
+#sin-precio-modal {
   display: none; position: fixed; inset: 0; z-index: 2000;
   background: rgba(0,0,0,.7); align-items: flex-start; justify-content: center; padding-top: 60px;
 }
-#moldeo-modal.open { display: flex; }
+#sin-precio-modal.open { display: flex; }
+#precio-kg-detalle-modal {
+  display: none; position: fixed; inset: 0; z-index: 2000;
+  background: rgba(0,0,0,.7); align-items: flex-start; justify-content: center; padding-top: 60px;
+}
+#precio-kg-detalle-modal.open { display: flex; }
+#moldeo-sinot-modal {
+  display: none; position: fixed; inset: 0; z-index: 2100;
+  background: rgba(0,0,0,.7); align-items: flex-start; justify-content: center; padding-top: 100px;
+}
+#moldeo-sinot-modal.open { display: flex; }
+#moldeo-ayudante-modal {
+  display: none; position: fixed; inset: 0; z-index: 2100;
+  background: rgba(0,0,0,.7); align-items: flex-start; justify-content: center; padding-top: 100px;
+}
+#moldeo-ayudante-modal.open { display: flex; }
+#moldeo-prod-modal {
+  display: none; position: fixed; inset: 0; z-index: 2000;
+  background: rgba(0,0,0,.7); align-items: flex-start; justify-content: center; padding-top: 40px;
+}
+#moldeo-prod-modal.open { display: flex; }
 .probeta-mbox {
   background: var(--surface); border: 1px solid rgba(167,107,250,.5);
   border-radius: 10px; width: 900px; max-width: calc(100vw - 32px);
@@ -672,6 +708,33 @@ tr:last-child td { border-bottom: none; }
   </div>
 </div>
 
+<div id="sin-precio-modal" onclick="if(event.target===this)closeSinPrecioModal()">
+  <div class="probeta-mbox">
+    <div class="probeta-mhdr">
+      <span style="font-size:20px">&#9888;</span>
+      <h3>Piezas pendientes de fundir sin precio cargado</h3>
+      <button class="probeta-mclose" onclick="closeSinPrecioModal()">&#10005;</button>
+    </div>
+    <div class="probeta-mbody" id="sin-precio-modal-body">
+      <div class="loading">Cargando...</div>
+    </div>
+  </div>
+</div>
+
+<div id="precio-kg-detalle-modal" onclick="if(event.target===this)closePrecioKgDetalleModal()">
+  <div class="probeta-mbox">
+    <div class="probeta-mhdr">
+      <span style="font-size:20px">&#128176;</span>
+      <h3 id="precio-kg-detalle-titulo">Piezas</h3>
+      <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="_imprimirPrecioKgDetalle()">&#128438; Imprimir</button>
+      <button class="probeta-mclose" onclick="closePrecioKgDetalleModal()">&#10005;</button>
+    </div>
+    <div class="probeta-mbody" id="precio-kg-detalle-modal-body">
+      <div class="loading">Cargando...</div>
+    </div>
+  </div>
+</div>
+
 <div id="pend-fundir-detalle-modal" onclick="if(event.target===this)closePendFundirDetalleModal()">
   <div class="probeta-mbox">
     <div class="probeta-mhdr">
@@ -686,14 +749,95 @@ tr:last-child td { border-bottom: none; }
   </div>
 </div>
 
-<div id="moldeo-modal" onclick="if(event.target===this)closeMoldeoModal()">
-  <div class="probeta-mbox" style="width:640px">
+<div id="moldeo-ayudante-modal" onclick="if(event.target===this)_moldeoCerrarAyudante()">
+  <div class="probeta-mbox" style="width:380px">
     <div class="probeta-mhdr">
-      <span style="font-size:20px">&#127959;</span>
-      <h3>Carga de producción diaria &mdash; Moldeo</h3>
-      <button class="probeta-mclose" onclick="closeMoldeoModal()">&#10005;</button>
+      <span style="font-size:18px">&#128101;</span>
+      <h3>Agregar ayudante</h3>
+      <button class="probeta-mclose" onclick="_moldeoCerrarAyudante()">&#10005;</button>
     </div>
-    <div class="probeta-mbody" id="moldeo-modal-body">
+    <div class="probeta-mbody">
+      <div style="margin-bottom:14px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Operario</div>
+        <select class="inp" id="moldeo-ayudante-operario" style="width:100%"></select>
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="page-btn" onclick="_moldeoCerrarAyudante()">Cancelar</button>
+        <button class="page-btn" style="font-weight:600;background:var(--accent-dim);border-color:var(--accent);color:var(--accent)" onclick="_moldeoGuardarAyudante()">Agregar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="moldeo-sinot-modal" onclick="if(event.target===this)_moldeoCerrarSinOT()">
+  <div class="probeta-mbox" style="width:460px">
+    <div class="probeta-mhdr">
+      <span style="font-size:18px">&#127959;</span>
+      <h3>Agregar sin OT (moldeo para stock)</h3>
+      <button class="probeta-mclose" onclick="_moldeoCerrarSinOT()">&#10005;</button>
+    </div>
+    <div class="probeta-mbody">
+      <div style="margin-bottom:10px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Operario</div>
+        <select class="inp" id="moldeo-sinot-operario" style="width:100%"></select>
+      </div>
+      <div style="margin-bottom:10px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:4px">OT (no obligatorio)</div>
+        <input class="inp" type="text" inputmode="numeric" id="moldeo-sinot-ot" placeholder="Solo si la OT existe pero no aparece en la lista&#8230;"
+          style="width:100%;box-sizing:border-box" oninput="_moldeoSinOTOtChanged()">
+      </div>
+      <div id="moldeo-sinot-ot-extra" style="display:none;margin-bottom:10px;padding:10px;border:1px dashed var(--border);border-radius:8px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:8px">La OT tipeada existe &mdash; se le puede asignar responsable de noyos y ayudantes igual que desde la tabla principal.</div>
+        <div style="margin-bottom:10px">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Responsable noyos</div>
+          <select class="inp" id="moldeo-sinot-noyos-op" style="width:100%"></select>
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Ayudantes</div>
+          <div id="moldeo-sinot-ayudantes"></div>
+        </div>
+      </div>
+      <div style="margin-bottom:10px" id="moldeo-sinot-pieza-wrap">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Pieza</div>
+        <div style="position:relative">
+          <input id="moldeo-sinot-pieza-q" class="inp" type="text" placeholder="Buscar pieza por nombre o c&#243;digo&#8230;"
+            style="width:100%;box-sizing:border-box" autocomplete="off"
+            oninput="_moldeoSinOTBuscarPieza(this.value)"
+            onkeydown="if(event.key==='Escape'){$id('moldeo-sinot-pieza-dropdown').style.display='none';this.value=''}">
+          <div id="moldeo-sinot-pieza-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;z-index:50;
+            background:var(--surface2);border:1px solid var(--border);border-radius:0 0 6px 6px;
+            max-height:200px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.18)"></div>
+        </div>
+        <div id="moldeo-sinot-pieza-chip" style="margin-top:8px"></div>
+      </div>
+      <div style="margin-bottom:10px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Cajas sin cerrar</div>
+        <input class="inp" type="number" id="moldeo-sinot-sc" min="0" step="1" style="width:100%">
+      </div>
+      <div style="margin-bottom:10px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Cajas cerradas</div>
+        <input class="inp" type="number" id="moldeo-sinot-cantidad" min="0" step="1" style="width:100%">
+      </div>
+      <div style="margin-bottom:14px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Noyos</div>
+        <input class="inp" type="number" id="moldeo-sinot-noyos" min="0" step="1" style="width:100%">
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="page-btn" onclick="_moldeoCerrarSinOT()">Cancelar</button>
+        <button class="page-btn" id="moldeo-sinot-btn" style="font-weight:600;background:var(--accent-dim);border-color:var(--accent);color:var(--accent)" onclick="_moldeoGuardarSinOT()">Agregar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="moldeo-prod-modal" onclick="if(event.target===this)closeMoldeoProductividadModal()">
+  <div class="probeta-mbox" style="width:980px">
+    <div class="probeta-mhdr">
+      <span style="font-size:20px">&#128202;</span>
+      <h3>Producci&#243;n y productividad de moldeo</h3>
+      <button class="probeta-mclose" onclick="closeMoldeoProductividadModal()">&#10005;</button>
+    </div>
+    <div class="probeta-mbody" id="moldeo-prod-modal-body">
       <div class="loading">Cargando...</div>
     </div>
   </div>
@@ -795,6 +939,7 @@ function $id(id) { return document.getElementById(id); }
 function setMain(html) { $id('main').innerHTML = html; }
 function fmt(n) { return n == null ? '—' : Number(n).toLocaleString('es-AR'); }
 function fmtKg(n) { return n == null ? '—' : Number(n).toLocaleString('es-AR', {minimumFractionDigits:1, maximumFractionDigits:1}) + ' kg'; }
+function fmtPesos(n) { return n == null ? '—' : '$' + Number(n).toLocaleString('es-AR', {maximumFractionDigits:0}); }
 
 function tagClass(tasa) { return tasa > 10 ? 'tag-r' : tasa > 0 ? 'tag-y' : 'tag-g'; }
 function _lbl(k) {
@@ -988,6 +1133,218 @@ function chartDefaults() {
   };
 }
 
+// ── Distribución de precio por kg (Dashboard) ────────────────────────────────
+// Histograma de /api/dashboard/precio_kg_distribucion -- una linea vertical
+// marca el promedio sobre las barras (calculada en pixeles a partir de la barra
+// donde cae, interpolando su ancho, igual criterio que usa reglaBarraPlugin en
+// pend_fundir.js para dibujar encima de las barras en vez de solo en el eje).
+let _precioKgChart = null;
+let _precioKgData  = null;
+
+const _precioKgLineaPlugin = {
+  id: 'precioKgLinea',
+  afterDatasetsDraw(chart, args, opts) {
+    if (!opts || opts.valor == null || !opts.bins || !opts.bins.length) return;
+    const meta = chart.getDatasetMeta(0);
+    if (!meta || !meta.data.length) return;
+    const { bins, valor, color, etiqueta } = opts;
+    // Encontrar en que bin cae el valor e interpolar la posicion dentro de esa
+    // barra -- las barras son categorias discretas, no hay escala lineal
+    // continua de la que pedir el pixel directamente. bins[0].desde/bins[n-1]
+    // .hasta pueden ser null (barras "menor a"/"mayor a" en las puntas, rango
+    // abierto) -- el promedio cae ahi solo si el propio calculo lo empujo
+    // fuera de las barras normales (posible con outliers extremos).
+    let idx = bins.findIndex(b => (b.desde == null || valor >= b.desde) && (b.hasta == null || valor < b.hasta));
+    let frac = 0.5;
+    if (idx === -1) {
+      // No matcheo ninguna (empata justo en el ultimo borde cerrado, o quedo
+      // mas alla de ambas puntas): al extremo mas cercano.
+      idx = valor < (bins[0].hasta ?? bins[0].desde) ? 0 : bins.length - 1;
+      frac = idx === 0 ? 0 : 1;
+    } else {
+      const b = bins[idx];
+      const ancho = (b.hasta ?? b.desde) - (b.desde ?? b.hasta);
+      frac = ancho > 0 ? (valor - (b.desde ?? b.hasta)) / ancho : 0.5;
+    }
+    frac = Math.max(0, Math.min(1, frac));
+    const bar = meta.data[idx];
+    if (!bar) return;
+    const x = bar.x - bar.width / 2 + frac * bar.width;
+    const chartArea = chart.chartArea;
+    const ctx = chart.ctx;
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    ctx.moveTo(x, chartArea.top);
+    ctx.lineTo(x, chartArea.bottom);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = color;
+    ctx.font = '700 11px system-ui, -apple-system, sans-serif';
+    ctx.textAlign = x > chartArea.right - 90 ? 'right' : 'left';
+    ctx.fillText(etiqueta, x + (ctx.textAlign === 'right' ? -6 : 6), chartArea.top + 12);
+    ctx.restore();
+  },
+};
+Chart.register(_precioKgLineaPlugin);
+
+async function _renderPrecioKgDistribucion(meses) {
+  meses = Number(meses);
+  const sel = $id('precio-kg-meses');
+  if (sel) sel.value = String(meses);
+  const aviso = $id('precio-kg-aviso');
+  if (aviso) aviso.style.display = meses === 0 ? '' : 'none';
+
+  const sub = $id('precio-kg-sub');
+  if (sub) sub.textContent = 'Cargando…';
+
+  let data;
+  try { data = await api('/api/dashboard/precio_kg_distribucion?meses=' + meses); }
+  catch (e) { if (sub) sub.textContent = 'No se pudo cargar'; return; }
+  _precioKgData = data;
+
+  const canvas = $id('chart-precio-kg');
+  if (!canvas) return;
+  if (!data.bins.length) {
+    canvas.closest('.chart-box').innerHTML = '<div class="empty">No hay suficientes piezas con precio y peso para armar la distribución</div>';
+    return;
+  }
+
+  if (sub) {
+    sub.textContent = fmt(data.n_piezas) + ' piezas · promedio ' + fmtPesos(data.promedio) + '/kg · mediana ' + fmtPesos(data.mediana) + '/kg';
+  }
+
+  if (_precioKgChart) { _precioKgChart.destroy(); _precioKgChart = null; }
+
+  const etiquetaBin = (b) => b.tipo === 'bajo' ? ('< ' + fmtPesos(b.hasta))
+    : b.tipo === 'sobre' ? ('> ' + fmtPesos(b.desde))
+    : fmtPesos(b.desde);
+  const rangoBin = (b) => b.tipo === 'bajo' ? ('Menor a ' + fmtPesos(b.hasta))
+    : b.tipo === 'sobre' ? ('Mayor a ' + fmtPesos(b.desde))
+    : (fmtPesos(b.desde) + ' – ' + fmtPesos(b.hasta));
+
+  const opts = chartDefaults();
+  opts.plugins.legend.display = false;
+  opts.plugins.tooltip = { callbacks: {
+    title: (items) => rangoBin(data.bins[items[0].dataIndex]) + '/kg',
+    label: (ctx) => fmt(ctx.raw) + ' pieza' + (ctx.raw !== 1 ? 's' : ''),
+  } };
+  opts.plugins.precioKgLinea = {
+    bins: data.bins, valor: data.promedio, color: '#ffca28', etiqueta: 'Promedio ' + fmtPesos(data.promedio),
+  };
+  opts.scales.x.ticks.autoSkip = true;
+  opts.scales.x.ticks.maxRotation = 45;
+  opts.scales.y.title = { display: true, text: 'Piezas', color: '#8b949e' };
+  // Clic en una barra -- abre la lista de piezas de ese rango de $/kg, mismo
+  // patron que el drill-down de Pendiente de fundir. Las puntas ("menor a"/
+  // "mayor a") abren igual, con el limite abierto correspondiente en null.
+  opts.onHover = (evt, elements) => { evt.native.target.style.cursor = elements.length ? 'pointer' : 'default'; };
+  opts.onClick = (evt, elements) => {
+    if (!elements || !elements.length) return;
+    const b = data.bins[elements[0].index];
+    if (!b || !b.cantidad) return;
+    _abrirPrecioKgDetalle(b.desde, b.hasta, meses);
+  };
+
+  const colorBarra = (b) => b.tipo === 'normal' ? '#42a5f5bb' : '#ff8a65bb';
+
+  _precioKgChart = new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels: data.bins.map(etiquetaBin),
+      datasets: [{ data: data.bins.map(b => b.cantidad), backgroundColor: data.bins.map(colorBarra), borderRadius: 3 }],
+    },
+    options: opts,
+  });
+}
+
+let _precioKgDetalleRows = [];
+let _precioKgDetalleTitulo = 'Piezas';
+
+async function _abrirPrecioKgDetalle(desde, hasta, meses) {
+  const modal = $id('precio-kg-detalle-modal');
+  const body = $id('precio-kg-detalle-modal-body');
+  const tituloEl = $id('precio-kg-detalle-titulo');
+  _precioKgDetalleTitulo = desde == null ? ('Menor a ' + fmtPesos(hasta) + '/kg')
+    : hasta == null ? ('Mayor a ' + fmtPesos(desde) + '/kg')
+    : (fmtPesos(desde) + ' – ' + fmtPesos(hasta) + '/kg');
+  if (tituloEl) tituloEl.textContent = _precioKgDetalleTitulo;
+  if (modal) modal.classList.add('open');
+  if (body) body.innerHTML = '<div class="loading">Cargando...</div>';
+
+  // desde/hasta pueden venir null (barras "menor a"/"mayor a", rango abierto)
+  // -- URLSearchParams los volveria el string literal "null" si se pasan tal
+  // cual, asi que se arma el query a mano y se omiten cuando no aplican.
+  const qs = new URLSearchParams({ meses });
+  if (desde != null) qs.set('desde', desde);
+  if (hasta != null) qs.set('hasta', hasta);
+
+  let rows;
+  try {
+    rows = await api('/api/dashboard/precio_kg_distribucion/detalle?' + qs.toString());
+  } catch (e) { if (body) body.innerHTML = '<div class="empty">No se pudo cargar</div>'; return; }
+
+  _precioKgDetalleRows = rows;
+  if (!body) return;
+  if (!rows.length) { body.innerHTML = '<div class="empty">Sin piezas</div>'; return; }
+
+  body.innerHTML = `
+    <div style="font-size:12px;color:var(--muted);margin-bottom:10px">${fmt(rows.length)} pieza${rows.length !== 1 ? 's' : ''}</div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Pieza</th><th>C&#243;digo</th><th>Cliente</th><th style="text-align:right">$/kg</th>
+        </tr></thead>
+        <tbody>${rows.map(r => `
+          <tr class="tr-link" onclick="closePrecioKgDetalleModal();go('pieza',${r.pieza_id})">
+            <td>${r.nombrepieza || '—'}</td>
+            <td><code style="font-size:12px">${r.codigo_pieza || '—'}</code></td>
+            <td>${r.cliente_nombre || '—'}<div style="font-size:11px;color:var(--muted)">${r.codigo_cliente || ''}</div></td>
+            <td style="text-align:right;font-weight:600">${fmtPesos(r.precio_kg)}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function _imprimirPrecioKgDetalle() {
+  const rows = _precioKgDetalleRows;
+  if (!rows.length) return;
+  const now = new Date().toLocaleString('es-AR');
+  const cuerpo = rows.map(r => `
+    <tr>
+      <td>${r.nombrepieza || '—'}</td>
+      <td><code>${r.codigo_pieza || '—'}</code></td>
+      <td>${r.cliente_nombre || '—'}<div class="sub">${r.codigo_cliente || ''}</div></td>
+      <td class="num">${fmtPesos(r.precio_kg)}</td>
+    </tr>`).join('');
+
+  const w = window.open('', '_blank', 'width=900,height=700,scrollbars=yes');
+  if (!w) { alert('Permití ventanas emergentes para imprimir.'); return; }
+  w.document.open();
+  w.document.write(`<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
+<title>${_precioKgDetalleTitulo}</title><style>
+*{box-sizing:border-box}body{font-family:Arial,sans-serif;color:#111;padding:18px;font-size:11px}
+h1{font-size:17px;margin:0 0 4px}.resumen{color:#555;margin-bottom:14px}
+table{width:100%;border-collapse:collapse}th{background:#eee;text-align:left;font-size:9px;text-transform:uppercase}
+th,td{border:1px solid #ccc;padding:5px;vertical-align:top}.num{text-align:right;white-space:nowrap}.sub{font-size:8px;color:#666;margin-top:2px}
+@media print{body{padding:0}@page{size:A4 portrait;margin:10mm}}
+</style></head><body>
+<h1>${_precioKgDetalleTitulo}</h1>
+<div class="resumen">Impreso: ${now} &middot; ${fmt(rows.length)} piezas</div>
+<table><thead><tr><th>Pieza</th><th>C&#243;digo</th><th>Cliente</th><th>$/kg</th></tr></thead>
+<tbody>${cuerpo}</tbody></table></body></html>`);
+  w.document.close();
+  setTimeout(() => w.print(), 500);
+}
+
+function closePrecioKgDetalleModal() {
+  const modal = $id('precio-kg-detalle-modal');
+  if (modal) modal.classList.remove('open');
+}
+
 // ── Pendiente de fundir por material (Dashboard + Trabajos) ──────────────────
 // Modulo compartido con kiosk.html -- ver frontend/js/pend_fundir.js, unica
 // fuente de esta funcionalidad (grafico, calendario, impresion, drill-down).
@@ -1109,6 +1466,122 @@ function closeSinPesoModal() {
   if (modal) modal.classList.remove('open');
 }
 
+let _sinPrecioRows = [];
+
+async function openSinPrecioModal() {
+  const modal = $id('sin-precio-modal');
+  if (modal) modal.classList.add('open');
+  const body = $id('sin-precio-modal-body');
+  if (!body) return;
+  body.innerHTML = '<div class="loading">Cargando...</div>';
+
+  let rows;
+  try { rows = await api('/api/dashboard/pendiente_fundir/sin_precio?meses=' + S.dashMeses); }
+  catch (e) { body.innerHTML = '<div class="empty">No se pudo cargar</div>'; return; }
+
+  _sinPrecioRows = rows;
+  if (!rows.length) { body.innerHTML = '<div class="empty">No hay piezas pendientes de fundir sin precio cargado &#127881;</div>'; return; }
+
+  const totalPzs = rows.reduce((s, r) => s + (r.piezas_pendientes || 0), 0);
+  body.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px">
+      <div style="font-size:12px;color:var(--muted)">
+        ${fmt(rows.length)} pieza${rows.length !== 1 ? 's' : ''} distinta${rows.length !== 1 ? 's' : ''}
+        &middot; ${fmt(totalPzs)} unidades pendientes sin poder calcular su precio
+      </div>
+      <button class="page-btn" style="font-size:11px;padding:4px 10px;flex-shrink:0" onclick="_imprimirSinPrecio()">&#128438; Imprimir</button>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th></th><th>Pieza</th><th>C&#243;digo</th><th>Material</th>
+          <th style="text-align:right">OTs</th><th style="text-align:right">Pendientes</th><th>Motivo</th><th>Visto desde</th>
+        </tr></thead>
+        <tbody>${rows.map(r => `
+          <tr class="tr-link" onclick="closeSinPrecioModal();go('pieza',${r.pieza_id})">
+            <td style="width:44px">
+              ${r.foto
+                ? `<img src="/api/fotos/modelos/${encodeURIComponent(r.foto)}" alt=""
+                     style="width:40px;height:40px;object-fit:cover;border-radius:4px;display:block"
+                     onerror="this.outerHTML='<span style=&quot;font-size:20px;opacity:.3&quot;>&#128247;</span>'">`
+                : '<span style="font-size:20px;opacity:.3">&#128247;</span>'}
+            </td>
+            <td>${r.nombre || '—'}</td>
+            <td><code style="font-size:12px">${r.codigo_pieza || '—'}</code></td>
+            <td>${r.material || '—'}</td>
+            <td style="text-align:right">${fmt(r.ots)}</td>
+            <td style="text-align:right;font-weight:600">${fmt(r.piezas_pendientes)}</td>
+            <td style="font-size:11px;color:var(--muted)">${r.motivo || '—'}</td>
+            <td style="font-size:11px;color:var(--muted)">${r.visto_desde || '—'}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function _imprimirSinPrecio() {
+  const rows = _sinPrecioRows;
+  if (!rows.length) return;
+  const now = new Date().toLocaleString('es-AR');
+
+  const body = rows.map(r => `
+    <tr>
+      <td style="width:64px">
+        ${r.foto ? `<img src="/api/fotos/modelos/${encodeURIComponent(r.foto)}" alt=""
+             style="width:56px;height:56px;object-fit:cover;border-radius:4px;display:block"
+             onerror="this.style.display='none'">` : ''}
+      </td>
+      <td style="font-size:22px;text-align:center">&#9744;</td>
+      <td><strong>${r.nombre || '—'}</strong></td>
+      <td><code>${r.codigo_pieza || '—'}</code></td>
+      <td>${r.material || '—'}</td>
+      <td style="text-align:right">${fmt(r.piezas_pendientes)}</td>
+      <td>${r.motivo || '—'}</td>
+      <td>${r.visto_desde || '—'}</td>
+      <td style="min-width:120px"></td>
+    </tr>`).join('');
+
+  const w = window.open('', '_blank', 'width=940,height=720,scrollbars=yes');
+  if (!w) { alert('Permitir ventanas emergentes para usar esta función.'); return; }
+  w.document.open();
+  w.document.write(`<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<title>Piezas pendientes de fijar precio</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;font-size:12px;color:#111;background:#fff;padding:24px 28px}
+h1{font-size:17px;font-weight:700;color:#333;margin-bottom:3px}
+.period{font-size:11px;color:#888;margin-bottom:20px}
+.print-date{font-size:16px;color:#000;font-weight:700}
+table{border-collapse:collapse;width:100%;font-size:12px}
+th{text-align:left;padding:6px 8px;background:#f2f2f2;border-bottom:2px solid #ccc;font-size:10px;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}
+td{padding:6px 8px;border-bottom:1px solid #eee;vertical-align:middle}
+code{font-family:ui-monospace,monospace}
+tfoot td{border-top:1px solid #000;border-bottom:none;padding-top:8px}
+@media print{
+  body{padding:0}
+  @page{margin:15mm;size:A4}
+}
+</style></head><body>
+<h1>&#9888; Piezas pendientes de fundir sin precio cargado</h1>
+<div class="period"><span class="print-date">Impreso: ${now}</span> &middot; ${fmt(rows.length)} piezas &mdash; marcar al fijar el precio de cada una</div>
+<table>
+  <thead><tr>
+    <th></th><th></th><th>Pieza</th><th>C&#243;digo</th><th>Material</th>
+    <th style="text-align:right">Pendientes</th><th>Motivo</th><th>Visto desde</th><th>Precio fijado ($)</th>
+  </tr></thead>
+  <tfoot><tr><td colspan="9" class="print-date">Impreso: ${now}</td></tr></tfoot>
+  <tbody>${body}</tbody>
+</table>
+</body></html>`);
+  w.document.close();
+  setTimeout(() => w.print(), 500);
+}
+function closeSinPrecioModal() {
+  const modal = $id('sin-precio-modal');
+  if (modal) modal.classList.remove('open');
+}
+
 
 let _drillMesBack = null;
 let _pzData    = {};   // {piezaId: d}
@@ -1123,11 +1596,15 @@ function _drillMes(wrapId, año, rows, backFn, kgOpts) {
   const wrap = $id(wrapId); if (!wrap) return;
   _drillMesBack = backFn;
 
-  const useKg   = !!(kgOpts?.useKg);
+  // unidad (nueva, 3 estados) o useKg (vieja, booleana -- la siguen pasando
+  // los graficos de pieza/cliente que solo conocen piezas/kg) definen el modo.
+  const modo    = kgOpts?.unidad || (kgOpts?.useKg ? 'kg' : 'piezas');
+  const useKg   = modo !== 'piezas';
   const factor  = (useKg && kgOpts?.factor > 0) ? kgOpts.factor : 1;
   const entKey  = useKg && kgOpts?.entKey  ? kgOpts.entKey  : null;
   const rechKey = useKg && kgOpts?.rechKey ? kgOpts.rechKey : null;
-  const sfx     = useKg ? ' (kg)' : '';
+  const sfx     = modo === 'kg' ? ' (kg)' : modo === 'pesos' ? ' ($)' : '';
+  const fmtFn   = modo === 'pesos' ? fmtPesos : modo === 'kg' ? fmtKg : fmt;
 
   const val = (r, key, fallback) => {
     const v = key && r[key] != null ? r[key] : r[fallback] || 0;
@@ -1151,27 +1628,27 @@ function _drillMes(wrapId, año, rows, backFn, kgOpts) {
   // trae cualquier año (una OT Programada puede estar atrasada de un año
   // viejo), así que se filtra al año que se está mirando.
   const proyeccion = kgOpts?.proyeccion || null;
+  const campoProy = modo === 'pesos' ? 'pesos' : modo === 'kg' ? 'kg' : 'piezas';
   const porMes = {}; // {mesIdx: {inicial, programado, fundido}}
   if (proyeccion?.por_mes) {
     for (const r of proyeccion.por_mes) {
       if (String(r.año) !== String(año)) continue;
       const mIdx = parseInt(r.mes, 10) - 1;
       if (mIdx < 0 || mIdx > 11) continue;
-      if (!porMes[mIdx]) porMes[mIdx] = { inicial: { piezas: 0, kg: 0 }, programado: { piezas: 0, kg: 0 }, fundido: { piezas: 0, kg: 0 } };
+      if (!porMes[mIdx]) porMes[mIdx] = { inicial: { piezas: 0, kg: 0, pesos: 0 }, programado: { piezas: 0, kg: 0, pesos: 0 }, fundido: { piezas: 0, kg: 0, pesos: 0 } };
       const campo = r.estado === 'I' ? 'inicial' : (r.estado === 'P' ? 'programado' : 'fundido');
       porMes[mIdx][campo].piezas += r.piezas || 0;
       porMes[mIdx][campo].kg += r.kg || 0;
+      porMes[mIdx][campo].pesos += r.pesos || 0;
     }
   }
   const items = [];
-  const proyPorMes = {}; // mesIdx -> Programado/Fundido, en la unidad de useKg
+  const proyPorMes = {}; // mesIdx -> Programado/Fundido, en la unidad de modo
   for (const mIdx of Object.keys(porMes).map(Number)) {
     const { inicial, programado, fundido } = porMes[mIdx];
-    const suma = useKg ? (inicial.kg + programado.kg + fundido.kg) : (inicial.piezas + programado.piezas + fundido.piezas);
+    const suma = inicial[campoProy] + programado[campoProy] + fundido[campoProy];
     if (suma <= 0) continue;
-    const partes = useKg
-      ? { inicial: inicial.kg, programado: programado.kg, fundido: fundido.kg }
-      : { inicial: inicial.piezas, programado: programado.piezas, fundido: fundido.piezas };
+    const partes = { inicial: inicial[campoProy], programado: programado[campoProy], fundido: fundido[campoProy] };
     items.push({ index: mIdx, entregadasActual: ent[mIdx] || 0, ...partes });
     proyPorMes[mIdx] = partes;
   }
@@ -1185,7 +1662,6 @@ function _drillMes(wrapId, año, rows, backFn, kgOpts) {
       const v = ctx.parsed.y;
       if (ctx.datasetIndex === 0 && proyPorMes[ctx.dataIndex] != null) {
         const partes = proyPorMes[ctx.dataIndex];
-        const fmtFn = useKg ? fmtKg : fmt;
         return [
           label + ': ' + fmtFn(v),
           'Inicial: ' + fmtFn(partes.inicial),
@@ -1194,7 +1670,7 @@ function _drillMes(wrapId, año, rows, backFn, kgOpts) {
           'Total proyectado: ' + fmtFn(v + partes.inicial + partes.programado + partes.fundido),
         ];
       }
-      return label + ': ' + (useKg ? fmtKg(v) : fmt(v));
+      return label + ': ' + fmtFn(v);
     } } };
   }
 
@@ -1325,7 +1801,7 @@ function go(sec, data) {
     cliente: 'clientes', pieza: 'clientes',
     pedido: 'pedidos', remito: 'remitos',
     modelo: 'modelos', fundicion: 'fundiciones', documento: 'documentos',
-    trabajo: 'trabajos',
+    trabajo: 'trabajos', moldeo: 'trabajos',
     db: 'dashboard'
   }[sec] || sec;
   document.querySelectorAll('.nav-item').forEach(el =>
@@ -1336,6 +1812,7 @@ function go(sec, data) {
     dashboard: showDashboard, clientes: showClientes,
     cliente: ()=>showCliente(data), pieza: ()=>showPieza(data),
     analisis: showAnalisis, trabajos: showTrabajos, trabajo: ()=>showTrabajoDetail(data),
+    moldeo: showMoldeo,
     pedidos: showPedidos, pedido: ()=>showPedidoDetail(data),
     remitos: showRemitos, remito: ()=>showRemitoDetail(data),
     piezas: showPiezasCat,
@@ -1521,7 +1998,7 @@ const _pedClickTimers = {};
 let _trendMode = 'barras';
 let _dashTendencia = null;
 let _trendProyeccion = null;   // {programado:{ots,piezas}, fundido:{ots,piezas}} para la barra del año actual
-let _dashKgMode = false;
+let _trendModo = 'piezas'; // 'piezas' | 'kg' | 'pesos'
 let _trendMensualData = null;
 let _trendDesde = null;
 let _trendHasta = null;
@@ -1965,7 +2442,7 @@ async function showDashboard() {
               <option value="entregadas">Entregadas</option>
               <option value="rechazadas">Rechazadas</option>
             </select>
-            <button class="page-btn" id="trend-kg-btn" style="font-size:11px;padding:3px 9px" onclick="_toggleDashKg()">Ver kg</button>
+            <button class="page-btn" id="trend-kg-btn" style="font-size:11px;padding:3px 9px" onclick="_ciclarTrendModo()">Ver kg</button>
             <button class="page-btn" id="trend-mode-btn" style="font-size:11px;padding:3px 9px" onclick="_switchTrendMode()">📈 Curvas</button>
             <div style="position:relative">
               <button class="page-btn" id="trend-export-btn" style="font-size:11px;padding:3px 9px" onclick="_toggleTrendExportMenu(event)">⬇️ Exportar</button>
@@ -2009,7 +2486,7 @@ async function showDashboard() {
         <span>Pendiente de fundir por material</span>
         <div style="display:flex;align-items:baseline;gap:10px">
           <span id="pend-fundir-sub" style="font-size:11px;color:var(--muted);font-weight:400">Cargando&#8230;</span>
-          <button class="page-btn" id="pend-fundir-kg-btn" style="font-size:11px;padding:3px 9px" onclick="_togglePendFundirKg()">Ver en kg</button>
+          <button class="page-btn" id="pend-fundir-kg-btn" style="font-size:11px;padding:3px 9px" onclick="_ciclarPendFundirModo()">Ver en kg</button>
           <button class="page-btn" id="pend-fundir-cal-btn" style="font-size:11px;padding:3px 9px" onclick="_togglePendFundirCal()">&#128197; Modo calendario</button>
         </div>
       </div>
@@ -2020,7 +2497,27 @@ async function showDashboard() {
         <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="_abrirPendFundirDetalle('OTs olvidadas — programadas con más de un mes de atraso',{olvidadas:1})">&#9200; Ver OTs olvidadas</button>
         <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="_imprimirPendienteFundir()">&#128438; Imprimir</button>
         <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="openSinPesoModal()">&#9888; Ver piezas sin peso</button>
+        <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="openSinPrecioModal()">&#9888; Ver piezas sin precio</button>
       </div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <div class="card-title" style="display:flex;align-items:baseline;justify-content:space-between;gap:8px;flex-wrap:wrap">
+        <span>Distribuci&#243;n de precio por kg</span>
+        <div style="display:flex;align-items:baseline;gap:10px">
+          <span id="precio-kg-sub" style="font-size:11px;color:var(--muted);font-weight:400">Cargando&#8230;</span>
+          <select id="precio-kg-meses" onchange="_renderPrecioKgDistribucion(this.value)"
+            style="font-size:11px;padding:3px 6px;background:var(--card);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer">
+            <option value="12" selected>&#218;ltimos 12 meses</option>
+            <option value="24">&#218;ltimos 2 a&#241;os</option>
+            <option value="0">Todo el cat&#225;logo</option>
+          </select>
+        </div>
+      </div>
+      <div id="precio-kg-aviso" style="display:none;font-size:11px;color:var(--muted);margin-bottom:6px">
+        &#9888; Sin filtrar por fecha, mezcla tarifas de d&#233;cadas distintas -- el precio en pesos sube con la inflaci&#243;n, as&#237; que esta vista sirve solo como referencia hist&#243;rica, no para comparar valores actuales.
+      </div>
+      <div class="chart-box"><canvas id="chart-precio-kg"></canvas></div>
     </div>
 
     <div id="probeta-bar" onclick="openProbetaModal()">
@@ -2068,7 +2565,7 @@ async function showDashboard() {
   _dashTendencia = tendencia;
   _trendMode = 'barras';
   _trendMensualData = null;
-  _dashKgMode = false;
+  _trendModo = 'piezas';
   _trendDesde = tendencia_desde;
   _trendHasta = tendencia_hasta;
   _updateTrendRangeLabel();
@@ -2091,8 +2588,10 @@ async function showDashboard() {
   _renderTrendBarras();
   _initTrendRangeSelects();
 
-  _pendFundirKgMode = false;
+  _pendFundirModo = 'piezas';
   _renderPendienteFundirChart('chart-pend-fundir-dash', 'pend-fundir-sub', S.dashMeses);
+
+  _renderPrecioKgDistribucion(12);
 }
 
 async function _initTrendRangeSelects() {
@@ -2146,8 +2645,8 @@ async function _onTrendRangeChange() {
 <script src="/js/tendencia.js?v=20260909-1"></script>
 <script>
 
-function _toggleDashKg() {
-  _dashKgMode = !_dashKgMode;
+function _ciclarTrendModo() {
+  _trendModo = _trendModo === 'piezas' ? 'kg' : _trendModo === 'kg' ? 'pesos' : 'piezas';
   if (_trendMode === 'curvas') _renderTrendCurvas();
   else _renderTrendBarras();
 }
@@ -2158,14 +2657,16 @@ function _renderTrendBarras() {
   const wrap = $id('trend-drill-wrap');
   if (wrap) wrap.innerHTML = '<div class="chart-box"><canvas id="chart-trend"></canvas></div>';
 
-  const hasKg = _dashTendencia.some(t => (t.kg_entregadas || 0) > 0);
-  const useKg = _dashKgMode && hasKg;
-  S.charts.trend = _renderTendenciaBarras('chart-trend', _dashTendencia, _trendProyeccion, useKg, 'trend-kg-btn', async (año) => {
+  S.charts.trend = _renderTendenciaBarras('chart-trend', _dashTendencia, _trendProyeccion, _trendModo, 'trend-kg-btn', async (año) => {
     if (!_trendMensualData) {
       try { _trendMensualData = await api(`/api/analytics/tendencia_mensual?desde=${_trendDesde}&hasta=${_trendHasta}`); } catch(_) { return; }
     }
-    _drillMes('trend-drill-wrap', año, _trendMensualData, _renderTrendBarras,
-      { useKg: _dashKgMode, entKey: 'kg_entregadas', rechKey: 'kg_rechazadas', proyeccion: _trendProyeccion });
+    _drillMes('trend-drill-wrap', año, _trendMensualData, _renderTrendBarras, {
+      unidad: _trendModo,
+      entKey: _trendModo === 'piezas' ? null : _trendModo + '_entregadas',
+      rechKey: _trendModo === 'piezas' ? null : _trendModo + '_rechazadas',
+      proyeccion: _trendProyeccion,
+    });
   });
 }
 
@@ -2175,18 +2676,22 @@ function _renderTrendCurvas() {
   if (S.charts.trendAcum) { S.charts.trendAcum.destroy(); S.charts.trendAcum = null; }
 
   const hasKg = _trendMensualData.some(r => (r.kg_entregadas || 0) > 0);
-  const useKg = _dashKgMode && hasKg;
+  const hasPesos = _trendMensualData.some(r => (r.pesos_entregadas || 0) > 0);
+  let modo = _trendModo;
+  if (modo === 'kg' && !hasKg) modo = 'piezas';
+  if (modo === 'pesos' && !hasPesos) modo = 'piezas';
+  const fmtCurva = modo === 'pesos' ? fmtPesos : modo === 'kg' ? fmtKg : fmt;
   const kgBtn = $id('trend-kg-btn');
   if (kgBtn) {
-    kgBtn.style.display = hasKg ? '' : 'none';
-    kgBtn.textContent = useKg ? 'Ver unidades' : 'Ver kg';
+    kgBtn.style.display = (hasKg || hasPesos) ? '' : 'none';
+    kgBtn.textContent = modo === 'piezas' ? 'Ver kg' : modo === 'kg' ? 'Ver $' : 'Ver piezas';
   }
 
   // Agrupar datos por año usando la métrica seleccionada
   const metricSel = $id('trend-curva-metric');
   const metric = metricSel ? metricSel.value : 'entregadas';
   const metricLabel = metric === 'rechazadas' ? 'Rechazadas' : 'Entregadas';
-  const metricKey = useKg ? (metric === 'rechazadas' ? 'kg_rechazadas' : 'kg_entregadas') : metric;
+  const metricKey = modo === 'piezas' ? metric : modo + '_' + metric;
   const byYear = {};
   for (const r of _trendMensualData) {
     if (!byYear[r.año]) byYear[r.año] = {};
@@ -2227,7 +2732,7 @@ function _renderTrendCurvas() {
 
   // Gráfico mensual
   const opts1 = baseOpts();
-  opts1.scales.y.title = { display: true, text: `${metricLabel} — ${useKg ? 'kg / mes' : 'piezas / mes'}`, color: '#8b949e', font: { size: 11 } };
+  opts1.scales.y.title = { display: true, text: `${metricLabel} — ${modo === 'pesos' ? '$ / mes' : modo === 'kg' ? 'kg / mes' : 'piezas / mes'}`, color: '#8b949e', font: { size: 11 } };
   S.charts.trend = new Chart(canvas, {
     type: 'line',
     data: { labels: _MESES, datasets: _mkDatasets(false) },
@@ -2240,7 +2745,7 @@ function _renderTrendCurvas() {
   if (canvasAcum && box) {
     box.style.display = '';
     const opts2 = baseOpts();
-    opts2.scales.y.title = { display: true, text: `${metricLabel} — ${useKg ? 'kg acumulados' : 'piezas acumuladas'}`, color: '#8b949e', font: { size: 11 } };
+    opts2.scales.y.title = { display: true, text: `${metricLabel} — ${modo === 'pesos' ? '$ acumulados' : modo === 'kg' ? 'kg acumulados' : 'piezas acumuladas'}`, color: '#8b949e', font: { size: 11 } };
     S.charts.trendAcum = new Chart(canvasAcum, {
       type: 'line',
       data: { labels: _MESES, datasets: _mkDatasets(true) },
@@ -6973,11 +7478,17 @@ async function showTrabajos() {
 
   setMain(`
     <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:14px">
-      <button onclick="openMoldeoModal()" style="display:flex;align-items:center;gap:10px;
+      <button onclick="go('moldeo')" style="display:flex;align-items:center;gap:10px;
         padding:14px 24px;border-radius:8px;border:1px solid var(--accent);
         background:var(--accent-dim);color:var(--accent);cursor:pointer;
         font-size:15px;font-weight:700">
         <span style="font-size:20px">&#127959;</span> Cargar moldeo
+      </button>
+      <button onclick="openMoldeoProductividadModal()" style="display:flex;align-items:center;gap:10px;
+        padding:14px 24px;border-radius:8px;border:1px solid var(--border);
+        background:var(--surface2);color:var(--fg);cursor:pointer;
+        font-size:15px;font-weight:700">
+        <span style="font-size:20px">&#128202;</span> Productividad de moldeo
       </button>
     </div>
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:14px">
@@ -7004,7 +7515,7 @@ async function showTrabajos() {
         <span>Pendiente de fundir por material</span>
         <div style="display:flex;align-items:baseline;gap:10px">
           <span id="pend-fundir-sub-tr" style="font-size:11px;color:var(--muted);font-weight:400">Cargando&#8230;</span>
-          <button class="page-btn" id="pend-fundir-kg-btn" style="font-size:11px;padding:3px 9px" onclick="_togglePendFundirKg()">Ver en kg</button>
+          <button class="page-btn" id="pend-fundir-kg-btn" style="font-size:11px;padding:3px 9px" onclick="_ciclarPendFundirModo()">Ver en kg</button>
           <button class="page-btn" id="pend-fundir-cal-btn" style="font-size:11px;padding:3px 9px" onclick="_togglePendFundirCal()">&#128197; Modo calendario</button>
         </div>
       </div>
@@ -7014,6 +7525,7 @@ async function showTrabajos() {
       <div class="pend-fundir-acciones" style="text-align:right;margin-top:8px;display:flex;justify-content:flex-end;gap:8px">
         <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="_imprimirPendienteFundir()">&#128438; Imprimir</button>
         <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="openSinPesoModal()">&#9888; Ver piezas sin peso</button>
+        <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="openSinPrecioModal()">&#9888; Ver piezas sin precio</button>
       </div>
     </div>
 
@@ -7067,7 +7579,7 @@ async function showTrabajos() {
   `);
   chipRender('tr');
   loadPipeline();
-  _pendFundirKgMode = false;
+  _pendFundirModo = 'piezas';
   _renderPendienteFundirChart('chart-pend-fundir-tr', 'pend-fundir-sub-tr', S.dashMeses);
   await loadTrabajos();
 
@@ -7096,157 +7608,565 @@ async function showTrabajos() {
 // Tabla propia (_produccion_moldeo, backend) -- cajas moldeadas por operario/OT/
 // día. No hay equivalente en Access (EstadisticaMoldeo solo tiene timestamps,
 // sin cantidad ni operario), así que esto vive enteramente en GNC_API.
-let _moldeoPersonal    = null;
-let _moldeoOT          = null;  // {id, pieza, codigo} elegida en el form
-let _moldeoEditId      = null;  // id de _produccion_moldeo en edición, null = alta nueva
-let _moldeoSearchTimer = null;
-let _moldeoOTResults   = [];
-let _moldeoListaCache  = [];
+//
+// Flujo: fecha arriba (afecta que se carga), y abajo TODAS las OT en estado
+// Programado como filas -- cada fila elige SU PROPIO operario (columna
+// "Asignado") y su cantidad de cajas. El combo "Operario" de arriba es solo
+// un filtro visual, no participa del guardado. Guardar recorre las filas con
+// cantidad cargada y genera (o actualiza, si ya existia para esa fecha) una
+// carga por cada una, con el operario que esa fila tenga elegido.
+let _moldeoPersonal   = null;
+let _moldeoTodasOTs   = null;   // todas las OT Programado, una sola carga por apertura del modal
+let _moldeoExistentes = {};     // trabajo_id -> {id, operario_id, cantidad_cajas} para la fecha elegida
+let _moldeoListaCache = [];     // cache de "Cargas del dia" (todos los operarios)
+let _moldeoOcultas    = {};     // trabajo_id -> true -- OT trabadas en Programado, parche local (ver _trabajo_oculto)
+let _moldeoAyudantes  = {};     // trabajo_id -> [{operario_id, operario_nombre}] -- fijo por OT (ver _trabajo_ayudante)
+let _moldeoAyudanteTrabajoId = null; // OT actual del modal "Agregar ayudante"
+let _moldeoSortCol    = null;   // columna de orden activa (null = orden original)
+let _moldeoSortDir    = 1;      // 1 asc, -1 desc
+let _moldeoSinOTPieza    = null; // {id, nombre, codigo, cliente} elegida en "Agregar sin OT"
+let _moldeoSinOTResults  = [];
+let _moldeoSinOTTimer    = null;
 
-async function openMoldeoModal() {
-  const modal = $id('moldeo-modal');
-  if (modal) modal.classList.add('open');
-  const body = $id('moldeo-modal-body');
-  if (!body) return;
-  body.innerHTML = '<div class="loading">Cargando...</div>';
+// Mismos colores que usa Pendiente de fundir para Inicial/Programado/Fundido
+// (_COLOR_INICIAL/_COLOR_PROGRAMADO/_COLOR_FUNDIDO en pend_fundir.js), en
+// version de fondo de fila -- se reusa en la tabla de OT y en Cargas del dia.
+function _moldeoColorEstado(estado) {
+  if (estado === 'I') return '#9575cd22';
+  if (estado === 'F') return '#ffa72622';
+  if (estado === 'P') return '#42a5f522';
+  return 'transparent'; // sin OT (moldeo directo a pieza, para stock)
+}
+
+async function showMoldeo() {
+  setMain('<div class="loading">Cargando...</div>');
 
   if (!_moldeoPersonal) {
     try { _moldeoPersonal = await api('/api/personal?meses=1'); }
     catch(e) { _moldeoPersonal = []; }
   }
-  _moldeoOT = null;
-  _moldeoEditId = null;
+  try {
+    // Inicial se trae junto con Programado (las dos son OT "activas" que se
+    // pueden estar moldeando de verdad aunque el sistema todavia no las
+    // marco Programado) -- Fundido se trae aparte porque esa sí queda detrás
+    // del checkbox "Ver fundidas".
+    const [ini, prog, fund] = await Promise.all([
+      api('/api/trabajos?estado=I&page_size=200'),
+      api('/api/trabajos?estado=P&page_size=200'),
+      api('/api/trabajos?estado=F&page_size=200'),
+    ]);
+    _moldeoTodasOTs = [...(ini.rows||[]), ...(prog.rows||[]), ...(fund.rows||[])];
+  } catch(e) { _moldeoTodasOTs = []; }
+  try {
+    const ocultas = await api('/api/trabajos_ocultos');
+    _moldeoOcultas = {};
+    ocultas.forEach(o => { _moldeoOcultas[o.trabajo_id] = true; });
+  } catch(e) { _moldeoOcultas = {}; }
+  try {
+    const ayudantes = await api('/api/moldeo/ayudantes');
+    _moldeoAyudantes = {};
+    ayudantes.forEach(a => {
+      (_moldeoAyudantes[a.trabajo_id] || (_moldeoAyudantes[a.trabajo_id] = [])).push(a);
+    });
+  } catch(e) { _moldeoAyudantes = {}; }
+  _moldeoExistentes = {};
+  _moldeoSortCol = null;
+  _moldeoSortDir = 1;
 
-  const hoy = new Date().toISOString().slice(0, 10);
+  const hoy = _fechaISO(new Date()); // fecha local, no UTC -- toISOString() se adelanta un día a la noche (UTC-3)
   // Solo sector Producción (códsector < 2 -- /api/personal ya excluye el 0).
   const moldeadores = _moldeoPersonal.filter(p => p.sector < 2);
-  const opsOpts = ['<option value="">Elegir operario&#8230;</option>',
+  const opsFiltroOpts = ['<option value="">Todos los operarios</option>',
     ...moldeadores.map(p => `<option value="${p.id}">${p.nombre}</option>`)
   ].join('');
 
-  body.innerHTML = `
-    <div id="moldeo-form-title" style="font-size:12px;color:var(--accent);margin-bottom:8px;min-height:15px"></div>
-    <div class="grid-2" style="gap:10px;margin-bottom:10px">
-      <div>
-        <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Fecha</div>
-        <input class="inp" type="date" id="moldeo-fecha" value="${hoy}" style="width:100%" onchange="_moldeoLoadLista()">
-      </div>
-      <div>
-        <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Operario</div>
-        <select class="inp" id="moldeo-operario" style="width:100%">${opsOpts}</select>
-      </div>
-    </div>
-    <div style="margin-bottom:10px">
-      <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Orden de trabajo (OT)</div>
-      <div style="position:relative">
-        <input id="moldeo-ot-q" class="inp" type="text" placeholder="Buscar OT por n&#250;mero, pieza o cliente&#8230;"
-          style="width:100%;box-sizing:border-box" autocomplete="off"
-          oninput="_moldeoSearchOT(this.value)"
-          onkeydown="if(event.key==='Escape'){$id('moldeo-ot-dropdown').style.display='none';this.value=''}">
-        <div id="moldeo-ot-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;z-index:50;
-          background:var(--surface2);border:1px solid var(--border);border-radius:0 0 6px 6px;
-          max-height:220px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.18)"></div>
-      </div>
-      <div id="moldeo-ot-chip" style="margin-top:8px"></div>
-    </div>
-    <div style="display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;margin-bottom:14px">
-      <div style="flex:1;min-width:140px">
-        <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Cajas moldeadas</div>
-        <input class="inp" type="number" id="moldeo-cantidad" min="1" step="1" style="width:100%">
-      </div>
-      <button class="page-btn" id="moldeo-guardar-btn" style="padding:9px 18px;font-size:13px;font-weight:600;background:var(--accent-dim);border-color:var(--accent);color:var(--accent)" onclick="_moldeoGuardar()">Guardar</button>
-      <button class="page-btn" id="moldeo-cancelar-btn" style="display:none;padding:9px 14px;font-size:13px" onclick="_moldeoResetForm()">Cancelar</button>
-    </div>
-    <div style="font-size:12px;font-weight:600;color:var(--fg);margin-bottom:6px">Cargas del d&#237;a</div>
-    <div id="moldeo-lista"><div class="loading" style="padding:8px 0">Cargando...</div></div>
-  `;
-  _moldeoLoadLista();
-}
-
-function closeMoldeoModal() {
-  const modal = $id('moldeo-modal');
-  if (modal) modal.classList.remove('open');
-}
-
-function _moldeoSearchOT(val) {
-  const dd = $id('moldeo-ot-dropdown');
-  if (!dd) return;
-  clearTimeout(_moldeoSearchTimer);
-  if (!val.trim()) { dd.style.display = 'none'; return; }
-  _moldeoSearchTimer = setTimeout(async () => {
-    try {
-      const data = await api('/api/trabajos?search=' + encodeURIComponent(val.trim()) + '&page_size=8');
-      _moldeoOTResults = data.rows || [];
-      if (!_moldeoOTResults.length) {
-        dd.innerHTML = '<div style="padding:8px 12px;font-size:12px;color:var(--muted)">Sin resultados</div>';
-        dd.style.display = 'block';
-        return;
-      }
-      dd.innerHTML = _moldeoOTResults.map((r, i) => `
-        <div class="tend-dd-item" onclick="_moldeoPickOT(${i})"
-          style="padding:7px 12px;cursor:pointer;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:2px">
-          <span style="font-size:13px">OT ${r.iditemtrabajo} &mdash; ${r.nombrepieza||''}</span>
-          <span style="font-size:11px;color:var(--muted)">${r.cliente_nombre||''} &middot; ${r.estado_label||''}</span>
-        </div>`).join('');
-      dd.style.display = 'block';
-    } catch(e) {}
-  }, 200);
-}
-
-function _moldeoPickOT(idx) {
-  const r = _moldeoOTResults[idx];
-  if (!r) return;
-  _moldeoOT = { id: r.iditemtrabajo, pieza: r.nombrepieza || '', codigo: r.codigo_pieza || '' };
-  const dd = $id('moldeo-ot-dropdown');
-  if (dd) dd.style.display = 'none';
-  const q = $id('moldeo-ot-q');
-  if (q) q.value = '';
-  _moldeoRenderOTChip();
-}
-
-function _moldeoRenderOTChip() {
-  const chip = $id('moldeo-ot-chip');
-  if (!chip) return;
-  if (!_moldeoOT) { chip.innerHTML = ''; return; }
-  chip.innerHTML = `
-    <span style="display:inline-flex;align-items:center;gap:6px;padding:4px 8px 4px 12px;
-      border-radius:10px;background:var(--surface2);border:1px solid var(--border);font-size:12px">
-      OT ${_moldeoOT.id} &mdash; ${_moldeoOT.pieza}${_moldeoOT.codigo ? ' <span style="color:var(--muted)">('+_moldeoOT.codigo+')</span>' : ''}
-      <span onclick="_moldeoOT=null;_moldeoRenderOTChip()" style="cursor:pointer;opacity:.5;font-size:16px;line-height:1;padding:0 2px">&times;</span>
-    </span>`;
-}
-
-async function _moldeoGuardar() {
-  const fecha = $id('moldeo-fecha').value;
-  const operario_id = $id('moldeo-operario').value;
-  const cantidad_cajas = $id('moldeo-cantidad').value;
-  if (!fecha) { alert('Elegí una fecha.'); return; }
-  if (!operario_id) { alert('Elegí un operario.'); return; }
-  if (!_moldeoOT) { alert('Elegí una OT.'); return; }
-  if (!cantidad_cajas || Number(cantidad_cajas) <= 0) { alert('Ingresá la cantidad de cajas moldeadas.'); return; }
-
-  const body = { fecha, operario_id: Number(operario_id), trabajo_id: _moldeoOT.id, cantidad_cajas: Number(cantidad_cajas) };
-  try {
-    if (_moldeoEditId) {
-      await api('/api/produccion_moldeo/' + _moldeoEditId, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const filasHtml = _moldeoTodasOTs.map((r, i) => {
+    const esFundida = r.estadotrabajo === 'F';
+    const nombreAsignado = esFundida ? (r.responsable_confirmado || '') : (r.operario_asignado || '');
+    const q = _esc((String(r.iditemtrabajo) + ' ' + (r.nombrepieza||'') + ' ' + (r.cliente_nombre||'') + ' ' + (r.codigo_pieza||'') + ' ' + nombreAsignado).toLowerCase());
+    const entregaISO = (r.fechaprevista || '').slice(0, 10);
+    const entrega = entregaISO ? entregaISO.split('-').reverse().join('/') : '—';
+    const opId = r.operario_asignado_id || '';
+    let opRowOpts, opDisabled = '';
+    if (esFundida) {
+      // Confirmado por Access (códigoresponsable1) -- no se reasigna desde acá, solo se ve.
+      opRowOpts = r.responsable_confirmado_id
+        ? `<option value="${r.responsable_confirmado_id}" selected>${r.responsable_confirmado||''} &#10003;</option>`
+        : `<option value="">&#8212; sin responsable</option>`;
+      opDisabled = 'disabled';
     } else {
-      await api('/api/produccion_moldeo', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+      opRowOpts = ['<option value="">&#8212; sin asignar</option>',
+        ...moldeadores.map(p => `<option value="${p.id}"${String(p.id)===String(opId)?' selected':''}>${p.nombre}</option>`)
+      ].join('');
     }
-  } catch(e) { alert('No se pudo guardar: ' + e.message); return; }
-  _moldeoResetForm(false);
+    // Responsable de noyos -- mismo mecanismo que responsable de moldeo (arriba),
+    // pero Access no tiene un equivalente "confirmado" para este rol -- una OT
+    // Fundida solo muestra de sólo lectura lo último que se asignó, si hubo algo.
+    const noyosOpId = r.responsable_noyos_id || '';
+    let noyosOpts, noyosDisabled = '';
+    if (esFundida) {
+      noyosOpts = noyosOpId
+        ? `<option value="${noyosOpId}" selected>${r.responsable_noyos || ''}</option>`
+        : `<option value="">&#8212; sin asignar</option>`;
+      noyosDisabled = 'disabled';
+    } else {
+      noyosOpts = ['<option value="">&#8212; sin asignar</option>',
+        ...moldeadores.map(p => `<option value="${p.id}"${String(p.id)===String(noyosOpId)?' selected':''}>${p.nombre}</option>`)
+      ].join('');
+    }
+    const oculta = !!_moldeoOcultas[r.iditemtrabajo];
+    const bgColor = _moldeoColorEstado(r.estadotrabajo);
+    return `
+    <tr style="background:${bgColor}" data-q="${q}" data-asignado="${(esFundida ? r.responsable_confirmado_id : opId) ? '1' : '0'}"
+        data-op-id="${esFundida ? (r.responsable_confirmado_id||'') : opId}" data-oculta="${oculta ? '1' : '0'}"
+        data-fundida="${esFundida ? '1' : '0'}"
+        data-sort-ot="${r.iditemtrabajo}" data-sort-pieza="${_esc((r.nombrepieza||'').toLowerCase())}"
+        data-sort-cliente="${_esc((r.cliente_nombre||'').toLowerCase())}" data-sort-entrega="${entregaISO||''}"
+        onclick="_moldeoMarcarFilaActiva(this)">
+      <td style="white-space:nowrap"><code>${String(r.iditemtrabajo).padStart(6,'0')}</code>${esFundida ? ' <span style="font-size:10px;color:var(--muted)">Fundido</span>' : ''}${r.estadotrabajo === 'I' ? ' <span style="font-size:10px;color:var(--muted)">Inicial</span>' : ''}</td>
+      <td>${r.nombrepieza || '—'}<div style="font-size:11px;color:var(--muted)">${r.codigo_pieza || ''}</div></td>
+      <td style="font-size:12px;color:var(--muted);white-space:nowrap">${entrega}</td>
+      <td style="font-size:12px;color:var(--muted)">${r.cliente_nombre || '—'}</td>
+      <td id="moldeo-ayd-${i}" style="min-width:150px">${_moldeoAyudantesCeldaHtml(r.iditemtrabajo, _moldeoAyudantes[r.iditemtrabajo], esFundida)}</td>
+      <td style="width:150px">
+        <select class="inp" id="moldeo-op-${i}" data-trabajo-id="${r.iditemtrabajo}" data-campo="moldeo" ${opDisabled}
+          onchange="_moldeoAsignarOperario(${i})" style="width:100%;padding:5px 8px;font-size:12px">${opRowOpts}</select>
+      </td>
+      <td style="width:100px">
+        <input class="inp" type="number" min="0" step="1" id="moldeo-sc-${i}" data-trabajo-id="${r.iditemtrabajo}" data-campo="sc" style="width:100%;text-align:right;padding:5px 8px">
+      </td>
+      <td style="width:100px">
+        <input class="inp" type="number" min="0" step="1" id="moldeo-cant-${i}" data-trabajo-id="${r.iditemtrabajo}" data-campo="cerradas" style="width:100%;text-align:right;padding:5px 8px">
+      </td>
+      <td style="width:150px">
+        <select class="inp" id="moldeo-noyos-op-${i}" data-trabajo-id="${r.iditemtrabajo}" data-campo="noyos-resp" ${noyosDisabled}
+          onchange="_moldeoAsignarResponsableNoyos(${i})" style="width:100%;padding:5px 8px;font-size:12px">${noyosOpts}</select>
+      </td>
+      <td style="width:100px">
+        <input class="inp" type="number" min="0" step="1" id="moldeo-noyos-${i}" data-trabajo-id="${r.iditemtrabajo}" data-campo="noyos" style="width:100%;text-align:right;padding:5px 8px">
+      </td>
+      <td id="moldeo-acc-${i}" style="width:30px;text-align:center">${esFundida ? '' : _moldeoAccionCellHtml(r.iditemtrabajo, oculta)}</td>
+    </tr>`;
+  }).join('');
+
+  setMain(`
+    <div class="breadcrumb">
+      <span class="bc-link" onclick="go('trabajos')">Trabajos</span>
+      <span class="bc-sep">&#8250;</span>
+      <span class="bc-cur">Cargar moldeo</span>
+    </div>
+    <div class="sec-title">&#127959; Carga de producci&#243;n diaria &mdash; Moldeo</div>
+
+    <div class="card" style="margin-bottom:14px">
+      <div style="margin-bottom:10px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Fecha</div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <button class="page-btn" style="padding:5px 10px" onclick="_moldeoCambiarDia(-1)">&#8249;</button>
+          <input class="inp" type="date" id="moldeo-fecha" value="${hoy}" style="width:200px" onchange="_moldeoCargarExistentes()">
+          <button class="page-btn" style="padding:5px 10px" onclick="_moldeoCambiarDia(1)">&#8250;</button>
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:4px">
+        <input id="moldeo-ot-filtro" class="inp" type="text" placeholder="Filtrar por OT, pieza o cliente&#8230;"
+          style="flex:1;min-width:200px;box-sizing:border-box" autocomplete="off" oninput="_moldeoAplicarFiltro()">
+        <select class="inp" id="moldeo-operario-filtro" style="width:200px" onchange="_moldeoAplicarFiltro()">${opsFiltroOpts}</select>
+      </div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:6px">
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer">
+          <input type="checkbox" id="moldeo-ver-todas" onchange="_moldeoAplicarFiltro()"> Ver todas las OT activas
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer">
+          <input type="checkbox" id="moldeo-ver-ocultas" onchange="_moldeoAplicarFiltro()"> Ver OT ocultas
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer">
+          <input type="checkbox" id="moldeo-ver-fundidas" onchange="_moldeoAplicarFiltro()"> Ver fundidas
+        </label>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Incluye OT en Inicial y Programado (las dos se pueden estar moldeando de verdad). Por defecto solo se muestran las ya asignadas a alguien &mdash; busc&#225;, filtr&#225; por operario o tild&#225; "ver todas" para encontrar una sin asignar. El molde y los noyos de cada OT tienen su propio responsable, en columnas separadas, y se le pueden sumar ayudantes con el bot&#243;n "+ Ayudante". La &#10005; roja oculta una OT trabada que solo se puede corregir desde Access &mdash; es un parche local, solo afecta esta tabla.</div>
+      <div class="tbl-wrap" style="margin-bottom:10px">
+        <table>
+          <thead><tr>
+            <th style="cursor:pointer;user-select:none" onclick="_moldeoOrdenarPor('ot')">OT<span class="moldeo-sort-ico" data-col="ot"></span></th>
+            <th style="cursor:pointer;user-select:none" onclick="_moldeoOrdenarPor('pieza')">Pieza<span class="moldeo-sort-ico" data-col="pieza"></span></th>
+            <th style="cursor:pointer;user-select:none" onclick="_moldeoOrdenarPor('entrega')">F. Entrega<span class="moldeo-sort-ico" data-col="entrega"></span></th>
+            <th style="cursor:pointer;user-select:none" onclick="_moldeoOrdenarPor('cliente')">Cliente<span class="moldeo-sort-ico" data-col="cliente"></span></th>
+            <th>Ayudantes</th>
+            <th style="cursor:pointer;user-select:none" onclick="_moldeoOrdenarPor('asignado')">Responsable moldeo<span class="moldeo-sort-ico" data-col="asignado"></span></th>
+            <th style="cursor:pointer;user-select:none;text-align:right" onclick="_moldeoOrdenarPor('sin_cerrar')">Cajas sin cerrar<span class="moldeo-sort-ico" data-col="sin_cerrar"></span></th>
+            <th style="cursor:pointer;user-select:none;text-align:right" onclick="_moldeoOrdenarPor('cajas')">Cajas cerradas<span class="moldeo-sort-ico" data-col="cajas"></span></th>
+            <th style="cursor:pointer;user-select:none" onclick="_moldeoOrdenarPor('noyos_resp')">Responsable noyos<span class="moldeo-sort-ico" data-col="noyos_resp"></span></th>
+            <th style="cursor:pointer;user-select:none;text-align:right" onclick="_moldeoOrdenarPor('noyos')">Noyos<span class="moldeo-sort-ico" data-col="noyos"></span></th>
+            <th></th>
+          </tr></thead>
+          <tbody id="moldeo-ot-tbody">${filasHtml}<tr id="moldeo-ot-vacio" style="display:none"><td colspan="11" class="empty">${_moldeoTodasOTs.length ? 'Nadie tiene OT asignadas todavía — buscá, elegí un operario, o tildá "ver todas"/"ver fundidas" para encontrar una' : 'No hay OT en Inicial, Programado ni Fundido'}</td></tr></tbody>
+        </table>
+      </div>
+      <div style="display:flex;justify-content:flex-end">
+        <button class="page-btn" id="moldeo-guardar-btn" style="padding:10px 22px;font-size:13px;font-weight:600;background:var(--accent-dim);border-color:var(--accent);color:var(--accent)" onclick="_moldeoGuardarTodo()">Guardar</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:6px">
+        <div style="font-size:12px;font-weight:600;color:var(--fg)">Cargas del d&#237;a</div>
+        <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="_moldeoAbrirSinOT()">+ Agregar sin OT</button>
+      </div>
+      <div id="moldeo-lista"><div class="loading" style="padding:8px 0">Cargando...</div></div>
+    </div>
+  `);
+  _moldeoCargarExistentes();
+}
+
+// Marca la fila tocada (click en cualquier parte, incluidos sus inputs/select)
+// para ubicarse fácil en qué OT se está cargando -- util sobre todo en mobile,
+// donde perder de vista la fila entre un tap y otro es facil.
+function _moldeoMarcarFilaActiva(tr) {
+  document.querySelectorAll('#moldeo-ot-tbody tr.moldeo-fila-activa').forEach(el => el.classList.remove('moldeo-fila-activa'));
+  tr.classList.add('moldeo-fila-activa');
+}
+
+// Reordena las filas ya existentes en el DOM (no reconstruye el HTML) para
+// no perder lo que el encargado ya tipeo/eligio en cada fila (cajas,
+// operario). Un segundo click en la misma columna invierte el sentido.
+function _moldeoOrdenarPor(col) {
+  const tbody = $id('moldeo-ot-tbody');
+  if (!tbody) return;
+  if (_moldeoSortCol === col) _moldeoSortDir *= -1;
+  else { _moldeoSortCol = col; _moldeoSortDir = 1; }
+
+  const valor = (tr) => {
+    switch (col) {
+      case 'ot':       return Number(tr.dataset.sortOt) || 0;
+      case 'pieza':    return tr.dataset.sortPieza || '';
+      case 'cliente':  return tr.dataset.sortCliente || '';
+      case 'entrega':  return tr.dataset.sortEntrega || '';
+      case 'asignado': {
+        const sel = tr.querySelector('select[data-campo="moldeo"]');
+        return sel && sel.value ? sel.options[sel.selectedIndex].text.toLowerCase() : '';
+      }
+      case 'noyos_resp': {
+        const sel = tr.querySelector('select[data-campo="noyos-resp"]');
+        return sel && sel.value ? sel.options[sel.selectedIndex].text.toLowerCase() : '';
+      }
+      case 'cajas': {
+        const inp = tr.querySelector('input[data-campo="cerradas"]');
+        return inp ? (Number(inp.value) || 0) : 0;
+      }
+      case 'sin_cerrar': {
+        const inp = tr.querySelector('input[data-campo="sc"]');
+        return inp ? (Number(inp.value) || 0) : 0;
+      }
+      case 'noyos': {
+        const inp = tr.querySelector('input[data-campo="noyos"]');
+        return inp ? (Number(inp.value) || 0) : 0;
+      }
+      default: return '';
+    }
+  };
+
+  const filas = Array.from(tbody.querySelectorAll('tr[data-q]'));
+  filas.sort((a, b) => {
+    const va = valor(a), vb = valor(b);
+    if (va < vb) return -1 * _moldeoSortDir;
+    if (va > vb) return  1 * _moldeoSortDir;
+    return 0;
+  });
+  filas.forEach(tr => tbody.appendChild(tr));
+  const vacio = $id('moldeo-ot-vacio');
+  if (vacio) tbody.appendChild(vacio);
+
+  document.querySelectorAll('.moldeo-sort-ico').forEach(el => {
+    el.textContent = el.dataset.col === _moldeoSortCol ? (_moldeoSortDir === 1 ? ' ▲' : ' ▼') : '';
+  });
+}
+
+function _moldeoAccionCellHtml(trabajoId, oculta) {
+  return oculta
+    ? `<span onclick="_moldeoMostrarOT(${trabajoId})" style="cursor:pointer;opacity:.7;font-size:14px" title="Volver a mostrar">&#8635;</span>`
+    : `<span onclick="_moldeoOcultarOT(${trabajoId})" style="cursor:pointer;color:#e74c3c;font-weight:700;font-size:14px" title="Ocultar (OT trabada en Programado, corregir en Access)">&#10005;</span>`;
+}
+
+async function _moldeoOcultarOT(trabajoId) {
+  if (!confirm('¿Ocultar la OT ' + String(trabajoId).padStart(6,'0') + ' de esta tabla?\n\nEs un parche local para OT trabadas en Programado -- solo afecta esta pantalla, no Pendiente de fundir ni el resto de la app. Se puede revertir tildando "Ver OT ocultas".')) return;
+  try { await api('/api/trabajos_ocultos/' + trabajoId, { method: 'POST' }); }
+  catch(e) { alert('No se pudo ocultar: ' + e.message); return; }
+  _moldeoOcultas[trabajoId] = true;
+  _moldeoActualizarFilaOculta(trabajoId, true);
+}
+
+async function _moldeoMostrarOT(trabajoId) {
+  try { await api('/api/trabajos_ocultos/' + trabajoId, { method: 'DELETE' }); }
+  catch(e) { alert('No se pudo mostrar: ' + e.message); return; }
+  delete _moldeoOcultas[trabajoId];
+  _moldeoActualizarFilaOculta(trabajoId, false);
+}
+
+function _moldeoActualizarFilaOculta(trabajoId, oculta) {
+  const idx = (_moldeoTodasOTs || []).findIndex(r => r.iditemtrabajo === trabajoId);
+  if (idx < 0) return;
+  const tr = $id('moldeo-cant-'+idx)?.closest('tr');
+  const acc = $id('moldeo-acc-'+idx);
+  if (tr) tr.dataset.oculta = oculta ? '1' : '0';
+  if (acc) acc.innerHTML = _moldeoAccionCellHtml(trabajoId, oculta);
+  _moldeoAplicarFiltro();
+}
+
+// Sin busqueda ni filtro de operario: solo se ven las OT ya asignadas a
+// alguien (lista corta, las que estan en curso). El combo "Operario" filtra
+// a las filas de esa persona -- no participa del guardado, eso lo decide el
+// select de cada fila. Una OT oculta o fundida nunca se ve salvo que se
+// tilde su checkbox correspondiente, sin importar los demas filtros.
+function _moldeoAplicarFiltro() {
+  const q = ($id('moldeo-ot-filtro')?.value || '').trim().toLowerCase();
+  const operarioFiltro = $id('moldeo-operario-filtro')?.value || '';
+  const verTodas = $id('moldeo-ver-todas')?.checked || false;
+  const verOcultas = $id('moldeo-ver-ocultas')?.checked || false;
+  const verFundidas = $id('moldeo-ver-fundidas')?.checked || false;
+  let visibles = 0;
+  document.querySelectorAll('#moldeo-ot-tbody tr[data-q]').forEach(tr => {
+    if (tr.dataset.oculta === '1' && !verOcultas) { tr.style.display = 'none'; return; }
+    if (tr.dataset.fundida === '1' && !verFundidas) { tr.style.display = 'none'; return; }
+    let mostrar;
+    if (operarioFiltro) mostrar = tr.dataset.opId === operarioFiltro && (!q || tr.dataset.q.includes(q));
+    else if (q) mostrar = tr.dataset.q.includes(q);
+    else if (verTodas) mostrar = true;
+    else mostrar = tr.dataset.asignado === '1';
+    tr.style.display = mostrar ? '' : 'none';
+    if (mostrar) visibles++;
+  });
+  const vacio = $id('moldeo-ot-vacio');
+  if (vacio) vacio.style.display = visibles ? 'none' : '';
+}
+
+// Mueve el campo Fecha un dia (local, no UTC -- misma razon que _fechaISO
+// en showMoldeo) y recarga con el mismo camino que cambiarla a mano.
+function _moldeoCambiarDia(delta) {
+  const el = $id('moldeo-fecha');
+  if (!el || !el.value) return;
+  const [y, m, d] = el.value.split('-').map(Number);
+  const fecha = new Date(y, m - 1, d);
+  fecha.setDate(fecha.getDate() + delta);
+  el.value = _fechaISO(fecha);
+  _moldeoCargarExistentes();
+}
+
+// Trae todas las cargas de ese dia (cualquier operario) para precargar, por
+// fila, quien la esta moldeando hoy y cuantas cajas ya tiene -- asi cambiar
+// de fecha muestra el estado real de ese dia, y guardar de nuevo actualiza
+// en vez de duplicar. Si una OT no tiene carga hoy todavia, la fila arranca
+// con el operario que quedo asignado la ultima vez (_trabajo_operario_asignado)
+// como sugerencia, sin cantidad.
+async function _moldeoCargarExistentes() {
+  _moldeoExistentes = {};
+  const fecha = $id('moldeo-fecha')?.value;
+  if (fecha) {
+    let rows = [];
+    try { rows = await api('/api/produccion_moldeo?fecha=' + fecha); }
+    catch(e) {}
+    // La API viene ORDER BY id DESC -- la primera que aparece por trabajo_id
+    // ya es la mas reciente.
+    rows.forEach(r => { if (!_moldeoExistentes[r.trabajo_id]) _moldeoExistentes[r.trabajo_id] = { id: r.id, operario_id: r.operario_id, cantidad_cajas: r.cantidad_cajas, cajas_sin_cerrar: r.cajas_sin_cerrar, cantidad_noyos: r.cantidad_noyos }; });
+  }
+  (_moldeoTodasOTs || []).forEach((r, i) => {
+    const inp = $id('moldeo-cant-'+i);
+    const inpSc = $id('moldeo-sc-'+i);
+    const inpNoyos = $id('moldeo-noyos-'+i);
+    const sel = $id('moldeo-op-'+i);
+    if (!inp || !sel) return;
+    const tr = inp.closest('tr');
+    const ex = _moldeoExistentes[r.iditemtrabajo];
+    const operarioId = ex ? ex.operario_id : (r.operario_asignado_id || '');
+    inp.value = ex ? ex.cantidad_cajas : '';
+    if (inpSc) inpSc.value = ex ? (ex.cajas_sin_cerrar || 0) : '';
+    if (inpNoyos) inpNoyos.value = ex ? (ex.cantidad_noyos || 0) : '';
+    sel.value = operarioId ? String(operarioId) : '';
+    if (tr) {
+      tr.dataset.opId = operarioId ? String(operarioId) : '';
+      tr.dataset.asignado = operarioId ? '1' : '0';
+    }
+  });
+  _moldeoAplicarFiltro();
   _moldeoLoadLista();
 }
 
-function _moldeoResetForm(clearOperario) {
-  _moldeoEditId = null;
-  _moldeoOT = null;
-  _moldeoRenderOTChip();
-  const q = $id('moldeo-ot-q'); if (q) q.value = '';
-  const cant = $id('moldeo-cantidad'); if (cant) cant.value = '';
-  if (clearOperario !== false) { const op = $id('moldeo-operario'); if (op) op.value = ''; }
-  const title = $id('moldeo-form-title'); if (title) title.textContent = '';
-  const cancelBtn = $id('moldeo-cancelar-btn'); if (cancelBtn) cancelBtn.style.display = 'none';
-  const saveBtn = $id('moldeo-guardar-btn'); if (saveBtn) saveBtn.textContent = 'Guardar';
+// _moldeoTodasOTs se trae UNA sola vez por apertura del modal -- guardar una
+// carga cambia _trabajo_operario_asignado en el servidor, pero esa fila en
+// cache no se entera sola. Sin esto, cambiar de fecha (que recalcula
+// data-asignado a partir de r.operario_asignado_id) hacia un dia sin carga
+// propia volvia a caer en el valor viejo del cache y la OT parecia
+// "desasignarse" -- se actualiza aca mismo apenas se confirma el guardado.
+function _moldeoActualizarAsignacionCache(trabajoId, operarioId) {
+  const row = (_moldeoTodasOTs || []).find(r => r.iditemtrabajo === trabajoId);
+  if (!row) return;
+  row.operario_asignado_id = operarioId || null;
+  if (!operarioId) {
+    row.operario_asignado = null;
+  } else {
+    const persona = (_moldeoPersonal || []).find(p => String(p.id) === String(operarioId));
+    if (persona) row.operario_asignado = persona.nombre;
+  }
+}
+
+// Elegir operario en la fila alcanza para que la OT quede asignada -- no hace
+// falta cargarle cajas todavia (util para "reservar" quien la va a moldear
+// antes de que arranque). Guardar o borrar una carga nunca toca esta
+// asignacion, es la unica via que la escribe (ver put_trabajo_asignar_operario).
+async function _moldeoAsignarOperario(idx) {
+  const r = _moldeoTodasOTs[idx];
+  const sel = $id('moldeo-op-' + idx);
+  if (!r || !sel) return;
+  const operarioId = sel.value || null;
+  try {
+    await api('/api/trabajos/' + r.iditemtrabajo + '/asignar_operario', {
+      method: 'PUT', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ operario_id: operarioId }),
+    });
+  } catch(e) {
+    alert('No se pudo asignar: ' + e.message);
+    return;
+  }
+  const opId = operarioId ? Number(operarioId) : null;
+  _moldeoActualizarAsignacionCache(r.iditemtrabajo, opId);
+  const tr = sel.closest('tr');
+  if (tr) {
+    tr.dataset.opId = opId ? String(opId) : '';
+    tr.dataset.asignado = opId ? '1' : '0';
+  }
+}
+
+// Mismo mecanismo que _moldeoAsignarOperario, pero para el rol de responsable
+// de noyos (_trabajo_responsable_noyos, rol separado del de moldeo).
+async function _moldeoAsignarResponsableNoyos(idx) {
+  const r = _moldeoTodasOTs[idx];
+  const sel = $id('moldeo-noyos-op-' + idx);
+  if (!r || !sel) return;
+  const operarioId = sel.value || null;
+  try {
+    await api('/api/trabajos/' + r.iditemtrabajo + '/asignar_responsable_noyos', {
+      method: 'PUT', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ operario_id: operarioId }),
+    });
+  } catch(e) {
+    alert('No se pudo asignar: ' + e.message);
+    return;
+  }
+  r.responsable_noyos_id = operarioId ? Number(operarioId) : null;
+  r.responsable_noyos = operarioId ? (sel.options[sel.selectedIndex]?.text || '') : null;
+}
+
+// ── Ayudantes de una OT (fijos, N a N -- ver _trabajo_ayudante) ────────────────
+function _moldeoAyudantesCeldaHtml(trabajoId, lista, esFundida) {
+  const chips = (lista || []).map(a => `
+    <span style="display:inline-flex;align-items:center;gap:3px;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:1px 6px;font-size:11px;white-space:nowrap">
+      ${a.operario_nombre}${esFundida ? '' : `
+      <span onclick="_moldeoQuitarAyudante(${trabajoId},${a.operario_id})" style="cursor:pointer;opacity:.6;font-weight:700" title="Quitar">&#10005;</span>`}
+    </span>`).join('');
+  const btn = esFundida ? '' : `<button class="page-btn" style="font-size:10px;padding:2px 7px" onclick="_moldeoAbrirAyudante(${trabajoId})">+ Ayudante</button>`;
+  return `<div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center">${chips}${btn}</div>`;
+}
+
+function _moldeoAbrirAyudante(trabajoId) {
+  _moldeoAyudanteTrabajoId = trabajoId;
+  const moldeadores = (_moldeoPersonal || []).filter(p => p.sector < 2);
+  const yaAsignados = new Set((_moldeoAyudantes[trabajoId] || []).map(a => String(a.operario_id)));
+  const sel = $id('moldeo-ayudante-operario');
+  if (sel) {
+    sel.innerHTML = ['<option value="">Elegir operario&#8230;</option>',
+      ...moldeadores.filter(p => !yaAsignados.has(String(p.id))).map(p => `<option value="${p.id}">${p.nombre}</option>`)
+    ].join('');
+  }
+  const modal = $id('moldeo-ayudante-modal');
+  if (modal) modal.classList.add('open');
+}
+
+function _moldeoCerrarAyudante() {
+  const modal = $id('moldeo-ayudante-modal');
+  if (modal) modal.classList.remove('open');
+  _moldeoAyudanteTrabajoId = null;
+}
+
+async function _moldeoGuardarAyudante() {
+  const trabajoId = _moldeoAyudanteTrabajoId;
+  const operarioId = $id('moldeo-ayudante-operario')?.value;
+  if (!trabajoId || !operarioId) { alert('Elegí un operario.'); return; }
+  let lista;
+  try {
+    lista = await api('/api/trabajos/' + trabajoId + '/ayudantes', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ operario_id: Number(operarioId) }),
+    });
+  } catch(e) { alert('No se pudo agregar: ' + e.message); return; }
+  _moldeoAyudantes[trabajoId] = lista;
+  _moldeoRefrescarCeldaAyudantes(trabajoId);
+  _moldeoSinOTRefrescarAyudantes(trabajoId);
+  _moldeoCerrarAyudante();
+}
+
+async function _moldeoQuitarAyudante(trabajoId, operarioId) {
+  try {
+    await api('/api/trabajos/' + trabajoId + '/ayudantes/' + operarioId, { method: 'DELETE' });
+  } catch(e) { alert('No se pudo quitar: ' + e.message); return; }
+  _moldeoAyudantes[trabajoId] = (_moldeoAyudantes[trabajoId] || []).filter(a => a.operario_id !== operarioId);
+  _moldeoRefrescarCeldaAyudantes(trabajoId);
+  _moldeoSinOTRefrescarAyudantes(trabajoId);
+}
+
+function _moldeoRefrescarCeldaAyudantes(trabajoId) {
+  const idx = (_moldeoTodasOTs || []).findIndex(r => r.iditemtrabajo === trabajoId);
+  if (idx < 0) return;
+  const celda = $id('moldeo-ayd-' + idx);
+  if (!celda) return;
+  const esFundida = _moldeoTodasOTs[idx].estadotrabajo === 'F';
+  celda.innerHTML = _moldeoAyudantesCeldaHtml(trabajoId, _moldeoAyudantes[trabajoId], esFundida);
+}
+
+async function _moldeoGuardarTodo() {
+  const fecha = $id('moldeo-fecha').value;
+  if (!fecha) { alert('Elegí una fecha.'); return; }
+
+  const pendientes = [];
+  const faltaOperario = [];
+  document.querySelectorAll('#moldeo-ot-tbody tr[data-q]').forEach(tr => {
+    if (tr.dataset.oculta === '1') return; // OT trabada -- no se guarda aunque tenga algo tipeado
+    const inp = tr.querySelector('input[data-campo="cerradas"]');
+    const inpSc = tr.querySelector('input[data-campo="sc"]');
+    const inpNoyos = tr.querySelector('input[data-campo="noyos"]');
+    const sel = tr.querySelector('select[data-campo="moldeo"]');
+    if (!inp || !sel) return;
+    const cantidad = Number(inp.value.trim()) || 0;
+    const sinCerrar = Number((inpSc?.value || '').trim()) || 0;
+    const noyos = Number((inpNoyos?.value || '').trim()) || 0;
+    if (!(cantidad > 0) && !(sinCerrar > 0) && !(noyos > 0)) return; // fila sin nada tipeado -- se ignora
+    const trabajoId = Number(inp.dataset.trabajoId);
+    if (!sel.value) { faltaOperario.push(trabajoId); return; }
+    pendientes.push({ trabajoId, operarioId: Number(sel.value), cantidad, sinCerrar, noyos });
+  });
+  if (faltaOperario.length) {
+    alert('Falta elegir operario en la OT ' + faltaOperario.map(id => String(id).padStart(6,'0')).join(', ') + '.');
+    return;
+  }
+  if (!pendientes.length) { alert('Ingresá cajas cerradas, sin cerrar o noyos en al menos una OT.'); return; }
+
+  const btn = $id('moldeo-guardar-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Guardando...'; }
+  let ok = 0, fail = 0;
+  for (const { trabajoId, operarioId, cantidad, sinCerrar, noyos } of pendientes) {
+    const existente = _moldeoExistentes[trabajoId];
+    const body = { fecha, operario_id: operarioId, trabajo_id: trabajoId, cantidad_cajas: cantidad, cajas_sin_cerrar: sinCerrar, cantidad_noyos: noyos };
+    try {
+      if (existente) {
+        await api('/api/produccion_moldeo/' + existente.id, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+      } else {
+        await api('/api/produccion_moldeo', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+      }
+      _moldeoActualizarAsignacionCache(trabajoId, operarioId);
+      ok++;
+    } catch(e) { fail++; }
+  }
+  if (btn) { btn.disabled = false; btn.textContent = 'Guardar'; }
+
+  await _moldeoCargarExistentes();
+  if (fail) alert(`Se guardaron ${ok} OT. ${fail} fallaron.`);
 }
 
 async function _moldeoLoadLista() {
@@ -7265,15 +8185,17 @@ async function _moldeoLoadLista() {
   el.innerHTML = `
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th>Operario</th><th>OT</th><th>Pieza</th><th style="text-align:right">Cajas</th><th></th></tr></thead>
-        <tbody>${rows.map((r, i) => `
-          <tr>
+        <thead><tr><th>Operario</th><th>OT</th><th>Pieza</th><th>Cliente</th><th style="text-align:right">Cajas sin cerrar</th><th style="text-align:right">Cajas cerradas</th><th style="text-align:right">Noyos</th><th></th></tr></thead>
+        <tbody>${rows.map(r => `
+          <tr style="background:${_moldeoColorEstado(r.estadotrabajo)}">
             <td>${r.operario_nombre || r.operario_id}</td>
-            <td>${r.trabajo_id}</td>
+            <td>${r.trabajo_id ? String(r.trabajo_id).padStart(6,'0') : '<span style="color:var(--muted);font-style:italic">sin OT</span>'}</td>
             <td>${r.nombrepieza || '—'}</td>
+            <td style="font-size:12px;color:var(--muted)">${r.cliente_nombre || '—'}</td>
+            <td style="text-align:right;color:var(--muted)">${r.cajas_sin_cerrar ? fmt(r.cajas_sin_cerrar) : '—'}</td>
             <td style="text-align:right;font-weight:600">${fmt(r.cantidad_cajas)}</td>
+            <td style="text-align:right;color:var(--muted)">${r.cantidad_noyos ? fmt(r.cantidad_noyos) : '—'}</td>
             <td style="white-space:nowrap">
-              <span onclick="_moldeoEditar(${i})" style="cursor:pointer;padding:0 4px" title="Editar">&#9998;</span>
               <span onclick="_moldeoBorrar(${r.id})" style="cursor:pointer;padding:0 4px;opacity:.6" title="Eliminar">&#10005;</span>
             </td>
           </tr>`).join('')}
@@ -7282,26 +8204,401 @@ async function _moldeoLoadLista() {
     </div>`;
 }
 
-function _moldeoEditar(idx) {
-  const r = _moldeoListaCache[idx];
-  if (!r) return;
-  _moldeoEditId = r.id;
-  _moldeoOT = { id: r.trabajo_id, pieza: r.nombrepieza || '', codigo: r.codigo_pieza || '' };
-  $id('moldeo-fecha').value = r.fecha;
-  $id('moldeo-operario').value = r.operario_id;
-  $id('moldeo-cantidad').value = r.cantidad_cajas;
-  _moldeoRenderOTChip();
-  const title = $id('moldeo-form-title'); if (title) title.textContent = 'Editando carga #' + r.id;
-  const cancelBtn = $id('moldeo-cancelar-btn'); if (cancelBtn) cancelBtn.style.display = '';
-  const saveBtn = $id('moldeo-guardar-btn'); if (saveBtn) saveBtn.textContent = 'Guardar cambios';
-}
-
 async function _moldeoBorrar(id) {
   if (!confirm('¿Eliminar esta carga de moldeo?')) return;
   try { await api('/api/produccion_moldeo/' + id, { method: 'DELETE' }); }
   catch(e) { alert('No se pudo eliminar: ' + e.message); return; }
-  if (_moldeoEditId === id) _moldeoResetForm();
+  await _moldeoCargarExistentes();
+}
+
+// ── Agregar sin OT (moldeo directo a una pieza, para stock) ────────────────────
+// Mismo backend que las cargas con OT (_produccion_moldeo.pieza_id en vez de
+// trabajo_id), pero sin pieza_id no hay agregado ni tabla a la que este modal
+// pueda pertenecer -- por eso no aparece en la tabla de arriba, solo en
+// "Cargas del dia". Si en cambio se tipea el campo "OT" (para el caso de una
+// OT real que no aparece en la lista principal), el modal se comporta como
+// una fila mas: responsable de moldeo, responsable de noyos y ayudantes se
+// pueden asignar igual que desde la tabla (ver _moldeoSinOTOtChanged).
+function _moldeoAbrirSinOT() {
+  const moldeadores = (_moldeoPersonal || []).filter(p => p.sector < 2);
+  const operarioFiltro = $id('moldeo-operario-filtro')?.value || '';
+  const sel = $id('moldeo-sinot-operario');
+  if (sel) {
+    sel.innerHTML = ['<option value="">Elegir operario&#8230;</option>',
+      ...moldeadores.map(p => `<option value="${p.id}">${p.nombre}</option>`)
+    ].join('');
+    // Si ya hay un operario elegido en el filtro de arriba, se precarga --
+    // suele ser el mismo que va a moldear lo que se agrega sin OT.
+    if (operarioFiltro) sel.value = operarioFiltro;
+  }
+  _moldeoSinOTPieza = null;
+  const chip = $id('moldeo-sinot-pieza-chip'); if (chip) chip.innerHTML = '';
+  const q = $id('moldeo-sinot-pieza-q'); if (q) q.value = '';
+  const cant = $id('moldeo-sinot-cantidad'); if (cant) cant.value = '';
+  const cantSc = $id('moldeo-sinot-sc'); if (cantSc) cantSc.value = '';
+  const cantNoyos = $id('moldeo-sinot-noyos'); if (cantNoyos) cantNoyos.value = '';
+  const ot = $id('moldeo-sinot-ot'); if (ot) ot.value = '';
+  const extra = $id('moldeo-sinot-ot-extra'); if (extra) extra.style.display = 'none';
+  const noyosOp = $id('moldeo-sinot-noyos-op'); if (noyosOp) { noyosOp.innerHTML = ''; delete noyosOp.dataset.trabajoId; }
+  const ayd = $id('moldeo-sinot-ayudantes'); if (ayd) ayd.innerHTML = '';
+  const modal = $id('moldeo-sinot-modal');
+  if (modal) modal.classList.add('open');
+}
+
+// Se dispara al tipear el campo "OT" del modal sin-OT -- si tiene digitos,
+// muestra (y arma) los mismos campos que tiene una fila de la tabla principal
+// para esa OT: responsable de noyos y ayudantes. No precarga lo que esa OT ya
+// tenga asignado (este modal es de alta, no de edicion) -- si el select de
+// responsable de noyos se deja en blanco, no se toca nada al guardar.
+function _moldeoSinOTOtChanged() {
+  const extra = $id('moldeo-sinot-ot-extra');
+  if (!extra) return;
+  const otVal = ($id('moldeo-sinot-ot')?.value || '').replace(/[^\d]/g, '');
+  if (!otVal) { extra.style.display = 'none'; return; }
+  extra.style.display = '';
+  const trabajoId = Number(otVal);
+  const moldeadores = (_moldeoPersonal || []).filter(p => p.sector < 2);
+  const sel = $id('moldeo-sinot-noyos-op');
+  if (sel && Number(sel.dataset.trabajoId) !== trabajoId) {
+    sel.dataset.trabajoId = trabajoId;
+    sel.innerHTML = ['<option value="">&#8212; sin asignar &#8212;</option>',
+      ...moldeadores.map(p => `<option value="${p.id}">${p.nombre}</option>`)
+    ].join('');
+  }
+  _moldeoSinOTRefrescarAyudantes(trabajoId);
+}
+
+// _moldeoAyudantes ya trae los ayudantes de TODA OT activa (bulk fetch al
+// entrar a Cargar moldeo, no solo de las que se ven en la tabla filtrada) --
+// por eso alcanza con leer la cache, sin pedir nada nuevo al backend.
+function _moldeoSinOTRefrescarAyudantes(trabajoId) {
+  const cont = $id('moldeo-sinot-ayudantes');
+  if (!cont) return;
+  const otVal = ($id('moldeo-sinot-ot')?.value || '').replace(/[^\d]/g, '');
+  if (!otVal || Number(otVal) !== trabajoId) return; // el campo OT cambió mientras tanto
+  cont.innerHTML = _moldeoAyudantesCeldaHtml(trabajoId, _moldeoAyudantes[trabajoId], false);
+}
+
+function _moldeoCerrarSinOT() {
+  const modal = $id('moldeo-sinot-modal');
+  if (modal) modal.classList.remove('open');
+}
+
+function _moldeoSinOTBuscarPieza(val) {
+  const dd = $id('moldeo-sinot-pieza-dropdown');
+  if (!dd) return;
+  clearTimeout(_moldeoSinOTTimer);
+  if (!val.trim()) { dd.style.display = 'none'; return; }
+  _moldeoSinOTTimer = setTimeout(async () => {
+    try {
+      const data = await api('/api/piezas?search=' + encodeURIComponent(val.trim()) + '&page_size=8');
+      _moldeoSinOTResults = data.rows || [];
+      if (!_moldeoSinOTResults.length) {
+        dd.innerHTML = '<div style="padding:8px 12px;font-size:12px;color:var(--muted)">Sin resultados</div>';
+        dd.style.display = 'block';
+        return;
+      }
+      dd.innerHTML = _moldeoSinOTResults.map((r, i) => `
+        <div class="tend-dd-item" onclick="_moldeoSinOTPickPieza(${i})"
+          style="padding:7px 12px;cursor:pointer;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:2px">
+          <span style="font-size:13px">${r.nombrepieza||''}</span>
+          <span style="font-size:11px;color:var(--muted)">${r.codigo_pieza||''} &middot; ${r.cliente_nombre||''}</span>
+        </div>`).join('');
+      dd.style.display = 'block';
+    } catch(e) {}
+  }, 200);
+}
+
+function _moldeoSinOTPickPieza(idx) {
+  const r = _moldeoSinOTResults[idx];
+  if (!r) return;
+  _moldeoSinOTPieza = { id: r.id, nombre: r.nombrepieza || '', codigo: r.codigo_pieza || '', cliente: r.cliente_nombre || '' };
+  const dd = $id('moldeo-sinot-pieza-dropdown'); if (dd) dd.style.display = 'none';
+  const q = $id('moldeo-sinot-pieza-q'); if (q) q.value = '';
+  const chip = $id('moldeo-sinot-pieza-chip');
+  if (chip) chip.innerHTML = `
+    <span style="display:inline-flex;align-items:center;gap:6px;padding:4px 8px 4px 12px;
+      border-radius:10px;background:var(--surface2);border:1px solid var(--border);font-size:12px">
+      ${_moldeoSinOTPieza.nombre}${_moldeoSinOTPieza.codigo ? ' <span style="color:var(--muted)">('+_moldeoSinOTPieza.codigo+')</span>' : ''}
+      <span onclick="_moldeoSinOTPieza=null;$id('moldeo-sinot-pieza-chip').innerHTML=''" style="cursor:pointer;opacity:.5;font-size:16px;line-height:1;padding:0 2px">&times;</span>
+    </span>`;
+}
+
+async function _moldeoGuardarSinOT() {
+  const operarioId = $id('moldeo-sinot-operario')?.value;
+  const cantidad = Number(($id('moldeo-sinot-cantidad')?.value || '').trim()) || 0;
+  const sinCerrar = Number(($id('moldeo-sinot-sc')?.value || '').trim()) || 0;
+  const noyos = Number(($id('moldeo-sinot-noyos')?.value || '').trim()) || 0;
+  const fecha = $id('moldeo-fecha')?.value;
+  // Solo digitos -- si se tipeo con puntos/comas de separador de miles (88.005,
+  // comun en AR) o espacios, igual se lee bien. Con type="number" un formato
+  // "invalido" para el navegador (ej. el punto como separador) vaciaba el
+  // campo en silencio (.value = "") sin ningun aviso -- por eso ahora es texto.
+  const otVal = ($id('moldeo-sinot-ot')?.value || '').replace(/[^\d]/g, '');
+  if (!fecha) { alert('Elegí una fecha en el formulario principal primero.'); return; }
+  if (!operarioId) { alert('Elegí un operario.'); return; }
+  if (!(cantidad > 0) && !(sinCerrar > 0) && !(noyos > 0)) { alert('Ingresá cajas cerradas, cajas sin cerrar o noyos.'); return; }
+  if (!_moldeoSinOTPieza) { alert('Elegí una pieza.'); return; }
+
+  // La pieza siempre se confirma a mano (obligatoria), aunque se haya tipeado
+  // una OT -- esa OT es solo para el caso puntual de una que existe de
+  // verdad pero no aparece en la lista principal, y manda por sobre la
+  // pieza al guardar (el backend no acepta las dos juntas).
+  let body;
+  if (otVal) {
+    const trabajoId = Number(otVal);
+    if (!(trabajoId > 0)) { alert('Número de OT inválido.'); return; }
+    body = { fecha, operario_id: Number(operarioId), trabajo_id: trabajoId, cantidad_cajas: cantidad, cajas_sin_cerrar: sinCerrar, cantidad_noyos: noyos };
+  } else {
+    body = { fecha, operario_id: Number(operarioId), pieza_id: _moldeoSinOTPieza.id, cantidad_cajas: cantidad, cajas_sin_cerrar: sinCerrar, cantidad_noyos: noyos };
+  }
+
+  const btn = $id('moldeo-sinot-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Guardando...'; }
+  let guardado;
+  try {
+    guardado = await api('/api/produccion_moldeo', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+    });
+  } catch(e) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Agregar'; }
+    alert('No se pudo guardar: ' + e.message);
+    return;
+  }
+  if (btn) { btn.disabled = false; btn.textContent = 'Agregar'; }
+  // Confirmacion explicita con lo que el backend efectivamente guardo (no lo
+  // que se penso mandar) -- para que quede claro si uso la OT o la pieza.
+  const conOT = guardado && guardado.trabajo_id;
+  const avisos = [];
+  // Si se tipeo una OT real, este modal hace tambien lo que hace elegir un
+  // operario en la fila de la tabla principal: deja a ese operario como
+  // responsable de moldeo de la OT, y si se eligio, responsable de noyos.
+  // Es "mejor esfuerzo" -- el backend solo lo permite con la OT en Inicial o
+  // Programado, y la razon mas probable de que una OT no aparezca en la
+  // lista principal es que ya este Fundida, asi que puede fallar sin que
+  // eso invalide la carga de produccion que ya se guardo arriba.
+  if (conOT) {
+    try {
+      await api('/api/trabajos/' + guardado.trabajo_id + '/asignar_operario', {
+        method: 'PUT', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ operario_id: Number(operarioId) }),
+      });
+      _moldeoActualizarAsignacionCache(guardado.trabajo_id, Number(operarioId));
+    } catch(e) { avisos.push('No se pudo dejar responsable de moldeo: ' + e.message); }
+
+    const noyosOpId = $id('moldeo-sinot-noyos-op')?.value;
+    if (noyosOpId) {
+      try {
+        await api('/api/trabajos/' + guardado.trabajo_id + '/asignar_responsable_noyos', {
+          method: 'PUT', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ operario_id: Number(noyosOpId) }),
+        });
+      } catch(e) { avisos.push('No se pudo dejar responsable de noyos: ' + e.message); }
+    }
+  }
+  alert((conOT
+    ? `Guardado con OT ${String(guardado.trabajo_id).padStart(6,'0')} (${guardado.nombrepieza || 'pieza no encontrada'}).`
+    : `Guardado sin OT, como stock de "${(guardado && guardado.nombrepieza) || (_moldeoSinOTPieza && _moldeoSinOTPieza.nombre) || 'pieza'}".`)
+    + (avisos.length ? '\n\n' + avisos.join('\n') : ''));
+  _moldeoCerrarSinOT();
   _moldeoLoadLista();
+}
+
+// ── Producción y productividad de moldeo ────────────────────────────────────────
+// Tabla con todo operario que tenga al menos una carga historica en
+// _produccion_moldeo, mas 2 graficos (cajas y cajas/hora) del operario
+// seleccionado, semanal/mensual/anual.
+let _moldeoProdOperarios    = [];
+let _moldeoProdOperarioSel  = null;
+let _moldeoProdPeriodo      = 'mensual';
+let _moldeoProdUnidad       = 'cajas';
+let _moldeoProdCharts       = {};
+
+async function openMoldeoProductividadModal() {
+  const modal = $id('moldeo-prod-modal');
+  if (modal) modal.classList.add('open');
+  const body = $id('moldeo-prod-modal-body');
+  if (!body) return;
+  body.innerHTML = '<div class="loading">Cargando...</div>';
+
+  try { _moldeoProdOperarios = await api('/api/moldeo/productividad'); }
+  catch(e) { body.innerHTML = '<div class="empty">No se pudo cargar</div>'; return; }
+
+  if (!_moldeoProdOperarios.length) {
+    body.innerHTML = '<div class="empty" style="padding:20px">Todav&#237;a no hay ning&#250;n operario con cargas de moldeo.</div>';
+    return;
+  }
+
+  _moldeoProdOperarioSel = _moldeoProdOperarios[0].operario_id;
+  _moldeoProdPeriodo = 'mensual';
+  _moldeoProdUnidad = 'cajas';
+
+  body.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:flex-end;gap:6px;margin-bottom:8px">
+      <button class="page-btn" id="moldeo-prod-un-cajas" onclick="_moldeoProdCambiarUnidad('cajas')">Cajas</button>
+      <button class="page-btn" id="moldeo-prod-un-kg" onclick="_moldeoProdCambiarUnidad('kg')">Kg</button>
+    </div>
+    <div id="moldeo-prod-tabla-wrap" style="margin-bottom:16px"></div>
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:10px">
+      <div style="font-size:13px;font-weight:600" id="moldeo-prod-titulo"></div>
+      <div style="display:flex;gap:6px">
+        <button class="page-btn" id="moldeo-prod-per-semanal" onclick="_moldeoProdCambiarPeriodo('semanal')">Semanal</button>
+        <button class="page-btn" id="moldeo-prod-per-mensual" onclick="_moldeoProdCambiarPeriodo('mensual')">Mensual</button>
+        <button class="page-btn" id="moldeo-prod-per-anual" onclick="_moldeoProdCambiarPeriodo('anual')">Anual</button>
+      </div>
+    </div>
+    <div class="grid-2" style="gap:16px">
+      <div class="card">
+        <div style="font-weight:600;font-size:13px;margin-bottom:10px" id="moldeo-prod-chart-titulo-1">Cajas moldeadas</div>
+        <div class="chart-box"><canvas id="moldeo-prod-chart-cajas"></canvas></div>
+      </div>
+      <div class="card">
+        <div style="font-weight:600;font-size:13px;margin-bottom:10px" id="moldeo-prod-chart-titulo-2">Productividad (cajas/hora)</div>
+        <div class="chart-box"><canvas id="moldeo-prod-chart-productividad"></canvas></div>
+      </div>
+    </div>
+  `;
+  _moldeoProdRenderTabla();
+  _moldeoProdMarcarUnidad();
+  _moldeoProdMarcarPeriodo();
+  await _moldeoProdCargarDetalle();
+}
+
+function closeMoldeoProductividadModal() {
+  const modal = $id('moldeo-prod-modal');
+  if (modal) modal.classList.remove('open');
+  for (const k in _moldeoProdCharts) { try { _moldeoProdCharts[k].destroy(); } catch(e) {} }
+  _moldeoProdCharts = {};
+}
+
+function _moldeoProdRenderTabla() {
+  const wrap = $id('moldeo-prod-tabla-wrap');
+  if (!wrap) return;
+  const kg = _moldeoProdUnidad === 'kg';
+  const sinPeso = kg && _moldeoProdOperarios.some(o => o.cargas_sin_peso > 0);
+  wrap.innerHTML = `
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Operario</th>
+          <th style="text-align:right">Total ${kg ? 'kg' : 'cajas'}</th>
+          <th style="text-align:right">Este mes</th>
+          <th style="text-align:right">Este a&#241;o</th>
+          <th style="text-align:right" title="Cajas moldeadas pero no cerradas -- estadistica aparte, no suma a cajas/kg/productividad. Sirve para justificar el dia (ej. quedo haciendo noyos por otra falta)">Sin cerrar (mes / a&#241;o)</th>
+          <th style="text-align:right">Productividad (${kg ? 'kg' : 'cajas'}/hora)</th>
+        </tr></thead>
+        <tbody id="moldeo-prod-tbody">${_moldeoProdFilasHtml()}</tbody>
+      </table>
+    </div>
+    ${sinPeso ? '<div style="font-size:11px;color:var(--muted);margin-top:6px">Algunas cargas no tienen peso de pieza cargado en Access — no se cuentan en los totales de Kg.</div>' : ''}
+  `;
+}
+
+function _moldeoProdFilasHtml() {
+  const kg = _moldeoProdUnidad === 'kg';
+  return _moldeoProdOperarios.map(o => {
+    const total = kg ? o.total_kg : o.total_cajas;
+    const mes   = kg ? o.kg_mes_actual : o.cajas_mes_actual;
+    const anio  = kg ? o.kg_anio_actual : o.cajas_anio_actual;
+    const prod  = kg ? o.productividad_kg : o.productividad;
+    const f     = kg ? fmtKg : fmt;
+    return `
+    <tr class="tr-link" onclick="_moldeoProdSeleccionar(${o.operario_id})"
+        style="cursor:pointer${o.operario_id === _moldeoProdOperarioSel ? ';background:var(--surface2)' : ''}">
+      <td>${o.operario_nombre}</td>
+      <td style="text-align:right;font-weight:600">${f(total)}</td>
+      <td style="text-align:right">${f(mes)}</td>
+      <td style="text-align:right">${f(anio)}</td>
+      <td style="text-align:right;color:var(--muted);font-size:12px">${fmt(o.cajas_sin_cerrar_mes_actual||0)} / ${fmt(o.cajas_sin_cerrar_anio_actual||0)}</td>
+      <td style="text-align:right">${prod != null ? (kg ? fmtKg(prod) : prod) : '&#8212;'}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function _moldeoProdSeleccionar(operarioId) {
+  _moldeoProdOperarioSel = operarioId;
+  const tbody = $id('moldeo-prod-tbody');
+  if (tbody) tbody.innerHTML = _moldeoProdFilasHtml();
+  await _moldeoProdCargarDetalle();
+}
+
+async function _moldeoProdCambiarPeriodo(periodo) {
+  _moldeoProdPeriodo = periodo;
+  _moldeoProdMarcarPeriodo();
+  await _moldeoProdCargarDetalle();
+}
+
+async function _moldeoProdCambiarUnidad(unidad) {
+  _moldeoProdUnidad = unidad;
+  _moldeoProdMarcarUnidad();
+  _moldeoProdRenderTabla();
+  await _moldeoProdCargarDetalle();
+}
+
+function _moldeoProdMarcarUnidad() {
+  ['cajas', 'kg'].forEach(u => {
+    const btn = $id('moldeo-prod-un-' + u);
+    if (!btn) return;
+    const activo = u === _moldeoProdUnidad;
+    btn.style.background = activo ? 'var(--accent-dim)' : '';
+    btn.style.borderColor = activo ? 'var(--accent)' : '';
+    btn.style.color = activo ? 'var(--accent)' : '';
+    btn.style.fontWeight = activo ? '600' : '';
+  });
+}
+
+function _moldeoProdMarcarPeriodo() {
+  ['semanal', 'mensual', 'anual'].forEach(p => {
+    const btn = $id('moldeo-prod-per-' + p);
+    if (!btn) return;
+    const activo = p === _moldeoProdPeriodo;
+    btn.style.background = activo ? 'var(--accent-dim)' : '';
+    btn.style.borderColor = activo ? 'var(--accent)' : '';
+    btn.style.color = activo ? 'var(--accent)' : '';
+    btn.style.fontWeight = activo ? '600' : '';
+  });
+}
+
+async function _moldeoProdCargarDetalle() {
+  const op = _moldeoProdOperarios.find(o => o.operario_id === _moldeoProdOperarioSel);
+  const titulo = $id('moldeo-prod-titulo');
+  if (titulo) titulo.textContent = op ? op.operario_nombre : '';
+
+  let data;
+  try { data = await api('/api/moldeo/productividad/' + _moldeoProdOperarioSel + '?periodo=' + _moldeoProdPeriodo); }
+  catch(e) { return; }
+
+  const kg = _moldeoProdUnidad === 'kg';
+  const buckets = data.buckets || [];
+  const labels = buckets.map(b => b.periodo);
+  const cantidad = buckets.map(b => kg ? b.kg : b.cajas);
+  const productividad = buckets.map(b => kg ? b.productividad_kg : b.productividad);
+
+  const t1 = $id('moldeo-prod-chart-titulo-1');
+  if (t1) t1.textContent = kg ? 'Kg moldeados' : 'Cajas moldeadas';
+  const t2 = $id('moldeo-prod-chart-titulo-2');
+  if (t2) t2.textContent = `Productividad (${kg ? 'kg' : 'cajas'}/hora)`;
+
+  if (_moldeoProdCharts.cajas) { try { _moldeoProdCharts.cajas.destroy(); } catch(e) {} }
+  if (_moldeoProdCharts.productividad) { try { _moldeoProdCharts.productividad.destroy(); } catch(e) {} }
+
+  const canvasCajas = $id('moldeo-prod-chart-cajas');
+  if (canvasCajas) {
+    _moldeoProdCharts.cajas = new Chart(canvasCajas, {
+      type: 'bar',
+      data: { labels, datasets: [{ label: kg ? 'Kg moldeados' : 'Cajas moldeadas', data: cantidad, backgroundColor: '#42a5f5bb', borderRadius: 4 }] },
+      options: chartDefaults(),
+    });
+  }
+  const canvasProd = $id('moldeo-prod-chart-productividad');
+  if (canvasProd) {
+    _moldeoProdCharts.productividad = new Chart(canvasProd, {
+      type: 'bar',
+      data: { labels, datasets: [{ label: kg ? 'Kg / hora' : 'Cajas / hora', data: productividad, backgroundColor: '#66bb6abb', borderRadius: 4 }] },
+      options: chartDefaults(),
+    });
+  }
 }
 
 async function loadPipeline() {
@@ -7457,7 +8754,11 @@ async function showTrabajoDetail(id) {
   const {trabajo: t, noyeria: noy, produccion: prod, peso_molde} = d;
 
   const matLabel = [t.códdeagregados, t.material_nombre].filter(Boolean).join(' — ');
-  const respLabel = t.responsable_nombre || ('Resp. #'+(t.códigoresponsable1||'?'));
+  const respLabel = t.responsable_nombre
+    ? t.responsable_nombre
+    : t.moldeador_asignado_nombre
+      ? `${t.moldeador_asignado_nombre} <span style="font-size:10px;color:var(--muted);font-weight:400">&middot; asignado (moldeo, no confirmado)</span>`
+      : (t.códigoresponsable1 ? ('Resp. #'+t.códigoresponsable1) : 'Sin asignar');
   const tipomoldeo = _MOLDEO_TIPO[prod?.tipomoldeo ?? 0] || String(prod?.tipomoldeo ?? 0);
   const fundDesc = t.códfundición ? fmtFund(t.códfundición) : '—';
 
@@ -7611,11 +8912,11 @@ const KIOSK_SLIDES = [
   { id: 'defectos_rech',   label: 'Motivos de Rechazo',      icon: '⚠️', group: 'Estad\xedstica', period: true },
   { id: 'defectos_rep',    label: 'Tipos de Reparaci\xf3n',  icon: '🛠️', group: 'Estad\xedstica', period: true },
   { id: 'pend_fundir_grafico',    label: 'Pendiente de Fundir',    icon: '⚙️', group: 'Producci\xf3n', period: true,
-    modos: [{ key: 'unidad', label: 'Unidad', options: [{v:'piezas',l:'Piezas'},{v:'kg',l:'Kg'}] }] },
+    modos: [{ key: 'unidad', label: 'Unidad', options: [{v:'piezas',l:'Piezas'},{v:'kg',l:'Kg'},{v:'pesos',l:'Pesos ($)'}] }] },
   { id: 'pend_fundir_calendario', label: 'Calendario de Entregas', icon: '📅', group: 'Producci\xf3n', period: true,
     modos: [{ key: 'vista', label: 'Vista', options: [{v:'mes',l:'Mes'},{v:'año',l:'A\xf1o'}] }] },
   { id: 'tendencia', label: 'Tendencia Anual', icon: '📈', group: 'Producci\xf3n',
-    modos: [{ key: 'unidad', label: 'Unidad', options: [{v:'piezas',l:'Piezas'},{v:'kg',l:'Kg'}] }] },
+    modos: [{ key: 'unidad', label: 'Unidad', options: [{v:'piezas',l:'Piezas'},{v:'kg',l:'Kg'},{v:'pesos',l:'Pesos ($)'}] }] },
 ];
 
 let _kioskActive    = false;
@@ -8467,13 +9768,13 @@ function _kioskPageProbeta(slide, rows) {
 // Igual que en kiosk.html: _renderTendenciaBarras (compartida, ver
 // frontend/js/tendencia.js) sin Curvas ni drill-down mensual -- ninguna otra
 // slide de esta presentación tiene ese nivel de interacción.
-let _kioskTendenciaKg = false;
+let _kioskTendenciaModo = 'piezas'; // 'piezas' | 'kg' | 'pesos'
 let _kioskTendenciaData = null;
 let _kioskTendenciaProyeccion = null;
 
 function _kioskToggleTendenciaKg() {
-  _kioskTendenciaKg = !_kioskTendenciaKg;
-  _renderTendenciaBarras('chart-tendencia-kiosk', _kioskTendenciaData, _kioskTendenciaProyeccion, _kioskTendenciaKg, 'tendencia-kg-btn', null);
+  _kioskTendenciaModo = _kioskTendenciaModo === 'piezas' ? 'kg' : _kioskTendenciaModo === 'kg' ? 'pesos' : 'piezas';
+  _renderTendenciaBarras('chart-tendencia-kiosk', _kioskTendenciaData, _kioskTendenciaProyeccion, _kioskTendenciaModo, 'tendencia-kg-btn', null);
 }
 
 function _kioskShellTendencia(slide) {
@@ -8504,7 +9805,7 @@ function _kioskShellPendFundir(slide) {
         <span>Pendiente de fundir por material</span>
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <span id="kiosk-pend-fundir-sub" style="font-size:13px;color:var(--muted);font-weight:400">Cargando&#8230;</span>
-          <button class="page-btn" id="pend-fundir-kg-btn" onclick="_togglePendFundirKg()">Ver en kg</button>
+          <button class="page-btn" id="pend-fundir-kg-btn" onclick="_ciclarPendFundirModo()">Ver en kg</button>
           <button class="page-btn" id="pend-fundir-cal-btn" onclick="_togglePendFundirCal()">&#128197; Modo calendario</button>
         </div>
       </div>
@@ -8549,7 +9850,7 @@ async function _kioskShowSlide(slide) {
         const m = _sM('pend_fundir_grafico');
         html = _kioskShellPendFundir(slide);
         afterRender = () => {
-          _pendFundirKgMode = _kioskModo('pend_fundir_grafico', 'unidad') === 'kg';
+          _pendFundirModo = _kioskModo('pend_fundir_grafico', 'unidad') || 'piezas';
           _renderPendienteFundirChart('chart-pend-fundir-kiosk', 'kiosk-pend-fundir-sub', m);
         };
         break;
@@ -8571,9 +9872,9 @@ async function _kioskShowSlide(slide) {
         try { p = await api('/api/dashboard/proyeccion_pipeline?meses=' + m); } catch(_) { p = null; }
         _kioskTendenciaData = d?.tendencia || [];
         _kioskTendenciaProyeccion = p;
-        _kioskTendenciaKg = _kioskModo('tendencia', 'unidad') === 'kg';
+        _kioskTendenciaModo = _kioskModo('tendencia', 'unidad') || 'piezas';
         html = _kioskShellTendencia(slide);
-        afterRender = () => _renderTendenciaBarras('chart-tendencia-kiosk', _kioskTendenciaData, _kioskTendenciaProyeccion, _kioskTendenciaKg, 'tendencia-kg-btn', null);
+        afterRender = () => _renderTendenciaBarras('chart-tendencia-kiosk', _kioskTendenciaData, _kioskTendenciaProyeccion, _kioskTendenciaModo, 'tendencia-kg-btn', null);
         break;
       }
       default: html = `<div class="ktv"><div class="ktv-head"><h2>${slide.icon} ${slide.label}</h2></div><div style="color:var(--muted);padding:40px">Vista no disponible.</div></div>`;

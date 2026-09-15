@@ -5,7 +5,7 @@
    variables --* y clases generales que cada documento ya trae. */
 
 /* Calendario de pendiente de fundir */
-.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.cal-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
 .cal-grid.cal-header { margin-bottom: 4px; }
 .cal-dow { text-align: center; font-size: 10px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; padding: 2px 0; }
 .cal-celda { min-height: 58px; background: var(--surface2); border: 1px solid var(--border); border-radius: 5px; padding: 4px 5px; display: flex; flex-direction: column; gap: 2px; }
@@ -20,7 +20,7 @@
 .cal-badge.cal-fund { background: #ffa72633; color: #ffc477; }
 .cal-badge.cal-prog-bat { background: #00897b55; color: #64d8cb; font-weight: 700; }
 .cal-badge.cal-fund-bat { background: #e6510055; color: #ffab5e; font-weight: 700; }
-.cal-anual-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px; align-items: start; }
+.cal-anual-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr)); gap: 10px; align-items: start; }
 .cal-mes-celda { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 8px; display: flex; flex-direction: column; gap: 6px; cursor: pointer; transition: border-color .15s; }
 .cal-mes-celda:hover { border-color: var(--accent); }
 .cal-mes-celda.cal-vencida { border-color: var(--red); }

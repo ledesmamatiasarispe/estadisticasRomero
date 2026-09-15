@@ -122,9 +122,13 @@ try {
 
             # Trabajos en modo grupo (no full refresh): filtrar por fecha en Access
             if ($tableName -eq "Trabajos" -and $isGroupMode -and -not $FullRefresh) {
-                $cmd.CommandText = "SELECT * FROM [Trabajos] WHERE [fechacargaot] >= DateAdd('m', -$RollingMonths, Now())"
+                # OT activas suelen tener [fechacargaot] NULL (se completa recien al
+                # cerrarse) -- sin el "OR ... IS NULL" el filtro de fecha las excluia
+                # siempre, para siempre, del sync de grupo (que es el unico que corre
+                # cada 1-2 min). Solo un sync completo (sin filtro) las traia.
+                $cmd.CommandText = "SELECT * FROM [Trabajos] WHERE [fechacargaot] >= DateAdd('m', -$RollingMonths, Now()) OR [fechacargaot] IS NULL"
                 $isDateRolling = $true
-                Write-Host "[sync_access] [$i/$($tblList.Count)] $tableName  (fecha >= -${RollingMonths}m)"
+                Write-Host "[sync_access] [$i/$($tblList.Count)] $tableName  (fecha >= -${RollingMonths}m OR sin fecha)"
             } else {
                 # Verificar watermark para sync incremental
                 $wm = if (-not $FullRefresh) { $watermarks[$tableName] } else { $null }

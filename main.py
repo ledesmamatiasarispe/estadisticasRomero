@@ -1,5 +1,6 @@
 """main.py — GNC API: FastAPI + sync Access → SQLite + frontend."""
 import asyncio
+import bisect
 import concurrent.futures as _cf
 import hashlib
 import json
@@ -452,6 +453,18 @@ def _seed_lookups():
             pide_probeta_traccion INTEGER NOT NULL DEFAULT 0
         )
     """)
+    # Analoga a _piezas_sin_peso (ver dashboard_pendiente_fundir_sin_peso) pero para
+    # precio: registra desde cuando una pieza pendiente de fundir viene sin precio
+    # resoluble (sin tarifa cargada en Precios, o con tarifa por kg pero sin peso).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _piezas_sin_precio (
+            idpieza      INTEGER PRIMARY KEY,
+            nombrepieza  TEXT,
+            primera_vez  TEXT NOT NULL,
+            ultima_vez   TEXT NOT NULL,
+            ultima_ot_id INTEGER
+        )
+    """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS _kiosk_config (
             key   TEXT PRIMARY KEY,
@@ -544,11 +557,90 @@ def _seed_lookups():
         CREATE TABLE IF NOT EXISTS _produccion_moldeo (
             id                INTEGER PRIMARY KEY AUTOINCREMENT,
             fecha             TEXT    NOT NULL,
-            trabajo_id        INTEGER NOT NULL,
+            trabajo_id        INTEGER,
+            pieza_id          INTEGER,
             operario_id       INTEGER NOT NULL,
             cantidad_cajas    INTEGER NOT NULL,
             creado_por_legajo INTEGER,
             creado_en         TEXT    NOT NULL
+        )
+    """)
+    # Migracion: trabajo_id era NOT NULL: se rearma la tabla para permitir
+    # moldeo "sin OT" (para stock) via pieza_id -- exactamente uno de los dos
+    # esta seteado, nunca los dos ni ninguno (ver _moldeo_validar_body).
+    _cols_moldeo = [r[1] for r in conn.execute("PRAGMA table_info(_produccion_moldeo)").fetchall()]
+    if "pieza_id" not in _cols_moldeo:
+        conn.execute("ALTER TABLE _produccion_moldeo RENAME TO _produccion_moldeo_old")
+        conn.execute("""
+            CREATE TABLE _produccion_moldeo (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                fecha             TEXT    NOT NULL,
+                trabajo_id        INTEGER,
+                pieza_id          INTEGER,
+                operario_id       INTEGER NOT NULL,
+                cantidad_cajas    INTEGER NOT NULL,
+                creado_por_legajo INTEGER,
+                creado_en         TEXT    NOT NULL
+            )
+        """)
+        conn.execute("""
+            INSERT INTO _produccion_moldeo
+                (id, fecha, trabajo_id, pieza_id, operario_id, cantidad_cajas, creado_por_legajo, creado_en)
+            SELECT id, fecha, trabajo_id, NULL, operario_id, cantidad_cajas, creado_por_legajo, creado_en
+            FROM _produccion_moldeo_old
+        """)
+        conn.execute("DROP TABLE _produccion_moldeo_old")
+    # Cajas cerradas (cantidad_cajas, ya listas para fundir) vs sin cerrar --
+    # estadistica propia y paralela, NO se suma a cantidad_cajas ni entra en
+    # kg/$/productividad (eso sigue siendo solo lo cerrado): sirve para poder
+    # justificar el dia de un operario aunque no haya cerrado cajas (ej. quedo
+    # haciendo noyos porque otro faltador).
+    _cols_moldeo = [r[1] for r in conn.execute("PRAGMA table_info(_produccion_moldeo)").fetchall()]
+    if "cajas_sin_cerrar" not in _cols_moldeo:
+        conn.execute("ALTER TABLE _produccion_moldeo ADD COLUMN cajas_sin_cerrar INTEGER NOT NULL DEFAULT 0")
+    if "cantidad_noyos" not in _cols_moldeo:
+        conn.execute("ALTER TABLE _produccion_moldeo ADD COLUMN cantidad_noyos INTEGER NOT NULL DEFAULT 0")
+    # Quien quedo asignado a una OT -- se escribe UNICAMENTE desde
+    # put_trabajo_asignar_operario (elegir el combo alcanza, sin necesidad de
+    # ninguna carga guardada). Es un reemplazo provisorio de
+    # Trabajos.códigoresponsable1 mientras ese campo (que llena Access recien
+    # al fundir) este vacio -- ver get_trabajo_detail y get_trabajos.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _trabajo_operario_asignado (
+            trabajo_id  INTEGER PRIMARY KEY,
+            operario_id INTEGER NOT NULL,
+            asignado_en TEXT    NOT NULL
+        )
+    """)
+    # Responsable de noyos -- rol separado del responsable de moldeo (arriba),
+    # misma mecanica exacta (fijo por OT, combo, se pisa con ON CONFLICT), solo
+    # que "quien hizo los noyos" en vez de "quien moldeo la caja".
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _trabajo_responsable_noyos (
+            trabajo_id  INTEGER PRIMARY KEY,
+            operario_id INTEGER NOT NULL,
+            asignado_en TEXT    NOT NULL
+        )
+    """)
+    # Ayudantes de una OT -- fijos por OT como los responsables de arriba, pero
+    # N a N (una OT puede tener varios, ver POST/DELETE /api/trabajos/{id}/ayudantes).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _trabajo_ayudante (
+            trabajo_id  INTEGER NOT NULL,
+            operario_id INTEGER NOT NULL,
+            asignado_en TEXT    NOT NULL,
+            PRIMARY KEY (trabajo_id, operario_id)
+        )
+    """)
+    # Parche local para OT que quedaron trabadas en Programado en Access (un
+    # problema de datos que solo se arregla ahi) -- las saca de la tabla de
+    # Cargar moldeo sin tocar Pendiente de fundir ni el resto de la app, que
+    # siguen viendo la OT tal cual esta. Nunca se aplica fuera de ese modal.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _trabajo_oculto (
+            trabajo_id        INTEGER PRIMARY KEY,
+            oculto_por_legajo INTEGER,
+            oculto_en         TEXT    NOT NULL
         )
     """)
     conn.execute("""
@@ -1350,6 +1442,26 @@ _CTE_PIEZAS_PESO = """
     )
 """
 
+# Precio por pieza: NombreDePiezas.tipofacturación + su códcliente son la clave de
+# Precios (tarifario vigente, códigocliente+tipofacturación -> precio). El precio NO
+# siempre es "por pieza" -- TiposFacturación.nombrefacturación dice si esa tarifa es
+# "Kg de ..." (precio por KILO de material, ~59% de las entregas reales) o "Pza. ..."
+# (precio por unidad, ~40%): confundir los dos da un total sin sentido. El código
+# catch-all 384 ("FALTA PRECIO", existe a $0 para los 1369 clientes) queda afuera
+# solo, vía el filtro precio > 0 -- no hace falta un caso especial.
+_CTE_PIEZAS_PRECIO = """
+    , piezas_precio AS (
+        SELECT np.id AS pieza_id,
+               pr.preciotipofacturación AS precio,
+               pr.fechaprecio AS fechaprecio,
+               (tf.nombrefacturación LIKE 'Kg%') AS es_por_kg
+        FROM NombreDePiezas np
+        JOIN Precios pr            ON pr."códigocliente" = np."códcliente" AND pr.tipofacturación = np.tipofacturación
+        LEFT JOIN "TiposFacturación" tf ON tf.tipofacturación = np.tipofacturación
+        WHERE pr.preciotipofacturación > 0
+    )
+"""
+
 # Batiplane queda afuera de pendiente_fundir/calendario/detalle salvo pedido explícito
 # (ver dashboard_pendiente_fundir) -- su código de cliente es fijo, no una config editable.
 _COD_CLIENTE_BATIPLANE = "BA3"
@@ -1370,7 +1482,7 @@ def dashboard_pendiente_fundir(meses: int = 6):
         # Antigüedad de la OT: fechacargaot es NULL en ~93% de las OTs activas pendientes de
         # fundir (a diferencia de datos históricas ya cerradas), así que igual que en
         # analytics_top_defectos/analytics_top_piezas usamos p.fechapedido como respaldo.
-        rows = conn.execute(_CTE_PIEZAS_PESO + """
+        rows = conn.execute(_CTE_PIEZAS_PESO + _CTE_PIEZAS_PRECIO + """
             , base AS (
                 SELECT
                     t."códdeagregados" AS codigo,
@@ -1382,7 +1494,10 @@ def dashboard_pendiente_fundir(meses: int = 6):
                          ELSE COALESCE(t.cantidadproducida, 0) END AS pendientes,
                     np.nombrepieza AS nombrepieza,
                     COALESCE(np.coefcompl, 1) AS coefcompl,
-                    CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END AS peso_efectivo
+                    CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END AS peso_efectivo,
+                    CASE WHEN ppr.es_por_kg
+                         THEN ppr.precio * (CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END)
+                         ELSE ppr.precio END AS precio_efectivo
                 FROM Trabajos t
                 JOIN ItemDetallePedido idp ON idp.iditempedido = t.iditempedido
                 JOIN Pedidos p             ON p.idpedido = idp.idpedido
@@ -1390,6 +1505,7 @@ def dashboard_pendiente_fundir(meses: int = 6):
                 LEFT JOIN NombreDePiezas np ON np.id = idp.idpieza
                 LEFT JOIN PesosDePiezas pp  ON pp.códpieza = t.idpesopieza
                 LEFT JOIN piezas_peso pz    ON pz.pieza_id = np.id
+                LEFT JOIN piezas_precio ppr ON ppr.pieza_id = np.id
                 WHERE upper(t.estadotrabajo) IN ('I', 'P', 'F')
                   AND upper(p.estadopedido)  NOT IN ('K','D')
                   AND upper(idp.estadoitem)  NOT IN ('K','D')
@@ -1405,19 +1521,20 @@ def dashboard_pendiente_fundir(meses: int = 6):
                 es_batiplane,
                 COUNT(*) AS ots,
                 SUM(pendientes) AS piezas_pendientes,
-                ROUND(SUM(pendientes *
-                    CASE WHEN nombrepieza LIKE '%(AD)' THEN peso_efectivo * 2
-                         WHEN nombrepieza LIKE '%(TR)' THEN peso_efectivo * 3
-                         ELSE peso_efectivo END * coefcompl), 2) AS kg_pendientes,
+                ROUND(SUM(pendientes * peso_efectivo * coefcompl), 2) AS kg_pendientes,
                 SUM(CASE WHEN peso_efectivo IS NULL THEN 1 ELSE 0 END) AS ots_sin_peso,
-                SUM(CASE WHEN peso_efectivo IS NULL THEN pendientes ELSE 0 END) AS piezas_sin_peso
+                SUM(CASE WHEN peso_efectivo IS NULL THEN pendientes ELSE 0 END) AS piezas_sin_peso,
+                ROUND(SUM(pendientes * precio_efectivo), 2) AS pesos_pendientes,
+                SUM(CASE WHEN precio_efectivo IS NULL THEN 1 ELSE 0 END) AS ots_sin_precio,
+                SUM(CASE WHEN precio_efectivo IS NULL THEN pendientes ELSE 0 END) AS piezas_sin_precio
             FROM base
             GROUP BY codigo, estado, es_batiplane
             ORDER BY codigo
         """, (_COD_CLIENTE_BATIPLANE,)).fetchall()
 
         def vacio():
-            return {"ots": 0, "piezas_pendientes": 0, "kg_pendientes": 0, "ots_sin_peso": 0, "piezas_sin_peso": 0}
+            return {"ots": 0, "piezas_pendientes": 0, "kg_pendientes": 0, "ots_sin_peso": 0, "piezas_sin_peso": 0,
+                    "pesos_pendientes": 0, "ots_sin_precio": 0, "piezas_sin_precio": 0}
 
         por_material: dict[str, dict] = {}
         for r in rows:
@@ -1433,15 +1550,19 @@ def dashboard_pendiente_fundir(meses: int = 6):
             seg["kg_pendientes"] = round((seg["kg_pendientes"] or 0) + (d["kg_pendientes"] or 0), 2)
             seg["ots_sin_peso"] += d["ots_sin_peso"]
             seg["piezas_sin_peso"] += d["piezas_sin_peso"]
+            seg["pesos_pendientes"] = round((seg["pesos_pendientes"] or 0) + (d["pesos_pendientes"] or 0), 2)
+            seg["ots_sin_precio"] += d["ots_sin_precio"]
+            seg["piezas_sin_precio"] += d["piezas_sin_precio"]
             if d["es_batiplane"]:
                 seg["batiplane"] = {
                     "ots": d["ots"], "piezas_pendientes": d["piezas_pendientes"],
                     "kg_pendientes": d["kg_pendientes"] or 0,
+                    "pesos_pendientes": d["pesos_pendientes"] or 0,
                 }
 
         for m in por_material.values():
             for campo in ("inicial", "programado", "fundido"):
-                m[campo].setdefault("batiplane", {"ots": 0, "piezas_pendientes": 0, "kg_pendientes": 0})
+                m[campo].setdefault("batiplane", {"ots": 0, "piezas_pendientes": 0, "kg_pendientes": 0, "pesos_pendientes": 0})
 
         resultado = list(por_material.values())
         resultado.sort(key=lambda m: m["inicial"]["ots"] + m["programado"]["ots"] + m["fundido"]["ots"], reverse=True)
@@ -1489,10 +1610,7 @@ def dashboard_pendiente_fundir_calendario(meses: int = 6):
                        OR date(t.fechaprevista) >= date('now', '-1 month'))
             )
         """
-        kg_expr = """ROUND(SUM(pendientes *
-                    CASE WHEN nombrepieza LIKE '%(AD)' THEN peso_efectivo * 2
-                         WHEN nombrepieza LIKE '%(TR)' THEN peso_efectivo * 3
-                         ELSE peso_efectivo END * coefcompl), 2)"""
+        kg_expr = "ROUND(SUM(pendientes * peso_efectivo * coefcompl), 2)"
         params = [_COD_CLIENTE_BATIPLANE, f"-{meses}"]
 
         rows = conn.execute(cte_base + f"""
@@ -1586,7 +1704,7 @@ def dashboard_pendiente_fundir_detalle(
             where.append("date(t.fechaprevista) = ?")
             params.append(fecha)
 
-        rows = conn.execute(_CTE_PIEZAS_PESO + f"""
+        rows = conn.execute(_CTE_PIEZAS_PESO + _CTE_PIEZAS_PRECIO + f"""
             , base AS (
                 SELECT
                     t.iditemtrabajo AS ot_id,
@@ -1603,7 +1721,10 @@ def dashboard_pendiente_fundir_detalle(
                     CASE WHEN upper(t.estadotrabajo) IN ('I', 'P')
                          THEN (t.cantidad - COALESCE(t.cantidadfundida, 0))
                          ELSE COALESCE(t.cantidadproducida, 0) END AS pendientes,
-                    CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END AS peso_efectivo
+                    CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END AS peso_efectivo,
+                    CASE WHEN ppr.es_por_kg
+                         THEN ppr.precio * (CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END)
+                         ELSE ppr.precio END AS precio_efectivo
                 FROM Trabajos t
                 JOIN ItemDetallePedido idp ON idp.iditempedido = t.iditempedido
                 JOIN Pedidos p             ON p.idpedido = idp.idpedido
@@ -1612,18 +1733,17 @@ def dashboard_pendiente_fundir_detalle(
                 LEFT JOIN NombreDePiezas np ON np.id = idp.idpieza
                 LEFT JOIN PesosDePiezas pp  ON pp.códpieza = t.idpesopieza
                 LEFT JOIN piezas_peso pz    ON pz.pieza_id = np.id
+                LEFT JOIN piezas_precio ppr ON ppr.pieza_id = np.id
                 WHERE {' AND '.join(where)}
             )
             SELECT
                 ot_id, estado, fechaprevista, fechapedido,
                 codigo_material, material, nombrepieza, codigo_pieza,
                 codigo_cliente, cliente_nombre, pendientes,
-                CASE WHEN nombrepieza LIKE '%(AD)' THEN peso_efectivo * 2
-                     WHEN nombrepieza LIKE '%(TR)' THEN peso_efectivo * 3
-                     ELSE peso_efectivo END * coefcompl AS peso_unitario,
-                ROUND(pendientes * (CASE WHEN nombrepieza LIKE '%(AD)' THEN peso_efectivo * 2
-                     WHEN nombrepieza LIKE '%(TR)' THEN peso_efectivo * 3
-                     ELSE peso_efectivo END * coefcompl), 2) AS kg_pendientes
+                peso_efectivo * coefcompl AS peso_unitario,
+                ROUND(pendientes * peso_efectivo * coefcompl, 2) AS kg_pendientes,
+                precio_efectivo AS precio_unitario,
+                ROUND(pendientes * precio_efectivo, 2) AS pesos_pendientes
             FROM base
             ORDER BY fechaprevista IS NULL, fechaprevista, ot_id
         """, params).fetchall()
@@ -1655,13 +1775,17 @@ _CTE_PROYECCION_BASE = """
                  ELSE COALESCE(t.cantidadproducida, 0) END AS pendientes,
             np.nombrepieza AS nombrepieza,
             COALESCE(np.coefcompl, 1) AS coefcompl,
-            CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END AS peso_efectivo
+            CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END AS peso_efectivo,
+            CASE WHEN ppr.es_por_kg
+                 THEN ppr.precio * (CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END)
+                 ELSE ppr.precio END AS precio_efectivo
         FROM Trabajos t
         JOIN ItemDetallePedido idp ON idp.iditempedido = t.iditempedido
         JOIN Pedidos p             ON p.idpedido = idp.idpedido
         LEFT JOIN NombreDePiezas np ON np.id = idp.idpieza
         LEFT JOIN PesosDePiezas pp  ON pp.códpieza = t.idpesopieza
         LEFT JOIN piezas_peso pz    ON pz.pieza_id = np.id
+        LEFT JOIN piezas_precio ppr ON ppr.pieza_id = np.id
         WHERE upper(t.estadotrabajo) IN ('I', 'P', 'F')
           AND upper(p.estadopedido)  NOT IN ('K','D')
           AND upper(idp.estadoitem)  NOT IN ('K','D')
@@ -1671,10 +1795,8 @@ _CTE_PROYECCION_BASE = """
                OR date(t.fechaprevista) >= date('now', '-1 month'))
     )
 """
-_KG_EXPR = """ROUND(SUM(pendientes *
-                    CASE WHEN nombrepieza LIKE '%(AD)' THEN peso_efectivo * 2
-                         WHEN nombrepieza LIKE '%(TR)' THEN peso_efectivo * 3
-                         ELSE peso_efectivo END * coefcompl), 2)"""
+_KG_EXPR = "ROUND(SUM(pendientes * peso_efectivo * coefcompl), 2)"
+_PESOS_EXPR = "ROUND(SUM(pendientes * precio_efectivo), 2)"
 
 
 @app.get("/api/dashboard/proyeccion_pipeline")
@@ -1688,16 +1810,16 @@ def dashboard_proyeccion_pipeline():
     juntas en el ultimo mes con datos."""
     conn = get_db()
     try:
-        rows = conn.execute(_CTE_PIEZAS_PESO + _CTE_PROYECCION_BASE + f"""
-            SELECT estado, COUNT(*) AS ots, SUM(pendientes) AS piezas, {_KG_EXPR} AS kg
+        rows = conn.execute(_CTE_PIEZAS_PESO + _CTE_PIEZAS_PRECIO + _CTE_PROYECCION_BASE + f"""
+            SELECT estado, COUNT(*) AS ots, SUM(pendientes) AS piezas, {_KG_EXPR} AS kg, {_PESOS_EXPR} AS pesos
             FROM base
             GROUP BY estado
         """).fetchall()
         por_estado = {r["estado"]: dict(r) for r in rows}
-        vacio = {"ots": 0, "piezas": 0, "kg": 0}
+        vacio = {"ots": 0, "piezas": 0, "kg": 0, "pesos": 0}
 
-        mes_rows = conn.execute(_CTE_PIEZAS_PESO + _CTE_PROYECCION_BASE + f"""
-            SELECT estado, año, mes, COUNT(*) AS ots, SUM(pendientes) AS piezas, {_KG_EXPR} AS kg
+        mes_rows = conn.execute(_CTE_PIEZAS_PESO + _CTE_PIEZAS_PRECIO + _CTE_PROYECCION_BASE + f"""
+            SELECT estado, año, mes, COUNT(*) AS ots, SUM(pendientes) AS piezas, {_KG_EXPR} AS kg, {_PESOS_EXPR} AS pesos
             FROM base
             WHERE año IS NOT NULL
             GROUP BY estado, año, mes
@@ -1785,6 +1907,253 @@ def dashboard_pendiente_fundir_sin_peso(meses: int = 6):
                 r["visto_desde"] = vistas_desde.get(r["pieza_id"], hoy)
             conn.commit()
 
+        return result
+    finally:
+        conn.close()
+
+
+@app.get("/api/dashboard/pendiente_fundir/sin_precio")
+def dashboard_pendiente_fundir_sin_precio(meses: int = 6):
+    """Piezas pendientes de fundir sin precio resoluble -- ni tarifa cargada en
+    Precios para su (cliente, tipofacturación), ni (cuando la tarifa es por kg)
+    peso con el que convertirla a precio por unidad. Mismo patrón que
+    dashboard_pendiente_fundir_sin_peso: registra cada pieza en
+    _piezas_sin_precio para ver hace cuanto viene siendo un problema."""
+    meses = max(1, min(meses, 60))
+    conn = get_db()
+    try:
+        rows = conn.execute(_CTE_PIEZAS_PESO + _CTE_PIEZAS_PRECIO + """
+            SELECT
+                np.id                                       AS pieza_id,
+                np.nombrepieza                              AS nombre,
+                np."códigopiezapuestoporcliente"            AS codigo_pieza,
+                COALESCE(tm.sobrenombrematerial, t."códdeagregados") AS material,
+                COUNT(DISTINCT t.iditemtrabajo)              AS ots,
+                SUM(t.cantidad - COALESCE(t.cantidadfundida, 0)) AS piezas_pendientes,
+                MAX(t.iditemtrabajo)                         AS ultima_ot_id,
+                CASE WHEN ppr.precio IS NULL THEN 'sin tarifa cargada'
+                     ELSE 'tarifa por kg, sin peso de la pieza' END AS motivo,
+                (SELECT fdm.enlacefotomodelo
+                 FROM PiezasPorModelo ppm2
+                 JOIN FotosDeModelos fdm
+                   ON fdm."códigomodelo" = ppm2."códmodelo"
+                  AND fdm.habilitada = 'True'
+                 WHERE ppm2."códpieza" = np.id
+                 LIMIT 1)                                    AS foto
+            FROM Trabajos t
+            JOIN ItemDetallePedido idp ON idp.iditempedido = t.iditempedido
+            JOIN Pedidos p             ON p.idpedido = idp.idpedido
+            LEFT JOIN TiposMaterial tm ON tm."códmaterial" = CAST(t."códdeagregados" AS TEXT)
+            LEFT JOIN NombreDePiezas np ON np.id = idp.idpieza
+            LEFT JOIN piezas_peso pz    ON pz.pieza_id = np.id
+            LEFT JOIN piezas_precio ppr ON ppr.pieza_id = np.id
+            WHERE upper(t.estadotrabajo) NOT IN ('K','D','A','B')
+              AND upper(p.estadopedido)  NOT IN ('K','D')
+              AND upper(idp.estadoitem)  NOT IN ('K','D')
+              AND COALESCE(t.cantidadfundida, 0) < t.cantidad
+              AND t."códdeagregados" NOT IN ('--', '4', 'Ar', 'ar', 'AR')
+              AND COALESCE(t.fechacargaot, p.fechapedido) >= date('now', ? || ' months')
+              AND (ppr.precio IS NULL OR (ppr.es_por_kg AND pz.peso_promedio IS NULL))
+            GROUP BY np.id, material
+            ORDER BY piezas_pendientes DESC
+        """, (f"-{meses}",)).fetchall()
+        result = [dict(r) for r in rows]
+
+        pieza_ids = [r["pieza_id"] for r in result if r["pieza_id"] is not None]
+        vistas_desde: dict[int, str] = {}
+        if pieza_ids:
+            hoy = date_cls.today().isoformat()
+            qs = ",".join("?" * len(pieza_ids))
+            existentes = conn.execute(
+                f"SELECT idpieza, primera_vez FROM _piezas_sin_precio WHERE idpieza IN ({qs})",
+                pieza_ids,
+            ).fetchall()
+            vistas_desde = {row["idpieza"]: row["primera_vez"] for row in existentes}
+            for r in result:
+                conn.execute("""
+                    INSERT INTO _piezas_sin_precio (idpieza, nombrepieza, primera_vez, ultima_vez, ultima_ot_id)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(idpieza) DO UPDATE SET
+                        nombrepieza  = excluded.nombrepieza,
+                        ultima_vez   = excluded.ultima_vez,
+                        ultima_ot_id = excluded.ultima_ot_id
+                """, (r["pieza_id"], r["nombre"], hoy, hoy, r["ultima_ot_id"]))
+                r["visto_desde"] = vistas_desde.get(r["pieza_id"], hoy)
+            conn.commit()
+
+        return result
+    finally:
+        conn.close()
+
+
+@app.get("/api/dashboard/precio_kg_distribucion")
+def dashboard_precio_kg_distribucion(meses: int = Query(12)):
+    """Distribución de precio por kg en el catálogo -- histograma con la cantidad
+    de piezas por rango de $/kg, promedio y mediana. $/kg es directo cuando la
+    tarifa (TiposFacturación) ya es por kg, o precio unitario / peso de la pieza
+    cuando es por pieza (un $/kg implícito, comparable igual aunque mezcle mano de
+    obra/complejidad).
+
+    El precio nominal en pesos sube con la inflación -- una tarifa de 2010 y una
+    de 2026 no son comparables en la misma distribución (confirmado con datos
+    reales: sin filtrar, la mediana por año pasa de ~$2/kg en 1998 a ~$9.200/kg
+    en 2026). Por eso se filtra por Precios.fechaprecio (cuándo se actualizó esa
+    tarifa por última vez) en vez de por la pieza en sí -- es lo que de verdad
+    determina la escala del número. meses=0 trae el catálogo entero sin filtrar
+    (mezclado con decadas de inflación, sirve solo como referencia histórica)."""
+    meses = max(0, min(meses, 600))
+    conn = get_db()
+    try:
+        params: list = []
+        filtro_fecha = ""
+        if meses:
+            filtro_fecha = "AND ppr.fechaprecio >= date('now', ? || ' months')"
+            params.append(f"-{meses}")
+
+        rows = conn.execute(_CTE_PIEZAS_PESO + _CTE_PIEZAS_PRECIO + f"""
+            SELECT np.id AS pieza_id, np.nombrepieza,
+                   CASE WHEN ppr.es_por_kg THEN ppr.precio
+                        ELSE ppr.precio / NULLIF(pz.peso_promedio, 0) END AS precio_kg
+            FROM NombreDePiezas np
+            JOIN piezas_precio ppr ON ppr.pieza_id = np.id
+            LEFT JOIN piezas_peso pz ON pz.pieza_id = np.id
+            WHERE (ppr.es_por_kg OR pz.peso_promedio IS NOT NULL)
+              {filtro_fecha}
+        """, params).fetchall()
+
+        valores = sorted(r["precio_kg"] for r in rows if r["precio_kg"] and r["precio_kg"] > 0)
+        n = len(valores)
+        if n < 5:
+            return {"n_piezas": n, "promedio": None, "mediana": None, "bins": [], "bajo_rango": 0, "sobre_rango": 0}
+
+        promedio = round(sum(valores) / n, 2)
+        mitad = n // 2
+        mediana = valores[mitad] if n % 2 else round((valores[mitad - 1] + valores[mitad]) / 2, 2)
+
+        # Recorte visual a p1-p99: una sola pieza con un precio absurdo (hay casos
+        # reales, ej. una fila de prueba a $1.000.000/kg) aplastaria el resto de
+        # las barras contra el eje. El promedio/mediana de arriba ya usan TODOS
+        # los valores -- el recorte es solo para que el histograma se pueda leer.
+        #
+        # Limites siempre semiabiertos [desde, hasta) para que ningun valor caiga
+        # en dos barras a la vez (o en ninguna) cuando empata justo en un borde --
+        # dashboard_precio_kg_distribucion_detalle reproduce estos mismos limites
+        # al filtrar la lista detras de cada barra, para que cantidad y lista
+        # siempre coincidan exacto.
+        # p1/p99 se redondean ACA, antes de clasificar ningun valor -- son el
+        # mismo numero que el front recibe y despues manda de vuelta al pedir
+        # el detalle de una barra, asi que la clasificacion tiene que usar
+        # exactamente ese numero redondeado y no el crudo (si no, un valor a
+        # 0.005 del borde puede quedar de un lado al armar el histograma y del
+        # otro al filtrar su detalle).
+        p1  = round(valores[int(n * 0.01)], 2)
+        p99 = round(valores[min(n - 1, int(n * 0.99))], 2)
+        n_bins = 24
+        ancho = round((p99 - p1) / n_bins, 6) if p99 > p1 else 0
+
+        bajo_rango = sum(1 for v in valores if v < p1)
+        if ancho > 0:
+            sobre_rango = sum(1 for v in valores if v >= p99)
+            # Bordes redondeados PRIMERO (son los que se devuelven), clasificar
+            # cada valor contra esos bordes ya redondeados -- no contra p1+i*ancho
+            # crudo, que puede diferir en centesimos y correr un valor de barra
+            # cuando se recorta a 2 decimales para mostrar.
+            bordes = [round(p1 + i * ancho, 2) for i in range(n_bins + 1)]
+            bordes[-1] = p99
+            bins_normales = [{"tipo": "normal", "desde": bordes[i], "hasta": bordes[i + 1], "cantidad": 0}
+                              for i in range(n_bins)]
+            for v in valores:
+                if v < p1 or v >= p99:
+                    continue
+                idx = bisect.bisect_right(bordes, v) - 1
+                idx = min(max(idx, 0), n_bins - 1)
+                bins_normales[idx]["cantidad"] += 1
+        else:
+            # Degenerado (>=99% de los valores empatados, p1==p99): un solo bin
+            # puntual -- desde==hasta, matcheado por igualdad exacta en vez de
+            # rango (ver _en_rango en dashboard_precio_kg_distribucion_detalle).
+            sobre_rango = sum(1 for v in valores if v > p99)
+            bins_normales = [{"tipo": "normal", "desde": p1, "hasta": p99, "cantidad": sum(1 for v in valores if v == p1)}]
+
+        # Barras "menor a"/"mayor a" en cada punta -- mismas piezas que ya se
+        # contaban en bajo_rango/sobre_rango, ahora visibles y clickeables como
+        # cualquier otra barra (ver dashboard_precio_kg_distribucion_detalle,
+        # que acepta desde/hasta abiertos con None).
+        bins: list = []
+        if bajo_rango > 0:
+            bins.append({"tipo": "bajo", "desde": None, "hasta": p1, "cantidad": bajo_rango})
+        bins.extend(bins_normales)
+        if sobre_rango > 0:
+            bins.append({"tipo": "sobre", "desde": p99, "hasta": None, "cantidad": sobre_rango})
+
+        return {
+            "n_piezas": n,
+            "promedio": promedio,
+            "mediana": mediana,
+            "bins": bins,
+            "bajo_rango": bajo_rango,
+            "sobre_rango": sobre_rango,
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/dashboard/precio_kg_distribucion/detalle")
+def dashboard_precio_kg_distribucion_detalle(
+    desde: Optional[float] = Query(None),
+    hasta: Optional[float] = Query(None),
+    meses: int = Query(12),
+):
+    """Piezas del catálogo cuyo $/kg cae en [desde, hasta] -- lista detrás de una
+    barra del histograma de dashboard_precio_kg_distribucion. desde/hasta
+    ausentes = sin piso/techo, para las barras "menor a"/"mayor a" de las
+    puntas (bins tipo "bajo"/"sobre", ver ese endpoint). Mismo cálculo de
+    precio_kg y mismo filtro por fechaprecio que ese endpoint, para que la lista
+    siempre coincida exacto con la barra que el usuario tocó."""
+    meses = max(0, min(meses, 600))
+    conn = get_db()
+    try:
+        params: list = []
+        filtro_fecha = ""
+        if meses:
+            filtro_fecha = "AND ppr.fechaprecio >= date('now', ? || ' months')"
+            params.append(f"-{meses}")
+
+        rows = conn.execute(_CTE_PIEZAS_PESO + _CTE_PIEZAS_PRECIO + f"""
+            SELECT np.id AS pieza_id, np.nombrepieza,
+                   np."códigopiezapuestoporcliente"        AS codigo_pieza,
+                   np."códcliente"                          AS codigo_cliente,
+                   COALESCE(c.nombrefantasía, c.nombrecliente) AS cliente_nombre,
+                   CASE WHEN ppr.es_por_kg THEN ppr.precio
+                        ELSE ppr.precio / NULLIF(pz.peso_promedio, 0) END AS precio_kg,
+                   ppr.fechaprecio
+            FROM NombreDePiezas np
+            JOIN piezas_precio ppr ON ppr.pieza_id = np.id
+            LEFT JOIN piezas_peso pz ON pz.pieza_id = np.id
+            LEFT JOIN Clientes c    ON c."códigocliente" = np."códcliente"
+            WHERE (ppr.es_por_kg OR pz.peso_promedio IS NOT NULL)
+              {filtro_fecha}
+        """, params).fetchall()
+
+        # Mismos limites semiabiertos [desde, hasta) que arma
+        # dashboard_precio_kg_distribucion al separar bajo_rango/bins/
+        # sobre_rango -- si no, un valor empatado justo en un borde aparece en
+        # el conteo de una barra pero en la lista de la de al lado. desde==hasta
+        # es el caso degenerado (bin puntual, ver ese endpoint): matchea por
+        # igualdad exacta en vez de rango.
+        def _en_rango(v):
+            if v is None:
+                return False
+            if desde is None:
+                return v < hasta
+            if hasta is None:
+                return v >= desde
+            if desde == hasta:
+                return v == desde
+            return desde <= v < hasta
+
+        result = [dict(r) for r in rows if _en_rango(r["precio_kg"])]
+        result.sort(key=lambda r: r["precio_kg"])
         return result
     finally:
         conn.close()
@@ -1928,30 +2297,47 @@ async def put_kiosk_config(request: Request):
         conn.close()
 
 
+# $/kg o $/pieza segun tipofacturación (ver piezas_precio) -- peso via
+# pesoestablecido, igual fuente mas simple que ya usan estas dos funciones para
+# kg (a diferencia de dashboard_pendiente_fundir, que resuelve peso por la
+# variante exacta de PesosDePiezas). Sin pesoestablecido y tarifa por kg, no
+# hay forma de pasar a precio por unidad -- esa fila no aporta a pesos_*.
+_PRECIO_EFECTIVO_PESOESTABLECIDO = """
+    CASE WHEN ppr.es_por_kg
+         THEN (CASE WHEN np.pesoestablecido > 0 THEN ppr.precio * np.pesoestablecido END)
+         ELSE ppr.precio END
+"""
+
+
 def _calc_tendencia_anual(conn: sqlite3.Connection, año_desde: int, año_hasta: int) -> list[dict]:
     # Delivery trend via Pedidos.fechapedido (fechacargaot is NULL on ~85% of rows)
-    trend_rows = conn.execute("""
+    trend_rows = conn.execute(_CTE_PIEZAS_PESO + _CTE_PIEZAS_PRECIO + f"""
         SELECT strftime('%Y', p.fechapedido) as año,
                COALESCE(SUM(t.cantidadentregada), 0) as entregadas,
                COALESCE(SUM(t.cantidadrechazada), 0) as rechazadas,
                ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadentregada * np.pesoestablecido ELSE 0 END), 1) as kg_entregadas,
-               ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadrechazada * np.pesoestablecido ELSE 0 END), 1) as kg_rechazadas
+               ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadrechazada * np.pesoestablecido ELSE 0 END), 1) as kg_rechazadas,
+               ROUND(SUM(t.cantidadentregada * ({_PRECIO_EFECTIVO_PESOESTABLECIDO})), 2) as pesos_entregadas,
+               ROUND(SUM(t.cantidadrechazada * ({_PRECIO_EFECTIVO_PESOESTABLECIDO})), 2) as pesos_rechazadas
         FROM Trabajos t
         JOIN ItemDetallePedido idp ON t.iditempedido = idp.iditempedido
         JOIN Pedidos p ON idp.idpedido = p.idpedido
         LEFT JOIN NombreDePiezas np ON idp.idpieza = np.id
+        LEFT JOIN piezas_precio ppr ON ppr.pieza_id = np.id
         WHERE p.fechapedido >= ? AND p.fechapedido < ? AND t.cantidadentregada > 0
         GROUP BY año ORDER BY año
     """, (f"{año_desde}-01-01", f"{año_hasta + 1}-01-01")).fetchall()
 
     # Returns by year (with kg via PesosDePiezas → NombreDePiezas)
-    dev_rows = conn.execute("""
+    dev_rows = conn.execute(_CTE_PIEZAS_PESO + _CTE_PIEZAS_PRECIO + f"""
         SELECT CAST(id.año AS TEXT) as año,
                COALESCE(SUM(id."cantidaddevolución"), 0) as devueltas,
-               ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN id."cantidaddevolución" * np.pesoestablecido ELSE 0 END), 1) as kg_devueltas
+               ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN id."cantidaddevolución" * np.pesoestablecido ELSE 0 END), 1) as kg_devueltas,
+               ROUND(SUM(id."cantidaddevolución" * ({_PRECIO_EFECTIVO_PESOESTABLECIDO})), 2) as pesos_devueltas
         FROM "ItemDevolución" id
         JOIN PesosDePiezas pp ON id.códpieza = pp.códpieza
         JOIN NombreDePiezas np ON pp.nombredepiezasid_ = np.id
+        LEFT JOIN piezas_precio ppr ON ppr.pieza_id = np.id
         WHERE id.año >= ? AND id.año <= ?
         GROUP BY id.año ORDER BY id.año
     """, (año_desde, año_hasta)).fetchall()
@@ -1964,6 +2350,8 @@ def _calc_tendencia_anual(conn: sqlite3.Connection, año_desde: int, año_hasta:
         devueltas = dv.get("devueltas", 0)
         kg_entregadas = r["kg_entregadas"] or 0.0
         kg_devueltas = dv.get("kg_devueltas", 0.0)
+        pesos_entregadas = r["pesos_entregadas"] or 0.0
+        pesos_devueltas = dv.get("pesos_devueltas", 0.0)
         tendencia.append({
             "año": r["año"],
             "entregadas": entregadas,
@@ -1974,22 +2362,29 @@ def _calc_tendencia_anual(conn: sqlite3.Connection, año_desde: int, año_hasta:
             "kg_rechazadas": r["kg_rechazadas"] or 0.0,
             "kg_devueltas":  kg_devueltas,
             "kg_neta": round(kg_entregadas - kg_devueltas, 1),
+            "pesos_entregadas": pesos_entregadas,
+            "pesos_rechazadas": r["pesos_rechazadas"] or 0.0,
+            "pesos_devueltas":  pesos_devueltas,
+            "pesos_neta": round(pesos_entregadas - pesos_devueltas, 2),
         })
     return tendencia
 
 
 def _calc_tendencia_mensual(conn: sqlite3.Connection, año_desde: int, año_hasta: int) -> list[dict]:
-    rows = conn.execute("""
+    rows = conn.execute(_CTE_PIEZAS_PESO + _CTE_PIEZAS_PRECIO + f"""
         SELECT strftime('%Y', p.fechapedido) AS año,
                CAST(strftime('%m', p.fechapedido) AS INTEGER) AS mes,
                COALESCE(SUM(t.cantidadentregada), 0) AS entregadas,
                COALESCE(SUM(t.cantidadrechazada), 0) AS rechazadas,
                ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadentregada * np.pesoestablecido ELSE 0 END), 1) AS kg_entregadas,
-               ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadrechazada * np.pesoestablecido ELSE 0 END), 1) AS kg_rechazadas
+               ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadrechazada * np.pesoestablecido ELSE 0 END), 1) AS kg_rechazadas,
+               ROUND(SUM(t.cantidadentregada * ({_PRECIO_EFECTIVO_PESOESTABLECIDO})), 2) AS pesos_entregadas,
+               ROUND(SUM(t.cantidadrechazada * ({_PRECIO_EFECTIVO_PESOESTABLECIDO})), 2) AS pesos_rechazadas
         FROM Trabajos t
         JOIN ItemDetallePedido idp ON t.iditempedido = idp.iditempedido
         JOIN Pedidos p ON idp.idpedido = p.idpedido
         LEFT JOIN NombreDePiezas np ON idp.idpieza = np.id
+        LEFT JOIN piezas_precio ppr ON ppr.pieza_id = np.id
         WHERE p.fechapedido >= ? AND p.fechapedido < ? AND t.cantidadentregada > 0
         GROUP BY año, mes ORDER BY año, mes
     """, (f"{año_desde}-01-01", f"{año_hasta + 1}-01-01")).fetchall()
@@ -2103,22 +2498,27 @@ def analytics_tendencia_export(
 
         if modo == "mensual":
             ws.title = "Tendencia mensual"
-            ws.append(["Año", "Mes", "Entregadas", "Rechazadas", "Kg entregadas", "Kg rechazadas"])
+            ws.append(["Año", "Mes", "Entregadas", "Rechazadas", "Kg entregadas", "Kg rechazadas",
+                       "$ entregadas (precio vigente)", "$ rechazadas (precio vigente)"])
             for r in _calc_tendencia_mensual(conn, rango_desde, rango_hasta):
                 ws.append([
                     int(r["año"]), _MESES_ES[r["mes"] - 1],
                     r["entregadas"], r["rechazadas"],
                     r["kg_entregadas"] or 0.0, r["kg_rechazadas"] or 0.0,
+                    r["pesos_entregadas"] or 0.0, r["pesos_rechazadas"] or 0.0,
                 ])
             filename = f"tendencia_mensual_{rango_txt}.xlsx"
         else:
             ws.title = "Tendencia anual"
             ws.append(["Año", "Entregadas", "Rechazadas", "Devueltas", "Entregadas - Devueltas",
-                       "Kg entregadas", "Kg rechazadas", "Kg devueltas", "Kg entregadas - Kg devueltas"])
+                       "Kg entregadas", "Kg rechazadas", "Kg devueltas", "Kg entregadas - Kg devueltas",
+                       "$ entregadas (precio vigente)", "$ rechazadas (precio vigente)",
+                       "$ devueltas (precio vigente)", "$ entregadas - $ devueltas (precio vigente)"])
             for r in _calc_tendencia_anual(conn, rango_desde, rango_hasta):
                 ws.append([
                     int(r["año"]), r["entregadas"], r["rechazadas"], r["devueltas"], r["neta"],
                     r["kg_entregadas"], r["kg_rechazadas"], r["kg_devueltas"], r["kg_neta"],
+                    r["pesos_entregadas"], r["pesos_rechazadas"], r["pesos_devueltas"], r["pesos_neta"],
                 ])
             filename = f"tendencia_anual_{rango_txt}.xlsx"
 
@@ -2794,8 +3194,11 @@ def analytics_evolucion_mensual(meses: int = Query(default=24, ge=3, le=60)):
             LIMIT ?
         """, (meses,)).fetchall()
 
-        # Kg-based monthly aggregation — two formulas:
-        #   metal: peso histórico OT × coefcompl × AD/TR → total metal consumed (incl. losses/sprues)
+        # Kg-based monthly aggregation — dos formulas, difieren solo por coefcompl (NO por
+        # AD/TR: ese sufijo es de facturación -- divide el peso en la factura para zafar de
+        # la factura en blanco, no indica mas metal fisico -- se saco de aca, ver commit que
+        # lo agrega):
+        #   metal: peso histórico OT × coefcompl → para KPIs de insumo/rendimiento metalúrgico
         #   pieza: ÚltimoDePesoPieza (peso vigente actual, igual que Excel Power Query)
         kg_rows = conn.execute("""
             WITH peso_vigente AS (
@@ -2806,22 +3209,10 @@ def analytics_evolucion_mensual(meses: int = Query(default=24, ge=3, le=60)):
                 GROUP BY nombredepiezasid_
             )
             SELECT strftime('%Y-%m', fpf.fecha) as mes,
-                   ROUND(SUM(t.cantidadaprobada *
-                       CASE WHEN np.nombrepieza LIKE '%(AD)' THEN pp.pesopieza * 2
-                            WHEN np.nombrepieza LIKE '%(TR)' THEN pp.pesopieza * 3
-                            ELSE pp.pesopieza END * COALESCE(np.coefcompl, 1)), 2) as kg_aprobados,
-                   ROUND(SUM(t.cantidadrechazada *
-                       CASE WHEN np.nombrepieza LIKE '%(AD)' THEN pp.pesopieza * 2
-                            WHEN np.nombrepieza LIKE '%(TR)' THEN pp.pesopieza * 3
-                            ELSE pp.pesopieza END * COALESCE(np.coefcompl, 1)), 2) as kg_rechazados,
-                   ROUND(SUM(t.cantidadreparada *
-                       CASE WHEN np.nombrepieza LIKE '%(AD)' THEN pp.pesopieza * 2
-                            WHEN np.nombrepieza LIKE '%(TR)' THEN pp.pesopieza * 3
-                            ELSE pp.pesopieza END * COALESCE(np.coefcompl, 1)), 2) as kg_reparados,
-                   ROUND(SUM(t.cantidadproducida *
-                       CASE WHEN np.nombrepieza LIKE '%(AD)' THEN pp.pesopieza * 2
-                            WHEN np.nombrepieza LIKE '%(TR)' THEN pp.pesopieza * 3
-                            ELSE pp.pesopieza END * COALESCE(np.coefcompl, 1)), 2) as kg_producidos,
+                   ROUND(SUM(t.cantidadaprobada  * pp.pesopieza * COALESCE(np.coefcompl, 1)), 2) as kg_aprobados,
+                   ROUND(SUM(t.cantidadrechazada * pp.pesopieza * COALESCE(np.coefcompl, 1)), 2) as kg_rechazados,
+                   ROUND(SUM(t.cantidadreparada  * pp.pesopieza * COALESCE(np.coefcompl, 1)), 2) as kg_reparados,
+                   ROUND(SUM(t.cantidadproducida * pp.pesopieza * COALESCE(np.coefcompl, 1)), 2) as kg_producidos,
                    ROUND(SUM(t.cantidadaprobada  * COALESCE(ppv.pesopieza, pp.pesopieza)), 2) as kg_aprobados_pieza,
                    ROUND(SUM(t.cantidadrechazada * COALESCE(ppv.pesopieza, pp.pesopieza)), 2) as kg_rechazados_pieza,
                    ROUND(SUM(t.cantidadreparada  * COALESCE(ppv.pesopieza, pp.pesopieza)), 2) as kg_reparados_pieza,
@@ -2859,10 +3250,7 @@ def analytics_evolucion_mensual(meses: int = Query(default=24, ge=3, le=60)):
         dev_raw = conn.execute("""
             SELECT id.año, id.semana,
                    COALESCE(SUM(id."cantidaddevolución"), 0) as devueltas,
-                   COALESCE(ROUND(SUM(id."cantidaddevolución" *
-                       CASE WHEN np.nombrepieza LIKE '%(AD)' THEN pp.pesopieza * 2
-                            WHEN np.nombrepieza LIKE '%(TR)' THEN pp.pesopieza * 3
-                            ELSE pp.pesopieza END * COALESCE(np.coefcompl, 1)), 2), 0) as kg_devueltos
+                   COALESCE(ROUND(SUM(id."cantidaddevolución" * pp.pesopieza * COALESCE(np.coefcompl, 1)), 2), 0) as kg_devueltos
             FROM "ItemDevolución" id
             LEFT JOIN PesosDePiezas pp ON pp.códpieza = id.códpieza
             LEFT JOIN NombreDePiezas np ON np.id = pp.nombredepiezasid_
@@ -2921,7 +3309,7 @@ def analytics_evolucion_mensual(meses: int = Query(default=24, ge=3, le=60)):
                 "pct_scrap":      round(rech / prod * 100, 2) if prod else 0,
                 "pct_reparacion": round(rep  / apro * 100, 2) if apro else 0,
                 "pct_devolucion": round(devueltas / ent * 100, 2) if ent else 0,
-                # metal = peso × coefcompl × AD/TR (total metal consumed including losses)
+                # metal = peso × coefcompl
                 "kg_aprobados":   kg_a,
                 "kg_rechazados":  kg_r,
                 "kg_reparados":   kg_rp,
@@ -2961,10 +3349,7 @@ def analytics_semanal(semanas: int = Query(default=12, ge=4, le=52)):
                    COALESCE(SUM(t.cantidadrechazada), 0)          as rechazadas,
                    COALESCE(SUM(t.cantidadreparada),  0)          as reparadas,
                    COALESCE(SUM(t.cantidadaprobada),  0)          as aprobadas,
-                   ROUND(SUM(t.cantidadaprobada *
-                       CASE WHEN np.nombrepieza LIKE '%(AD)' THEN pp.pesopieza * 2
-                            WHEN np.nombrepieza LIKE '%(TR)' THEN pp.pesopieza * 3
-                            ELSE pp.pesopieza END * COALESCE(np.coefcompl, 1)), 1) as kg_aprobados
+                   ROUND(SUM(t.cantidadaprobada * pp.pesopieza * COALESCE(np.coefcompl, 1)), 1) as kg_aprobados
             FROM Trabajos t
             JOIN "FundiciónPorFecha" fpf ON fpf.códfundición = t.códfundición
             LEFT JOIN PesosDePiezas pp  ON pp.códpieza = t.idpesopieza
@@ -3086,10 +3471,7 @@ def analytics_top_piezas(meses: int = Query(default=6, ge=3, le=12)):
             SELECT strftime('%Y-%m', fpf.fecha) as mes,
                    t.idpesopieza as cod,
                    np.nombrepieza as nombre,
-                   ROUND(SUM(t.cantidadrechazada *
-                       CASE WHEN np.nombrepieza LIKE '%(AD)' THEN pp.pesopieza * 2
-                            WHEN np.nombrepieza LIKE '%(TR)' THEN pp.pesopieza * 3
-                            ELSE pp.pesopieza END * COALESCE(np.coefcompl, 1)), 1) as kg,
+                   ROUND(SUM(t.cantidadrechazada * pp.pesopieza * COALESCE(np.coefcompl, 1)), 1) as kg,
                    CAST(SUM(t.cantidadrechazada) AS INTEGER) as cant
             FROM Trabajos t
             JOIN "FundiciónPorFecha" fpf ON fpf.códfundición = t.códfundición
@@ -3118,10 +3500,7 @@ def analytics_top_piezas(meses: int = Query(default=6, ge=3, le=12)):
             SELECT strftime('%Y-%m', fpf.fecha) as mes,
                    t.idpesopieza as cod,
                    np.nombrepieza as nombre,
-                   ROUND(SUM(t.cantidadreparada *
-                       CASE WHEN np.nombrepieza LIKE '%(AD)' THEN pp.pesopieza * 2
-                            WHEN np.nombrepieza LIKE '%(TR)' THEN pp.pesopieza * 3
-                            ELSE pp.pesopieza END * COALESCE(np.coefcompl, 1)), 1) as kg,
+                   ROUND(SUM(t.cantidadreparada * pp.pesopieza * COALESCE(np.coefcompl, 1)), 1) as kg,
                    CAST(SUM(t.cantidadreparada) AS INTEGER) as cant
             FROM Trabajos t
             JOIN "FundiciónPorFecha" fpf ON fpf.códfundición = t.códfundición
@@ -3252,10 +3631,7 @@ def analytics_entregas_pieza(
                    np.códcliente                                   as cliente_cod,
                    COALESCE(c.nombrefantasía, c.nombrecliente)     as cliente_nombre,
                    SUM(id.cantidad)                                as cantidad,
-                   ROUND(SUM(id.cantidad *
-                       CASE WHEN np.nombrepieza LIKE '%(AD)' THEN pp.pesopieza * 2
-                            WHEN np.nombrepieza LIKE '%(TR)' THEN pp.pesopieza * 3
-                            ELSE pp.pesopieza END * COALESCE(np.coefcompl, 1)), 1) as kg_entregado
+                   ROUND(SUM(id.cantidad * pp.pesopieza * COALESCE(np.coefcompl, 1)), 1) as kg_entregado
             FROM ItemDetalle id
             JOIN Remitos r         ON r.idnroremito  = id.idnroremito
             JOIN PesosDePiezas pp  ON pp.códpieza    = id.códpieza
@@ -5086,9 +5462,10 @@ def get_trabajos(
                 " OR np.nombrepieza LIKE ?"
                 " OR CAST(t.obsot AS TEXT) LIKE ?"
                 " OR p.códigocliente LIKE ?"
-                " OR np.códigopiezapuestoporcliente LIKE ?)"
+                " OR np.códigopiezapuestoporcliente LIKE ?"
+                " OR printf('%06d', t.iditemtrabajo) LIKE ?)"
             )
-            params.extend([s, s, s, s, s])
+            params.extend([s, s, s, s, s, s])
 
         where = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
 
@@ -5098,6 +5475,11 @@ def get_trabajos(
             JOIN Pedidos p ON idp.idpedido = p.idpedido
             JOIN Clientes c ON p.códigocliente = c.códigocliente
             JOIN NombreDePiezas np ON idp.idpieza = np.id
+            LEFT JOIN _trabajo_operario_asignado toa ON toa.trabajo_id = t.iditemtrabajo
+            LEFT JOIN _v_responsables va ON va.codigoresponsable = toa.operario_id
+            LEFT JOIN _trabajo_responsable_noyos trn ON trn.trabajo_id = t.iditemtrabajo
+            LEFT JOIN _v_responsables vn ON vn.codigoresponsable = trn.operario_id
+            LEFT JOIN Responsables r1 ON t.códigoresponsable1 = r1.códigoresponsable
         """
 
         summary = conn.execute(
@@ -5121,7 +5503,13 @@ def get_trabajos(
                 COALESCE(c.nombrefantasía, c.nombrecliente) as cliente_nombre,
                 np.nombrepieza, np.códigopiezapuestoporcliente as codigo_pieza,
                 t.cantidadproducir, t.cantidadproducida, t.cantidadrechazada,
-                t.cantidadaprobada, t.cantidadentregada, t.obsot
+                t.cantidadaprobada, t.cantidadentregada, t.obsot,
+                CASE WHEN t.códigoresponsable1 IS NULL THEN va.apellidoynombre END as operario_asignado,
+                CASE WHEN t.códigoresponsable1 IS NULL THEN toa.operario_id END as operario_asignado_id,
+                vn.apellidoynombre as responsable_noyos,
+                trn.operario_id as responsable_noyos_id,
+                r1.apellidoynombreresponsable as responsable_confirmado,
+                t.códigoresponsable1 as responsable_confirmado_id
             {base_from} {where}
             ORDER BY t.iditemtrabajo DESC
             LIMIT ? OFFSET ?""",
@@ -5132,6 +5520,16 @@ def get_trabajos(
         for r in rows:
             d = dict(r)
             d["estado_label"] = est_desc.get(d["estadotrabajo"] or "", d["estadotrabajo"] or "")
+            if not d.get("responsable_confirmado") and not d.get("operario_asignado_id") and d.get("origen"):
+                heredado = _moldeo_asignacion_heredada(conn, d["origen"])
+                if heredado:
+                    d["operario_asignado_id"] = heredado["operario_id"]
+                    d["operario_asignado"] = heredado["operario_nombre"]
+            if not d.get("responsable_noyos_id") and d.get("origen"):
+                heredado_n = _moldeo_asignacion_heredada(conn, d["origen"], tabla="_trabajo_responsable_noyos")
+                if heredado_n:
+                    d["responsable_noyos_id"] = heredado_n["operario_id"]
+                    d["responsable_noyos"] = heredado_n["operario_nombre"]
             result_rows.append(d)
 
         return {
@@ -5210,7 +5608,9 @@ def get_trabajo_detail(trabajo_id: int):
                 np."acuñar_" as acunar, np."emitirinforme_" as emitirinforme,
                 np."últimocuño" as ultimo_cuno,
                 r1.apellidoynombreresponsable as responsable_nombre,
-                mat.norma as material_nombre
+                mat.norma as material_nombre,
+                toa.operario_id as moldeador_asignado_id,
+                va.apellidoynombre as moldeador_asignado_nombre
             FROM Trabajos t
             JOIN ItemDetallePedido idp ON t.iditempedido = idp.iditempedido
             JOIN Pedidos p ON idp.idpedido = p.idpedido
@@ -5218,12 +5618,26 @@ def get_trabajo_detail(trabajo_id: int):
             JOIN NombreDePiezas np ON idp.idpieza = np.id
             LEFT JOIN Responsables r1 ON t.códigoresponsable1 = r1.códigoresponsable
             LEFT JOIN Materiales mat ON t.códmaterial = mat.especificaciónmaterial
+            LEFT JOIN _trabajo_operario_asignado toa ON toa.trabajo_id = t.iditemtrabajo
+            LEFT JOIN _v_responsables va ON va.codigoresponsable = toa.operario_id
             WHERE t.iditemtrabajo = ?
         """, (trabajo_id,)).fetchone()
         if not row:
             raise HTTPException(404, f"Trabajo {trabajo_id} no encontrado")
         d = dict(row)
         d["estado_label"] = est_desc.get(d["estadotrabajo"] or "", d["estadotrabajo"] or "")
+        # moldeador_asignado_* solo importa mientras Access no cargo el responsable
+        # real (código-responsable1, recien se completa al fundir) -- no lo
+        # pisamos ni lo mezclamos con responsable_nombre, así el front puede
+        # marcarlo distinto ("asignado" vs "responsable" confirmado).
+        if d["responsable_nombre"]:
+            d["moldeador_asignado_id"] = None
+            d["moldeador_asignado_nombre"] = None
+        elif not d.get("moldeador_asignado_id") and d.get("origen"):
+            heredado = _moldeo_asignacion_heredada(conn, d["origen"])
+            if heredado:
+                d["moldeador_asignado_id"] = heredado["operario_id"]
+                d["moldeador_asignado_nombre"] = heredado["operario_nombre"]
 
         noyeria = conn.execute("""
             SELECT m.códigomodelo, m.nombremodelo, m.existencia,
@@ -5274,45 +5688,132 @@ def get_trabajo_detail(trabajo_id: int):
 # Access nunca capturó esto -- EstadisticaMoldeo solo tiene timestamps de inicio/
 # fin de moldeo por OT, sin cantidad ni operario.
 
+# Cada carga referencia una OT (moldeo contra un pedido real) O una pieza
+# directa (moldeo "sin OT", para stock) -- nunca las dos. Por eso la consulta
+# resuelve pieza/cliente por dos caminos (via la OT, o directo desde
+# NombreDePiezas) y se queda con el que corresponda con COALESCE.
+_MOLDEO_SELECT = """
+    SELECT m.id, m.fecha, m.trabajo_id, m.pieza_id, m.operario_id, m.cantidad_cajas,
+           m.cajas_sin_cerrar, m.cantidad_noyos,
+           m.creado_por_legajo, m.creado_en,
+           v.apellidoynombre AS operario_nombre,
+           t.estadotrabajo,
+           COALESCE(np_ot.nombrepieza, np_dir.nombrepieza) AS nombrepieza,
+           COALESCE(np_ot.códigopiezapuestoporcliente, np_dir.códigopiezapuestoporcliente) AS codigo_pieza,
+           COALESCE(c_ot.nombrefantasía, c_ot.nombrecliente, c_dir.nombrefantasía, c_dir.nombrecliente) AS cliente_nombre
+    FROM _produccion_moldeo m
+    LEFT JOIN _v_responsables v      ON v.codigoresponsable = m.operario_id
+    LEFT JOIN Trabajos t             ON t.iditemtrabajo = m.trabajo_id
+    LEFT JOIN ItemDetallePedido idp  ON t.iditempedido = idp.iditempedido
+    LEFT JOIN Pedidos p_ot           ON idp.idpedido = p_ot.idpedido
+    LEFT JOIN Clientes c_ot          ON p_ot.códigocliente = c_ot.códigocliente
+    LEFT JOIN NombreDePiezas np_ot   ON idp.idpieza = np_ot.id
+    LEFT JOIN NombreDePiezas np_dir  ON np_dir.id = m.pieza_id
+    LEFT JOIN Clientes c_dir         ON np_dir.códcliente = c_dir.códigocliente
+"""
+
+
 def _moldeo_row(conn: sqlite3.Connection, entry_id: int) -> Optional[dict]:
-    r = conn.execute("""
-        SELECT m.id, m.fecha, m.trabajo_id, m.operario_id, m.cantidad_cajas,
-               m.creado_por_legajo, m.creado_en,
-               v.apellidoynombre AS operario_nombre,
-               np.nombrepieza, np.códigopiezapuestoporcliente AS codigo_pieza
-        FROM _produccion_moldeo m
-        LEFT JOIN _v_responsables v      ON v.codigoresponsable = m.operario_id
-        LEFT JOIN Trabajos t             ON t.iditemtrabajo = m.trabajo_id
-        LEFT JOIN ItemDetallePedido idp  ON t.iditempedido = idp.iditempedido
-        LEFT JOIN NombreDePiezas np      ON idp.idpieza = np.id
-        WHERE m.id = ?
-    """, (entry_id,)).fetchone()
+    r = conn.execute(_MOLDEO_SELECT + " WHERE m.id = ?", (entry_id,)).fetchone()
     return dict(r) if r else None
+
+
+def _moldeo_asignacion_heredada(conn: sqlite3.Connection, origen_id: Optional[int], max_saltos: int = 20,
+                                 tabla: str = "_trabajo_operario_asignado") -> Optional[dict]:
+    """Cuando una OT no llega a fundirse entera, Access genera un reemplazo
+    (Trabajos.origen -> la OT vieja) por lo que falta -- y el reemplazo puede
+    a su vez generar otro reemplazo, encadenando origen varios niveles (viable
+    en datos reales, ver ~1700 cadenas de 2+ niveles). Esta funcion camina esa
+    cadena hacia atras buscando la asignacion mas reciente, para que el
+    reemplazo herede solo quien ya estaba moldeando en vez de arrancar
+    "sin asignar" -- se llama solo cuando la OT no tiene asignacion propia.
+    tabla: _trabajo_operario_asignado (responsable de moldeo, default) o
+    _trabajo_responsable_noyos -- misma cadena, mismo criterio, distinto rol.
+    Nunca recibe entrada de usuario, siempre uno de esos dos literales fijos."""
+    visto = set()
+    actual = origen_id
+    saltos = 0
+    while actual and saltos < max_saltos and actual not in visto:
+        visto.add(actual)
+        row = conn.execute(
+            f"SELECT toa.operario_id, v.apellidoynombre AS operario_nombre "
+            f"FROM {tabla} toa "
+            f"LEFT JOIN _v_responsables v ON v.codigoresponsable = toa.operario_id "
+            f"WHERE toa.trabajo_id = ?",
+            (actual,)
+        ).fetchone()
+        if row:
+            return dict(row)
+        sig = conn.execute("SELECT origen FROM Trabajos WHERE iditemtrabajo=?", (actual,)).fetchone()
+        actual = sig["origen"] if sig else None
+        saltos += 1
+    return None
 
 
 def _moldeo_validar_body(conn: sqlite3.Connection, body: dict) -> tuple:
     fecha = str(body.get("fecha") or "").strip()
     if not fecha:
         raise HTTPException(400, "fecha requerida (YYYY-MM-DD)")
-    try:
-        trabajo_id = int(body.get("trabajo_id"))
-    except (TypeError, ValueError):
-        raise HTTPException(400, "OT requerida")
+
+    trabajo_id_raw = body.get("trabajo_id")
+    pieza_id_raw = body.get("pieza_id")
+    if trabajo_id_raw not in (None, "") and pieza_id_raw not in (None, ""):
+        raise HTTPException(400, "elegí OT o pieza, no las dos")
+    if trabajo_id_raw in (None, "") and pieza_id_raw in (None, ""):
+        raise HTTPException(400, "falta OT o pieza")
+
+    trabajo_id = pieza_id = None
+    if trabajo_id_raw not in (None, ""):
+        try:
+            trabajo_id = int(trabajo_id_raw)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "OT inválida")
+        if not conn.execute("SELECT 1 FROM Trabajos WHERE iditemtrabajo=?", (trabajo_id,)).fetchone():
+            raise HTTPException(404, f"OT {trabajo_id} no encontrada")
+    else:
+        try:
+            pieza_id = int(pieza_id_raw)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "pieza inválida")
+        if not conn.execute("SELECT 1 FROM NombreDePiezas WHERE id=?", (pieza_id,)).fetchone():
+            raise HTTPException(404, f"Pieza {pieza_id} no encontrada")
+
     try:
         operario_id = int(body.get("operario_id"))
     except (TypeError, ValueError):
         raise HTTPException(400, "operario requerido")
     try:
-        cantidad = int(body.get("cantidad_cajas"))
+        cantidad = int(body.get("cantidad_cajas") or 0)
     except (TypeError, ValueError):
-        raise HTTPException(400, "cantidad de cajas inválida")
-    if cantidad <= 0:
-        raise HTTPException(400, "la cantidad de cajas debe ser mayor a 0")
-    if not conn.execute("SELECT 1 FROM Trabajos WHERE iditemtrabajo=?", (trabajo_id,)).fetchone():
-        raise HTTPException(404, f"OT {trabajo_id} no encontrada")
+        raise HTTPException(400, "cantidad de cajas cerradas inválida")
+    if cantidad < 0:
+        raise HTTPException(400, "la cantidad de cajas cerradas no puede ser negativa")
+    # cajas_sin_cerrar es su propia estadistica, paralela a cantidad_cajas --
+    # nunca se suma a ella ni entra en kg/$/productividad (ver
+    # /api/moldeo/productividad), solo sirve para justificar el dia de un
+    # operario aunque no haya cerrado ninguna caja (ej. quedo haciendo noyos
+    # porque otro operario falto). Por eso una carga es valida con cualquiera
+    # de las dos en positivo, no hace falta que las dos lo esten.
+    try:
+        sin_cerrar = int(body.get("cajas_sin_cerrar") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "cantidad de cajas sin cerrar inválida")
+    if sin_cerrar < 0:
+        raise HTTPException(400, "la cantidad de cajas sin cerrar no puede ser negativa")
+    # cantidad_noyos: tercera estadistica propia, igual criterio que
+    # cajas_sin_cerrar -- no cuenta para kg/$/productividad de cajas (rol
+    # distinto, responsable_noyos, no responsable de moldeo).
+    try:
+        noyos = int(body.get("cantidad_noyos") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "cantidad de noyos inválida")
+    if noyos < 0:
+        raise HTTPException(400, "la cantidad de noyos no puede ser negativa")
+    if cantidad == 0 and sin_cerrar == 0 and noyos == 0:
+        raise HTTPException(400, "ingresá cajas cerradas, cajas sin cerrar o noyos")
     if not conn.execute("SELECT 1 FROM _v_responsables WHERE codigoresponsable=?", (operario_id,)).fetchone():
         raise HTTPException(404, f"Operario {operario_id} no encontrado")
-    return fecha, trabajo_id, operario_id, cantidad
+    return fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos
 
 
 @app.get("/api/produccion_moldeo")
@@ -5329,19 +5830,7 @@ def get_produccion_moldeo(
         if trabajo_id:  where.append("m.trabajo_id = ?");  params.append(trabajo_id)
         if operario_id: where.append("m.operario_id = ?"); params.append(operario_id)
         wsql = ("WHERE " + " AND ".join(where)) if where else ""
-        rows = conn.execute(f"""
-            SELECT m.id, m.fecha, m.trabajo_id, m.operario_id, m.cantidad_cajas,
-                   m.creado_por_legajo, m.creado_en,
-                   v.apellidoynombre AS operario_nombre,
-                   np.nombrepieza, np.códigopiezapuestoporcliente AS codigo_pieza
-            FROM _produccion_moldeo m
-            LEFT JOIN _v_responsables v      ON v.codigoresponsable = m.operario_id
-            LEFT JOIN Trabajos t             ON t.iditemtrabajo = m.trabajo_id
-            LEFT JOIN ItemDetallePedido idp  ON t.iditempedido = idp.iditempedido
-            LEFT JOIN NombreDePiezas np       ON idp.idpieza = np.id
-            {wsql}
-            ORDER BY m.id DESC
-        """, params).fetchall()
+        rows = conn.execute(f"{_MOLDEO_SELECT} {wsql} ORDER BY m.id DESC", params).fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()
@@ -5352,15 +5841,15 @@ async def post_produccion_moldeo(req: Request, user: dict = Depends(_get_auth_us
     body = await req.json()
     conn = get_db()
     try:
-        fecha, trabajo_id, operario_id, cantidad = _moldeo_validar_body(conn, body)
+        fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos = _moldeo_validar_body(conn, body)
         conn.execute(
             "INSERT INTO _produccion_moldeo "
-            "(fecha, trabajo_id, operario_id, cantidad_cajas, creado_por_legajo, creado_en) "
-            "VALUES (?,?,?,?,?,?)",
-            (fecha, trabajo_id, operario_id, cantidad, user["legajo"], datetime.now().isoformat())
+            "(fecha, trabajo_id, pieza_id, operario_id, cantidad_cajas, cajas_sin_cerrar, cantidad_noyos, creado_por_legajo, creado_en) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos, user["legajo"], datetime.now().isoformat())
         )
-        conn.commit()
         new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.commit()
         return _moldeo_row(conn, new_id)
     finally:
         conn.close()
@@ -5371,12 +5860,13 @@ async def put_produccion_moldeo(entry_id: int, req: Request, user: dict = Depend
     body = await req.json()
     conn = get_db()
     try:
-        if not conn.execute("SELECT 1 FROM _produccion_moldeo WHERE id=?", (entry_id,)).fetchone():
+        existente = conn.execute("SELECT id FROM _produccion_moldeo WHERE id=?", (entry_id,)).fetchone()
+        if not existente:
             raise HTTPException(404, "Registro no encontrado")
-        fecha, trabajo_id, operario_id, cantidad = _moldeo_validar_body(conn, body)
+        fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos = _moldeo_validar_body(conn, body)
         conn.execute(
-            "UPDATE _produccion_moldeo SET fecha=?, trabajo_id=?, operario_id=?, cantidad_cajas=? WHERE id=?",
-            (fecha, trabajo_id, operario_id, cantidad, entry_id)
+            "UPDATE _produccion_moldeo SET fecha=?, trabajo_id=?, pieza_id=?, operario_id=?, cantidad_cajas=?, cajas_sin_cerrar=?, cantidad_noyos=? WHERE id=?",
+            (fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos, entry_id)
         )
         conn.commit()
         return _moldeo_row(conn, entry_id)
@@ -5389,6 +5879,385 @@ def delete_produccion_moldeo(entry_id: int, user: dict = Depends(_get_auth_user)
     conn = get_db()
     try:
         conn.execute("DELETE FROM _produccion_moldeo WHERE id=?", (entry_id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@app.put("/api/trabajos/{trabajo_id}/asignar_operario")
+async def put_trabajo_asignar_operario(trabajo_id: int, req: Request, user: dict = Depends(_get_auth_user)):
+    """Asigna (o desasigna) un operario a una OT Programado. Es la UNICA via
+    que escribe _trabajo_operario_asignado -- elegir un operario en el combo
+    de la fila alcanza para que quede asignada, no hace falta que tenga
+    ninguna carga guardada. _produccion_moldeo (las cargas con su fecha y su
+    propio operario_id) es solo el historial de "quien cargo que ese día":
+    guardar o borrar una carga nunca toca esta asignacion."""
+    body = await req.json()
+    conn = get_db()
+    try:
+        t = conn.execute("SELECT estadotrabajo FROM Trabajos WHERE iditemtrabajo=?", (trabajo_id,)).fetchone()
+        if not t:
+            raise HTTPException(404, f"OT {trabajo_id} no encontrada")
+        if (t["estadotrabajo"] or "").upper() not in ("P", "I"):
+            raise HTTPException(400, "Solo se puede asignar operario a una OT en estado Inicial o Programado")
+
+        operario_raw = body.get("operario_id")
+        if operario_raw in (None, ""):
+            conn.execute("DELETE FROM _trabajo_operario_asignado WHERE trabajo_id=?", (trabajo_id,))
+            conn.commit()
+            return {"ok": True, "operario_id": None}
+
+        try:
+            operario_id = int(operario_raw)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "operario inválido")
+        if not conn.execute("SELECT 1 FROM _v_responsables WHERE codigoresponsable=?", (operario_id,)).fetchone():
+            raise HTTPException(404, f"Operario {operario_id} no encontrado")
+
+        conn.execute(
+            "INSERT INTO _trabajo_operario_asignado (trabajo_id, operario_id, asignado_en) VALUES (?,?,?) "
+            "ON CONFLICT(trabajo_id) DO UPDATE SET operario_id=excluded.operario_id, asignado_en=excluded.asignado_en",
+            (trabajo_id, operario_id, datetime.now().isoformat())
+        )
+        conn.commit()
+        return {"ok": True, "operario_id": operario_id}
+    finally:
+        conn.close()
+
+
+@app.put("/api/trabajos/{trabajo_id}/asignar_responsable_noyos")
+async def put_trabajo_asignar_responsable_noyos(trabajo_id: int, req: Request, user: dict = Depends(_get_auth_user)):
+    """Mismo mecanismo que asignar_operario (put_trabajo_asignar_operario) pero
+    para _trabajo_responsable_noyos -- rol separado: quien es responsable de
+    los noyos de esta OT, no de moldear la caja."""
+    body = await req.json()
+    conn = get_db()
+    try:
+        t = conn.execute("SELECT estadotrabajo FROM Trabajos WHERE iditemtrabajo=?", (trabajo_id,)).fetchone()
+        if not t:
+            raise HTTPException(404, f"OT {trabajo_id} no encontrada")
+        if (t["estadotrabajo"] or "").upper() not in ("P", "I"):
+            raise HTTPException(400, "Solo se puede asignar responsable de noyos a una OT en estado Inicial o Programado")
+
+        operario_raw = body.get("operario_id")
+        if operario_raw in (None, ""):
+            conn.execute("DELETE FROM _trabajo_responsable_noyos WHERE trabajo_id=?", (trabajo_id,))
+            conn.commit()
+            return {"ok": True, "operario_id": None}
+
+        try:
+            operario_id = int(operario_raw)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "operario inválido")
+        if not conn.execute("SELECT 1 FROM _v_responsables WHERE codigoresponsable=?", (operario_id,)).fetchone():
+            raise HTTPException(404, f"Operario {operario_id} no encontrado")
+
+        conn.execute(
+            "INSERT INTO _trabajo_responsable_noyos (trabajo_id, operario_id, asignado_en) VALUES (?,?,?) "
+            "ON CONFLICT(trabajo_id) DO UPDATE SET operario_id=excluded.operario_id, asignado_en=excluded.asignado_en",
+            (trabajo_id, operario_id, datetime.now().isoformat())
+        )
+        conn.commit()
+        return {"ok": True, "operario_id": operario_id}
+    finally:
+        conn.close()
+
+
+@app.get("/api/trabajos/{trabajo_id}/ayudantes")
+def get_trabajo_ayudantes(trabajo_id: int, user: dict = Depends(_get_auth_user)):
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT ta.operario_id, v.apellidoynombre AS operario_nombre "
+            "FROM _trabajo_ayudante ta "
+            "LEFT JOIN _v_responsables v ON v.codigoresponsable = ta.operario_id "
+            "WHERE ta.trabajo_id = ? ORDER BY ta.asignado_en",
+            (trabajo_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@app.post("/api/trabajos/{trabajo_id}/ayudantes")
+async def post_trabajo_ayudante(trabajo_id: int, req: Request, user: dict = Depends(_get_auth_user)):
+    """Agrega un ayudante a la OT -- fijo por OT como responsable de moldeo/
+    noyos, pero N a N (puede haber varios). No reemplaza, solo suma; para
+    sacar uno ver DELETE .../ayudantes/{operario_id}."""
+    body = await req.json()
+    conn = get_db()
+    try:
+        t = conn.execute("SELECT estadotrabajo FROM Trabajos WHERE iditemtrabajo=?", (trabajo_id,)).fetchone()
+        if not t:
+            raise HTTPException(404, f"OT {trabajo_id} no encontrada")
+        if (t["estadotrabajo"] or "").upper() not in ("P", "I"):
+            raise HTTPException(400, "Solo se pueden agregar ayudantes a una OT en estado Inicial o Programado")
+
+        try:
+            operario_id = int(body.get("operario_id"))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "operario inválido")
+        if not conn.execute("SELECT 1 FROM _v_responsables WHERE codigoresponsable=?", (operario_id,)).fetchone():
+            raise HTTPException(404, f"Operario {operario_id} no encontrado")
+
+        conn.execute(
+            "INSERT OR IGNORE INTO _trabajo_ayudante (trabajo_id, operario_id, asignado_en) VALUES (?,?,?)",
+            (trabajo_id, operario_id, datetime.now().isoformat())
+        )
+        conn.commit()
+        return get_trabajo_ayudantes(trabajo_id, user)
+    finally:
+        conn.close()
+
+
+@app.delete("/api/trabajos/{trabajo_id}/ayudantes/{operario_id}")
+def delete_trabajo_ayudante(trabajo_id: int, operario_id: int, user: dict = Depends(_get_auth_user)):
+    conn = get_db()
+    try:
+        conn.execute(
+            "DELETE FROM _trabajo_ayudante WHERE trabajo_id=? AND operario_id=?",
+            (trabajo_id, operario_id)
+        )
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@app.get("/api/moldeo/ayudantes")
+def get_moldeo_ayudantes(user: dict = Depends(_get_auth_user)):
+    """Todos los ayudantes de todas las OT activas, sin filtrar -- igual patron
+    que /api/trabajos_ocultos: se trae entero una vez y Cargar moldeo arma su
+    propio {trabajo_id: [ayudantes]} en el cliente."""
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT ta.trabajo_id, ta.operario_id, v.apellidoynombre AS operario_nombre "
+            "FROM _trabajo_ayudante ta "
+            "LEFT JOIN _v_responsables v ON v.codigoresponsable = ta.operario_id "
+            "ORDER BY ta.trabajo_id, ta.asignado_en"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+# ── Producción y productividad de moldeo ────────────────────────────────────────
+# "Productividad" = cajas moldeadas / horas trabajadas (HorasPorFecha, el mismo
+# dato que ya usa el resto de la app para productividad en kg/hora). Se cruza
+# por PERIODO (mes/semana/año), no por fecha exacta: HorasPorFecha no tiene una
+# fila por cada día calendario -- sus fechas vienen espaciadas irregularmente
+# (cada 2 a 5 días en los datos reales) -- así que cruzar día contra día casi
+# nunca encuentra nada aunque la persona sí haya trabajado ese período. El
+# resto de la app (get_personal) ya suma esta tabla por rango/mes, nunca por
+# día exacto, así que esto sigue el mismo criterio.
+
+def _moldeo_periodo_partes(periodo: str) -> tuple:
+    if periodo == "semanal":
+        return "semanal", "strftime('%Y-%W', fecha)", "date('now', '-84 days')"
+    if periodo == "anual":
+        return "anual", "strftime('%Y', fecha)", "date('now', '-5 years')"
+    return "mensual", "strftime('%Y-%m', fecha)", "date('now', '-12 months')"
+
+
+# Kg moldeados: mismo criterio de peso que /api/dashboard/pendiente_fundir --
+# PesosDePiezas via el idpesopieza que trae la propia OT (el peso especifico que
+# Access asigno a esa orden), con AVG(pesopieza) por pieza (piezas_peso, de
+# _CTE_PIEZAS_PESO) como respaldo cuando la OT no tiene uno propio o la carga es
+# "sin OT". coefcompl corrige por pieza -- NO se aplica el sufijo (AD)/(TR): ese
+# marca piezas cuyo peso se divide en la factura para eludir la factura en blanco,
+# no piezas con mas metal fisico, asi que multiplicarlo infla el kg real (bug que
+# tambien tenia /api/dashboard/pendiente_fundir y los /api/analytics/*, corregido
+# en la misma sesion). Si no se puede resolver peso para una carga, esa carga no
+# aporta kg (no se estima ni se cuenta como 0) -- mismo tratamiento que
+# ots_sin_peso alla.
+_MOLDEO_KG_CTE = _CTE_PIEZAS_PESO + """
+    , moldeo_peso_base AS (
+        SELECT mm.id AS entrada_id, mm.cantidad_cajas,
+               COALESCE(np_ot.coefcompl, np_dir.coefcompl, 1) AS coefcompl,
+               CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END AS peso_efectivo
+        FROM _produccion_moldeo mm
+        LEFT JOIN Trabajos t             ON t.iditemtrabajo = mm.trabajo_id
+        LEFT JOIN ItemDetallePedido idp  ON t.iditempedido = idp.iditempedido
+        LEFT JOIN NombreDePiezas np_ot   ON idp.idpieza = np_ot.id
+        LEFT JOIN NombreDePiezas np_dir  ON np_dir.id = mm.pieza_id
+        LEFT JOIN PesosDePiezas pp       ON pp.códpieza = t.idpesopieza
+        LEFT JOIN piezas_peso pz         ON pz.pieza_id = COALESCE(np_ot.id, np_dir.id)
+    )
+    , moldeo_kg AS (
+        SELECT entrada_id,
+               ROUND(cantidad_cajas * peso_efectivo * coefcompl, 2) AS kg
+        FROM moldeo_peso_base
+        WHERE peso_efectivo IS NOT NULL
+    )
+"""
+
+
+@app.get("/api/moldeo/productividad")
+def get_moldeo_productividad(user: dict = Depends(_get_auth_user)):
+    conn = get_db()
+    try:
+        operarios = conn.execute("SELECT DISTINCT operario_id FROM _produccion_moldeo").fetchall()
+        result = []
+        for row in operarios:
+            op_id = row["operario_id"]
+            nombre_row = conn.execute(
+                "SELECT apellidoynombre FROM _v_responsables WHERE codigoresponsable=?", (op_id,)
+            ).fetchone()
+            nombre = nombre_row["apellidoynombre"] if nombre_row else f"#{op_id}"
+
+            totales = conn.execute(_MOLDEO_KG_CTE + f"""
+                SELECT COALESCE(SUM(m.cantidad_cajas), 0) as total,
+                       COALESCE(SUM(CASE WHEN strftime('%Y-%m', m.fecha) = strftime('%Y-%m', 'now')
+                                          THEN m.cantidad_cajas END), 0) as mes,
+                       COALESCE(SUM(CASE WHEN strftime('%Y', m.fecha) = strftime('%Y', 'now')
+                                          THEN m.cantidad_cajas END), 0) as anio,
+                       COALESCE(SUM(m.cajas_sin_cerrar), 0) as sc_total,
+                       COALESCE(SUM(CASE WHEN strftime('%Y-%m', m.fecha) = strftime('%Y-%m', 'now')
+                                          THEN m.cajas_sin_cerrar END), 0) as sc_mes,
+                       COALESCE(SUM(CASE WHEN strftime('%Y', m.fecha) = strftime('%Y', 'now')
+                                          THEN m.cajas_sin_cerrar END), 0) as sc_anio,
+                       ROUND(COALESCE(SUM(mk.kg), 0), 1) as kg_total,
+                       ROUND(COALESCE(SUM(CASE WHEN strftime('%Y-%m', m.fecha) = strftime('%Y-%m', 'now')
+                                                THEN mk.kg END), 0), 1) as kg_mes,
+                       ROUND(COALESCE(SUM(CASE WHEN strftime('%Y', m.fecha) = strftime('%Y', 'now')
+                                                THEN mk.kg END), 0), 1) as kg_anio,
+                       SUM(CASE WHEN mk.kg IS NULL THEN 1 ELSE 0 END) as sin_peso
+                FROM _produccion_moldeo m
+                LEFT JOIN moldeo_kg mk ON mk.entrada_id = m.id
+                WHERE m.operario_id = ?
+            """, (op_id,)).fetchone()
+
+            # Productividad historica: horas de los MESES (no dias) que tienen
+            # al menos una carga -- evita arrastrar años de horas previas a
+            # que existiera esta funcionalidad, pero sin la fragilidad del
+            # cruce por dia exacto.
+            meses = sorted({r["fecha"][:7] for r in conn.execute(
+                "SELECT DISTINCT fecha FROM _produccion_moldeo WHERE operario_id=?", (op_id,)
+            ).fetchall()})
+            horas = 0.0
+            if meses:
+                ph = ",".join("?" * len(meses))
+                horas_row = conn.execute(
+                    f'SELECT COALESCE(SUM(horastrabajadas),0) as h FROM HorasPorFecha '
+                    f'WHERE "códigoresponsable" = ? AND horastrabajadas > 0 AND substr(fecha,1,7) IN ({ph})',
+                    [op_id] + meses
+                ).fetchone()
+                horas = horas_row["h"] or 0.0
+
+            result.append({
+                "operario_id": op_id,
+                "operario_nombre": nombre,
+                "total_cajas": totales["total"],
+                "cajas_mes_actual": totales["mes"],
+                "cajas_anio_actual": totales["anio"],
+                "total_cajas_sin_cerrar": totales["sc_total"],
+                "cajas_sin_cerrar_mes_actual": totales["sc_mes"],
+                "cajas_sin_cerrar_anio_actual": totales["sc_anio"],
+                "total_kg": totales["kg_total"],
+                "kg_mes_actual": totales["kg_mes"],
+                "kg_anio_actual": totales["kg_anio"],
+                "cargas_sin_peso": totales["sin_peso"],
+                "horas_en_meses_con_carga": horas,
+                "productividad": round(totales["total"] / horas, 2) if horas else None,
+                "productividad_kg": round(totales["kg_total"] / horas, 2) if horas and totales["kg_total"] else None,
+            })
+        result.sort(key=lambda r: r["total_cajas"], reverse=True)
+        return result
+    finally:
+        conn.close()
+
+
+@app.get("/api/moldeo/productividad/{operario_id}")
+def get_moldeo_productividad_operario(
+    operario_id: int,
+    periodo: str = Query("mensual"),
+    user: dict = Depends(_get_auth_user),
+):
+    periodo, expr, desde = _moldeo_periodo_partes(periodo)
+    conn = get_db()
+    try:
+        cajas_rows = conn.execute(_MOLDEO_KG_CTE + f"""
+            SELECT {expr} as periodo, SUM(m.cantidad_cajas) as cajas,
+                   SUM(m.cajas_sin_cerrar) as cajas_sin_cerrar,
+                   ROUND(SUM(mk.kg), 1) as kg
+            FROM _produccion_moldeo m
+            LEFT JOIN moldeo_kg mk ON mk.entrada_id = m.id
+            WHERE m.operario_id = ? AND m.fecha >= {desde}
+            GROUP BY periodo ORDER BY periodo
+        """, (operario_id,)).fetchall()
+        horas_rows = conn.execute(f"""
+            SELECT {expr} as periodo, SUM(horastrabajadas) as horas
+            FROM HorasPorFecha
+            WHERE "códigoresponsable" = ? AND horastrabajadas > 0 AND fecha >= {desde}
+            GROUP BY periodo
+        """, (operario_id,)).fetchall()
+        horas_map = {r["periodo"]: (r["horas"] or 0) for r in horas_rows}
+
+        buckets = []
+        for r in cajas_rows:
+            cajas = r["cajas"] or 0
+            kg = r["kg"] or 0
+            horas = horas_map.get(r["periodo"], 0)
+            buckets.append({
+                "periodo": r["periodo"],
+                "cajas": cajas,
+                "cajas_sin_cerrar": r["cajas_sin_cerrar"] or 0,
+                "kg": kg,
+                "horas": horas,
+                "productividad": round(cajas / horas, 2) if horas else None,
+                "productividad_kg": round(kg / horas, 2) if horas and kg else None,
+            })
+        return {"periodo": periodo, "buckets": buckets}
+    finally:
+        conn.close()
+
+
+# ── Trabajos: ocultar OT trabadas en Inicial/Programado (parche local) ─────────
+# Workaround para OT que quedaron olvidadas en Access en estado Inicial o
+# Programado y no se pueden corregir desde acá -- las saca de la tabla de
+# Cargar moldeo sin tocar el resto de la app (Pendiente de fundir, Trabajos,
+# kiosk siguen mostrándolas igual). Solo aplica a OT que estén en uno de esos
+# dos estados en este momento (los únicos que aparecen en esa tabla).
+
+@app.get("/api/trabajos_ocultos")
+def get_trabajos_ocultos(user: dict = Depends(_get_auth_user)):
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT trabajo_id, oculto_por_legajo, oculto_en FROM _trabajo_oculto"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@app.post("/api/trabajos_ocultos/{trabajo_id}")
+def post_trabajo_oculto(trabajo_id: int, user: dict = Depends(_get_auth_user)):
+    conn = get_db()
+    try:
+        t = conn.execute("SELECT estadotrabajo FROM Trabajos WHERE iditemtrabajo=?", (trabajo_id,)).fetchone()
+        if not t:
+            raise HTTPException(404, f"OT {trabajo_id} no encontrada")
+        if (t["estadotrabajo"] or "").upper() not in ("P", "I"):
+            raise HTTPException(400, "Solo se pueden ocultar OT en estado Inicial o Programado")
+        conn.execute(
+            "INSERT INTO _trabajo_oculto (trabajo_id, oculto_por_legajo, oculto_en) VALUES (?,?,?) "
+            "ON CONFLICT(trabajo_id) DO UPDATE SET oculto_por_legajo=excluded.oculto_por_legajo, oculto_en=excluded.oculto_en",
+            (trabajo_id, user["legajo"], datetime.now().isoformat())
+        )
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@app.delete("/api/trabajos_ocultos/{trabajo_id}")
+def delete_trabajo_oculto(trabajo_id: int, user: dict = Depends(_get_auth_user)):
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM _trabajo_oculto WHERE trabajo_id=?", (trabajo_id,))
         conn.commit()
         return {"ok": True}
     finally:
