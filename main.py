@@ -11,6 +11,8 @@ import sqlite3
 import subprocess
 import sys
 import time as _time
+import urllib.error
+import urllib.request
 from contextlib import asynccontextmanager
 from datetime import date as date_cls, datetime, timedelta
 from pathlib import Path
@@ -100,6 +102,19 @@ def _iso_week_label(año: int, semana: int) -> str:
         return f"Sem.{int(semana):02d}/{int(año)}"
 
 
+def _week_to_month(año: int, semana: int) -> str:
+    """Mes "YYYY-MM" que contiene el lunes de esa semana ISO -- ItemDevolución
+    solo guarda año+semana, sin fecha exacta, así que convertir a mes es
+    aproximado por naturaleza (una semana puede cruzar dos meses). Se cuenta
+    entera en el mes de su lunes, mismo criterio en todos los reportes que
+    hacen esta conversión (analytics_evolucion_mensual, _calc_tendencia_mensual),
+    para que sean consistentes entre sí."""
+    jan4 = date_cls(año, 1, 4)
+    week1_mon = jan4 - timedelta(days=jan4.weekday())
+    target = week1_mon + timedelta(weeks=semana - 1)
+    return target.strftime("%Y-%m")
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -117,11 +132,6 @@ sync_state: dict = {
     "progress":  {"done": 0, "total": 0, "phase": ""},
     "groups":    {},       # poblado en lifespan desde sync.SYNC_GROUPS
 }
-
-# Timestamps monotónicos de último sync por grupo (clock del event loop).
-# Compartido entre run_sync(), run_sync_group() y _group_scheduler().
-_last_group_run: dict[str, float] = {}
-
 
 def _should_auto_sync() -> bool:
     """True si no hay sync previo o el último terminó hace ≥10 horas."""
@@ -172,16 +182,36 @@ async def run_sync(full_refresh: bool = False):
         log.info("Full refresh: watermarks eliminados, Access exportará todas las filas.")
 
     # 1. PowerShell 32-bit: Access → CSVs
+    # Timeout duro: sync_access.ps1 le pone CommandTimeout=180 a cada consulta
+    # OLEDB, pero eso solo cubre que el comando EMPIECE a devolver resultados
+    # -- una vez que el DataReader está leyendo filas, un corte de red hacia
+    # \\Laboratorio (recurso remoto, PC aparte) puede dejarlo esperando el
+    # próximo paquete para siempre, sin ningún timeout que lo corte (visto en
+    # vivo: la exportación se clava en Trabajos/TrabajosNoyería, 0% CPU,
+    # ningún avance en minutos). Sin este timeout acá, ese cuelgue se lleva
+    # puesto todo el sync (y con el scheduler nuevo, 4 veces por día en vez
+    # de 1) -- con él, subprocess.run mata el PowerShell colgado y el sync
+    # de esa vuelta queda en error, listo para reintentar en el próximo ciclo.
     def _run_ps():
-        return subprocess.run(
-            [PS32, "-NonInteractive", "-ExecutionPolicy", "Bypass",
-             "-File", str(PS_SCRIPT),
-             "-OutputDir", str(EXPORTS),
-             "-DbPath", r"M:\bases\2011\datos\datosunificado2010.accdb"],
-            capture_output=False,
-        )
+        try:
+            return subprocess.run(
+                [PS32, "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                 "-File", str(PS_SCRIPT),
+                 "-OutputDir", str(EXPORTS),
+                 "-DbPath", r"M:\bases\2011\datos\datosunificado2010.accdb"],
+                capture_output=False,
+                timeout=900,
+            )
+        except subprocess.TimeoutExpired:
+            return None
 
     result = await loop.run_in_executor(None, _run_ps)
+    if result is None:
+        sync_state["status"]   = "error"
+        sync_state["error"]    = "PowerShell sync colgado (sin avance 15 min) -- abortado, reintenta en el próximo ciclo"
+        sync_state["progress"] = {"done": 0, "total": 0, "phase": ""}
+        log.error("PowerShell sync: sin avance en 15 min, abortado (posible corte de red hacia \\\\Laboratorio).")
+        return
     if result.returncode != 0:
         sync_state["status"]   = "error"
         sync_state["error"]    = "PowerShell sync falló (ver consola)"
@@ -219,9 +249,7 @@ async def run_sync(full_refresh: bool = False):
         return
 
     # Marcar todos los grupos como recién sincronizados (full sync cubre todo)
-    now_mono = asyncio.get_event_loop().time()
     for group in list(sync_state["groups"].keys()):
-        _last_group_run[group] = now_mono
         sync_state["groups"][group]["last_sync"] = sync_state["last_sync"]
 
 
@@ -256,17 +284,30 @@ async def run_sync_group(group_name: str):
     # 1. PowerShell: exportar solo las tablas del grupo
     tables_str = ";".join(group_tables)
 
+    # Mismo timeout duro que en run_sync() -- ver ese comentario (un corte de
+    # red a mitad de tabla puede colgar el DataReader para siempre, sin que
+    # CommandTimeout lo cubra).
     def _run_ps_group():
-        return subprocess.run(
-            [PS32, "-NonInteractive", "-ExecutionPolicy", "Bypass",
-             "-File", str(PS_SCRIPT),
-             "-OutputDir", str(EXPORTS),
-             "-DbPath", r"M:\bases\2011\datos\datosunificado2010.accdb",
-             "-Tables", tables_str],
-            capture_output=False,
-        )
+        try:
+            return subprocess.run(
+                [PS32, "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                 "-File", str(PS_SCRIPT),
+                 "-OutputDir", str(EXPORTS),
+                 "-DbPath", r"M:\bases\2011\datos\datosunificado2010.accdb",
+                 "-Tables", tables_str],
+                capture_output=False,
+                timeout=900,
+            )
+        except subprocess.TimeoutExpired:
+            return None
 
     result = await loop.run_in_executor(None, _run_ps_group)
+    if result is None:
+        sync_state["status"]   = "error"
+        sync_state["error"]    = f"PowerShell colgado para grupo '{group_name}' (sin avance 15 min) -- abortado"
+        sync_state["progress"] = {"done": 0, "total": 0, "phase": ""}
+        log.error("PS1 grupo '%s': sin avance en 15 min, abortado (posible corte de red hacia \\\\Laboratorio).", group_name)
+        return
     if result.returncode != 0:
         sync_state["status"]   = "error"
         sync_state["error"]    = f"PowerShell falló para grupo '{group_name}'"
@@ -287,11 +328,9 @@ async def run_sync_group(group_name: str):
     try:
         summary = await loop.run_in_executor(None, _run_import)
         now_iso  = summary["ended_at"]
-        now_mono = loop.time()
         sync_state["status"]    = "ready"
         sync_state["last_sync"] = now_iso
         sync_state["progress"]  = {"done": 0, "total": 0, "phase": ""}
-        _last_group_run[group_name] = now_mono
         if group_name in sync_state["groups"]:
             sync_state["groups"][group_name]["last_sync"]  = now_iso
             sync_state["groups"][group_name]["tables_ok"]  = summary["tables_ok"]
@@ -304,26 +343,46 @@ async def run_sync_group(group_name: str):
         log.error("Error en sync grupo '%s': %s", group_name, e)
 
 
-async def _group_scheduler():
-    """Loop asyncio: sincroniza el grupo más vencido cada 60 s (uno por tick)."""
-    import sync as sync_module
-    log.info("Scheduler de grupos iniciado.")
+# Horas de arranque del sync completo -- cada 2hs dentro de la ventana
+# 8:00-15:00 (confirmado con el usuario). No se agrega una a las 16:00
+# porque quedaría afuera de esa ventana.
+_SYNC_COMPLETO_HORAS = (8, 10, 12, 14)
+
+
+async def _full_sync_scheduler():
+    """Full refresh (todas las tablas, sin watermarks) cada 2hs dentro de la
+    ventana 8:00-15:00 -- reemplaza el esquema anterior (grupos incrementales
+    por intervalo + un full sync diario a las 12:00) por uno solo: mismo
+    sync completo, repetido varias veces en el horario en que la PC donde
+    vive el Access seguro sigue prendida (se apaga sola a las 19:00, bien
+    afuera de esta ventana, así que después de eso \\Laboratorio -- el
+    recurso de red de donde exporta el PS1 -- deja de estar disponible).
+
+    Además de simplificar el esquema, correr completo varias veces por día
+    en vez de una sola vez a mediodía achica la ventana en la que
+    Trabajos/HorasPorFecha (antes sincronizados solo por grupo, con
+    Trabajos date-rolling de últimos 3 meses) podían arrastrar un dato
+    cargado tarde en una OT vieja.
+
+    Chequea cada 60s si la hora actual está en _SYNC_COMPLETO_HORAS Y esa
+    franja todavía no corrió hoy -- mismo estilo de loop simple que el
+    scheduler anterior, sin depender de una librería de cron (sobrevive un
+    restart a mitad de franja: si el proceso arranca después de que empezó
+    una hora del horario y esa franja no corrió, corre apenas lo nota)."""
+    log.info("Scheduler de sync completo iniciado (%s, cada 2hs).",
+              ", ".join(f"{h}:00" for h in _SYNC_COMPLETO_HORAS))
+    ultima_franja_corrida: tuple[date_cls, int] | None = None
     while True:
         await asyncio.sleep(60)
-        if sync_state["status"] == "syncing":
-            continue
-        now = asyncio.get_event_loop().time()
-        best_group:   str | None = None
-        best_overdue: float = 0
-        for group, interval in sync_module.GROUP_INTERVALS.items():
-            last    = _last_group_run.get(group, 0)
-            overdue = (now - last) - interval
-            if overdue > 0 and overdue > best_overdue:
-                best_overdue = overdue
-                best_group   = group
-        if best_group:
-            log.info("Scheduler: grupo '%s' vencido por %.0fs", best_group, best_overdue)
-            await run_sync_group(best_group)
+        ahora = datetime.now()
+        franja = (ahora.date(), ahora.hour)
+        if ahora.hour in _SYNC_COMPLETO_HORAS and franja != ultima_franja_corrida:
+            ultima_franja_corrida = franja
+            if sync_state["status"] == "syncing":
+                log.info("Full sync (%d:00): omitido, ya hay un sync en curso.", ahora.hour)
+                continue
+            log.info("Full sync (%d:00): iniciando.", ahora.hour)
+            await run_sync(full_refresh=True)
 
 
 # ── DB helper ─────────────────────────────────────────────────────────────────
@@ -386,6 +445,13 @@ _ALL_SECCIONES = [
     "dashboard", "clientes", "analisis", "trabajos", "pedidos", "remitos",
     "piezas", "stock", "modelos", "fundiciones", "personal", "documentos",
     "presentacion", "proveedores", "admin",
+    # "precios" no es una pagina -- es un permiso transversal que habilita ver
+    # montos en $ (modo pesos de Pendiente de fundir/Tendencia, distribucion
+    # de precio/kg, export a Excel) dentro de paginas que la persona ya puede
+    # ver por otro lado. Vive en la misma tabla _permisos por simplicidad
+    # (es solo un set de strings por usuario), pero el frontend lo muestra
+    # aparte, no mezclado con las secciones reales.
+    "precios",
 ]
 
 
@@ -422,6 +488,72 @@ def _require_admin(user: dict = Depends(_get_auth_user)) -> dict:
     if not user["is_admin"]:
         raise HTTPException(403, "Se requiere rol administrador")
     return user
+
+
+def _get_auth_user_optional(authorization: Optional[str] = Header(None)) -> Optional[dict]:
+    """Como _get_auth_user, pero nunca lanza 401 -- devuelve None si no hay
+    token o no es valido en vez de rechazar el request. La usan los mismos
+    endpoints de dashboard/tendencia que llama el kiosko (frontend/kiosk.html),
+    que es una pantalla publica y nunca manda Authorization -- si estos
+    endpoints exigieran login a secas, el kiosko se quedaria sin datos
+    enteros, no solo sin los campos en $. None se trata como "sin permiso de
+    precios" en _tiene_precios, asi que el kiosko sigue viendo todo lo demas
+    pero nunca $ (correcto: no hay forma de saber quien esta mirando una
+    pantalla publica)."""
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    token = authorization.split(" ", 1)[1].strip()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT u.legajo, u.nombre, u.is_admin "
+            "FROM _sesiones s JOIN _usuarios u ON u.legajo = s.legajo "
+            "WHERE s.token=? AND s.activa=1 AND s.expires_at>? AND u.activo=1",
+            (token, datetime.now().isoformat())
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return {"legajo": row[0], "nombre": row[1], "is_admin": bool(row[2])}
+
+
+def _tiene_precios(user: Optional[dict]) -> bool:
+    """True si hay un usuario autenticado con el permiso transversal
+    'precios' (o admin, que siempre lo tiene). None (sin token -- kiosko, o
+    sesion invalida/vencida) da False."""
+    if not user:
+        return False
+    if user.get("is_admin"):
+        return True
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        return bool(conn.execute(
+            "SELECT 1 FROM _permisos WHERE legajo=? AND seccion='precios'", (user["legajo"],)
+        ).fetchone())
+    finally:
+        conn.close()
+
+
+def _redactar_precios(obj):
+    """Recorre dicts/listas anidadas in-place y pone en None cualquier campo
+    cuyo nombre EMPIECE con 'pesos' o 'precio' -- la convencion de nombres
+    que usa toda la app para montos en $ (pesos_pendientes, precio_efectivo,
+    precio_unitario, etc.). No toca campos que solo contienen "precio" en
+    otra posicion (ots_sin_precio, piezas_sin_precio son conteos, no montos)
+    ni cambia la forma de la respuesta -- deja el resto de los datos (kg,
+    piezas, ots) intacto. Se aplica a la respuesta de quien no tiene el
+    permiso 'precios' (ver _tiene_precios), justo antes de devolverla."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(v, (dict, list)):
+                _redactar_precios(v)
+            elif isinstance(k, str) and (k.startswith("pesos") or k.startswith("precio")):
+                obj[k] = None
+    elif isinstance(obj, list):
+        for item in obj:
+            _redactar_precios(item)
+    return obj
 
 
 # ── Lookup tables (manually maintained, survive sync) ─────────────────────────
@@ -600,6 +732,15 @@ def _seed_lookups():
         conn.execute("ALTER TABLE _produccion_moldeo ADD COLUMN cajas_sin_cerrar INTEGER NOT NULL DEFAULT 0")
     if "cantidad_noyos" not in _cols_moldeo:
         conn.execute("ALTER TABLE _produccion_moldeo ADD COLUMN cantidad_noyos INTEGER NOT NULL DEFAULT 0")
+    # Descripcion libre para una carga "sin OT" de pedido informal (sin
+    # trabajo_id ni pieza formal detras) -- lo unico que le da trazabilidad a
+    # ese trabajo despues, ya que no hay ninguna OT ni pedido real para
+    # rastrearlo. Nunca obligatoria (el supervisor puede no tener nada mas
+    # que anotar), y se guarda igual para una carga CON OT por si alguna vez
+    # hace falta una aclaracion puntual, aunque el frontend hoy solo la
+    # ofrece en el modo sin OT.
+    if "nota" not in _cols_moldeo:
+        conn.execute("ALTER TABLE _produccion_moldeo ADD COLUMN nota TEXT")
     # Quien quedo asignado a una OT -- se escribe UNICAMENTE desde
     # put_trabajo_asignar_operario (elegir el combo alcanza, sin necesidad de
     # ninguna carga guardada). Es un reemplazo provisorio de
@@ -612,9 +753,67 @@ def _seed_lookups():
             asignado_en TEXT    NOT NULL
         )
     """)
-    # Responsable de noyos -- rol separado del responsable de moldeo (arriba),
-    # misma mecanica exacta (fijo por OT, combo, se pisa con ON CONFLICT), solo
-    # que "quien hizo los noyos" en vez de "quien moldeo la caja".
+    # Responsables de moldeo -- de "un solo asignado por OT" (arriba) a un
+    # conjunto: una caja puede necesitar mas de una persona moldeandola, misma
+    # mecanica N a N que _trabajo_ayudante (mas abajo). A diferencia de
+    # ayudante, estos SI cuentan para productividad -- cada uno carga su
+    # propia cantidad de cajas ese dia. _produccion_moldeo ya soporta varias
+    # filas por trabajo_id+fecha con operario_id distinto (nunca tuvo una
+    # restriccion UNIQUE que lo impida); antes de esto la UI solo usaba una.
+    # _trabajo_operario_asignado (arriba) queda sin usar desde el frontend
+    # pero no se borra -- no vale la pena el riesgo de tocar una tabla en
+    # produccion por una que ya no se escribe.
+    _existia_resp_moldeo = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='_trabajo_responsable_moldeo'"
+    ).fetchone()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _trabajo_responsable_moldeo (
+            trabajo_id  INTEGER NOT NULL,
+            operario_id INTEGER NOT NULL,
+            asignado_en TEXT    NOT NULL,
+            PRIMARY KEY (trabajo_id, operario_id)
+        )
+    """)
+    if not _existia_resp_moldeo:
+        # Migracion unica: se materializa el responsable "efectivo" (directo o
+        # heredado por la cadena de origen, ver _moldeo_asignacion_heredada)
+        # de cada OT activa como su primer responsable de moldeo, para no
+        # perder de un dia para el otro lo que ya estaba asignado. De aca en
+        # mas la herencia por cadena de origen la maneja
+        # _moldeo_heredar_responsables_si_corresponde (mas abajo), que corre
+        # en cada lectura -- una OT reemplazo nueva la recibe sola la primera
+        # vez que se abre Cargar moldeo despues de que Access la genere, no
+        # hace falta otra migracion para las que vengan.
+        # _moldeo_asignacion_heredada espera filas estilo Row (accede por
+        # nombre de columna) -- esta conexion es la de sqlite3.connect() de
+        # mas arriba, sin row_factory, asi que se le pone uno solo durante
+        # esta migracion y se restaura, para no romper el resto de la
+        # funcion (que sigue accediendo filas por indice numerico).
+        _row_factory_previo = conn.row_factory
+        conn.row_factory = sqlite3.Row
+        _ahora_migracion = datetime.now().isoformat()
+        for t in conn.execute(
+            "SELECT iditemtrabajo, origen FROM Trabajos WHERE estadotrabajo IN ('P','I')"
+        ).fetchall():
+            directo = conn.execute(
+                "SELECT operario_id FROM _trabajo_operario_asignado WHERE trabajo_id=?", (t["iditemtrabajo"],)
+            ).fetchone()
+            operario_id = directo["operario_id"] if directo else None
+            if operario_id is None and t["origen"]:
+                heredado = _moldeo_asignacion_heredada(conn, t["origen"])
+                if heredado:
+                    operario_id = heredado["operario_id"]
+            if operario_id is not None:
+                conn.execute(
+                    "INSERT OR IGNORE INTO _trabajo_responsable_moldeo (trabajo_id, operario_id, asignado_en) VALUES (?,?,?)",
+                    (t["iditemtrabajo"], operario_id, _ahora_migracion)
+                )
+        conn.row_factory = _row_factory_previo
+    # Responsable de noyos -- rol separado del responsable de moldeo (arriba).
+    # _trabajo_responsable_noyos (singular, PK simple) es la tabla vieja,
+    # queda sin usar desde el frontend pero no se borra (mismo criterio que
+    # _trabajo_operario_asignado). _trabajo_responsables_noyos (plural, mas
+    # abajo) es el reemplazo N a N, mismo sistema que responsable de moldeo.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS _trabajo_responsable_noyos (
             trabajo_id  INTEGER PRIMARY KEY,
@@ -622,6 +821,40 @@ def _seed_lookups():
             asignado_en TEXT    NOT NULL
         )
     """)
+    _existia_resp_noyos = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='_trabajo_responsables_noyos'"
+    ).fetchone()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _trabajo_responsables_noyos (
+            trabajo_id  INTEGER NOT NULL,
+            operario_id INTEGER NOT NULL,
+            asignado_en TEXT    NOT NULL,
+            PRIMARY KEY (trabajo_id, operario_id)
+        )
+    """)
+    if not _existia_resp_noyos:
+        # Misma migracion unica que responsable de moldeo (arriba), fuente
+        # _trabajo_responsable_noyos en vez de _trabajo_operario_asignado.
+        _row_factory_previo = conn.row_factory
+        conn.row_factory = sqlite3.Row
+        _ahora_migracion_noyos = datetime.now().isoformat()
+        for t in conn.execute(
+            "SELECT iditemtrabajo, origen FROM Trabajos WHERE estadotrabajo IN ('P','I')"
+        ).fetchall():
+            directo = conn.execute(
+                "SELECT operario_id FROM _trabajo_responsable_noyos WHERE trabajo_id=?", (t["iditemtrabajo"],)
+            ).fetchone()
+            operario_id = directo["operario_id"] if directo else None
+            if operario_id is None and t["origen"]:
+                heredado = _moldeo_asignacion_heredada(conn, t["origen"], tabla="_trabajo_responsable_noyos")
+                if heredado:
+                    operario_id = heredado["operario_id"]
+            if operario_id is not None:
+                conn.execute(
+                    "INSERT OR IGNORE INTO _trabajo_responsables_noyos (trabajo_id, operario_id, asignado_en) VALUES (?,?,?)",
+                    (t["iditemtrabajo"], operario_id, _ahora_migracion_noyos)
+                )
+        conn.row_factory = _row_factory_previo
     # Ayudantes de una OT -- fijos por OT como los responsables de arriba, pero
     # N a N (una OT puede tener varios, ver POST/DELETE /api/trabajos/{id}/ayudantes).
     conn.execute("""
@@ -780,6 +1013,19 @@ def _seed_lookups():
             created_at      TEXT
         )
     """)
+    # Índice de Precios al Consumidor Nacional (INDEC, base dic-2016) -- para
+    # el checkbox "ajustar por inflación" de Última actividad (Dashboard).
+    # Un valor por mes ("YYYY-MM-01" -> índice); se sincroniza on-demand
+    # desde la API pública de datos.gob.ar (ver _sync_ipc_indec), nunca a
+    # mano -- confirmado con el usuario, quiere el dato de una fuente oficial
+    # (BCRA/INDEC) y no un % fijo inventado.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _ipc_indec (
+            fecha           TEXT PRIMARY KEY,
+            indice          REAL NOT NULL,
+            sincronizado_en TEXT NOT NULL
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -804,7 +1050,7 @@ def _run_warmup() -> None:
         # Warm Trabajos + FundiciónPorFecha + PesosDePiezas + NombreDePiezas (semanal)
         conn.execute(
             'SELECT COUNT(*) FROM Trabajos t'
-            ' JOIN "FundiciónPorFecha" fpf ON fpf."códfundición" = t."códfundición"'
+            ' JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf."códfundición" = t."códfundición"'
             ' LEFT JOIN PesosDePiezas pp ON pp."códpieza" = t.idpesopieza'
             ' LEFT JOIN NombreDePiezas np ON np.id = pp."nombredepiezasid_"'
             ' WHERE fpf.fecha IS NOT NULL'
@@ -832,7 +1078,7 @@ async def lifespan(app: FastAPI):
         log.info("Auto-sync: omitido (sync reciente detectado)")
         sync_state["status"] = "ready"
 
-    asyncio.create_task(_group_scheduler())
+    asyncio.create_task(_full_sync_scheduler())
 
     import threading
     threading.Thread(target=_run_warmup, daemon=True).start()
@@ -941,7 +1187,8 @@ async def auth_login(req: Request):
         conn.close()
     return {"token": token, "user": {
         "legajo": u["legajo"], "nombre": u["nombre"],
-        "is_admin": bool(u["is_admin"]), "secciones": secciones
+        "is_admin": bool(u["is_admin"]), "secciones": secciones,
+        "tiene_precios": bool(u["is_admin"]) or "precios" in secciones,
     }}
 
 
@@ -963,7 +1210,7 @@ def auth_me(user: dict = Depends(_get_auth_user)):
         "SELECT seccion FROM _permisos WHERE legajo=?", (user["legajo"],)
     ).fetchall()]
     conn.close()
-    return {**user, "secciones": secciones}
+    return {**user, "secciones": secciones, "tiene_precios": user["is_admin"] or "precios" in secciones}
 
 
 # ── Admin: usuarios ───────────────────────────────────────────────────────────
@@ -1462,13 +1709,29 @@ _CTE_PIEZAS_PRECIO = """
     )
 """
 
+# Última vez que se produjo cada pieza -- MAX(fecha de colada) entre todos sus
+# Trabajos, mismo join Trabajos->FundiciónPorFecha que usa _db_warmup y el
+# resto de los reportes por fecha de fundición. Vía ItemDetallePedido (no
+# idpesopieza/PesosDePiezas) para no depender de que la variante de peso
+# quedó bien asignada en esa OT puntual -- acá solo importa CUÁNDO, no cuánto.
+_CTE_PIEZAS_ULTIMA_PRODUCCION = """
+    , piezas_ultima_produccion AS (
+        SELECT idp.idpieza AS pieza_id, MAX(fpf.fecha) AS ultima_produccion
+        FROM Trabajos t
+        JOIN ItemDetallePedido idp   ON idp.iditempedido = t.iditempedido
+        JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf."códfundición" = t."códfundición"
+        WHERE fpf.fecha IS NOT NULL
+        GROUP BY idp.idpieza
+    )
+"""
+
 # Batiplane queda afuera de pendiente_fundir/calendario/detalle salvo pedido explícito
 # (ver dashboard_pendiente_fundir) -- su código de cliente es fijo, no una config editable.
 _COD_CLIENTE_BATIPLANE = "BA3"
 
 
 @app.get("/api/dashboard/pendiente_fundir")
-def dashboard_pendiente_fundir(meses: int = 6):
+def dashboard_pendiente_fundir(meses: int = 6, user: Optional[dict] = Depends(_get_auth_user_optional)):
     """Pendiente de fundir por material para todas las OTs activas, separado
     en Programado (nada fundido todavía) y Fundido (ya fundido, falta entregar).
     Usa el mismo criterio por estado que dashboard_proyeccion_pipeline, acá
@@ -1566,6 +1829,8 @@ def dashboard_pendiente_fundir(meses: int = 6):
 
         resultado = list(por_material.values())
         resultado.sort(key=lambda m: m["inicial"]["ots"] + m["programado"]["ots"] + m["fundido"]["ots"], reverse=True)
+        if not _tiene_precios(user):
+            _redactar_precios(resultado)
         return resultado
     finally:
         conn.close()
@@ -1668,6 +1933,7 @@ def dashboard_pendiente_fundir_detalle(
     estado: Optional[str] = Query(None),
     fecha: Optional[str] = Query(None),
     olvidadas: bool = Query(False),
+    user: Optional[dict] = Depends(_get_auth_user_optional),
 ):
     """Lista de OTs (Trabajos) individuales detras de un numero de
     dashboard_pendiente_fundir (codigo+estado, clic en una barra) o de
@@ -1754,6 +2020,8 @@ def dashboard_pendiente_fundir_detalle(
             d = dict(r)
             d["estado_label"] = est.get(d["estado"] or "", d["estado"] or "")
             result.append(d)
+        if not _tiene_precios(user):
+            _redactar_precios(result)
         return result
     finally:
         conn.close()
@@ -1800,7 +2068,7 @@ _PESOS_EXPR = "ROUND(SUM(pendientes * precio_efectivo), 2)"
 
 
 @app.get("/api/dashboard/proyeccion_pipeline")
-def dashboard_proyeccion_pipeline():
+def dashboard_proyeccion_pipeline(user: Optional[dict] = Depends(_get_auth_user_optional)):
     """Todas las OTs activas Programadas y Fundidas, sin límite de antigüedad,
     con idéntico criterio de estado y peso efectivo que dashboard_pendiente_fundir.
     El agregado alimenta la tarjeta KPI y la barra
@@ -1826,12 +2094,15 @@ def dashboard_proyeccion_pipeline():
             ORDER BY año, mes
         """).fetchall()
 
-        return {
+        resultado = {
             "inicial":    por_estado.get("I", vacio),
             "programado": por_estado.get("P", vacio),
             "fundido":    por_estado.get("F", vacio),
             "por_mes":    [dict(r) for r in mes_rows],
         }
+        if not _tiene_precios(user):
+            _redactar_precios(resultado)
+        return resultado
     finally:
         conn.close()
 
@@ -1987,7 +2258,8 @@ def dashboard_pendiente_fundir_sin_precio(meses: int = 6):
 
 
 @app.get("/api/dashboard/precio_kg_distribucion")
-def dashboard_precio_kg_distribucion(meses: int = Query(12)):
+def dashboard_precio_kg_distribucion(meses: int = Query(12), material: Optional[str] = Query(None),
+                                      user: Optional[dict] = Depends(_get_auth_user_optional)):
     """Distribución de precio por kg en el catálogo -- histograma con la cantidad
     de piezas por rango de $/kg, promedio y mediana. $/kg es directo cuando la
     tarifa (TiposFacturación) ya es por kg, o precio unitario / peso de la pieza
@@ -1998,33 +2270,82 @@ def dashboard_precio_kg_distribucion(meses: int = Query(12)):
     de 2026 no son comparables en la misma distribución (confirmado con datos
     reales: sin filtrar, la mediana por año pasa de ~$2/kg en 1998 a ~$9.200/kg
     en 2026). Por eso se filtra por Precios.fechaprecio (cuándo se actualizó esa
-    tarifa por última vez) en vez de por la pieza en sí -- es lo que de verdad
-    determina la escala del número. meses=0 trae el catálogo entero sin filtrar
-    (mezclado con decadas de inflación, sirve solo como referencia histórica)."""
+    tarifa por última vez).
+
+    Eso solo no alcanza -- en Access los precios se actualizan en MASA (un
+    ajuste general de tarifas toca fechaprecio de todo el catálogo de una),
+    así que una pieza sin fabricarse desde 2007 puede tener fechaprecio de la
+    semana pasada y colarse en "últimos 12 meses" (caso real: pieza 551,
+    "Cubre Nº 160/3/4", confirmado con el usuario). Por eso meses>0 exige
+    TAMBIÉN que la pieza se haya producido dentro de esa misma ventana
+    (piezas_ultima_produccion) -- ambas condiciones, no una sola. meses=0
+    ("Todo el catálogo") no filtra ninguna de las dos, sirve solo como
+    referencia histórica.
+
+    material (opcional) filtra por NombreDePiezas.códdeagregados -- el mismo
+    código de material final que agrupa la tabla "Pendiente de fundir por
+    material" (dashboard_pendiente_fundir), resuelto al mismo nombre lindo vía
+    TiposMaterial.sobrenombrematerial. La lista de materiales devuelta en
+    "materiales" es siempre la del catálogo COMPLETO (sin aplicar el propio
+    filtro), para que el combo del front no pierda opciones al elegir una."""
+    # Este endpoint es 100% precio -- a diferencia de pendiente_fundir/
+    # proyeccion_pipeline, no hay "resto de los datos" que dejar visible, asi
+    # que sin el permiso 'precios' se devuelve directamente la misma forma
+    # "vacia" que ya existe para el caso de muy pocos datos (n<5), en vez de
+    # agregar un shape de error nuevo.
+    if not _tiene_precios(user):
+        return {"n_piezas": 0, "promedio": None, "mediana": None, "bins": [], "bajo_rango": 0, "sobre_rango": 0,
+                "top_clientes": [], "materiales": []}
     meses = max(0, min(meses, 600))
     conn = get_db()
     try:
         params: list = []
         filtro_fecha = ""
         if meses:
-            filtro_fecha = "AND ppr.fechaprecio >= date('now', ? || ' months')"
+            filtro_fecha = ("AND ppr.fechaprecio >= date('now', ? || ' months')"
+                             " AND pup.ultima_produccion >= date('now', ? || ' months')")
+            params.append(f"-{meses}")
             params.append(f"-{meses}")
 
-        rows = conn.execute(_CTE_PIEZAS_PESO + _CTE_PIEZAS_PRECIO + f"""
+        rows_todas = conn.execute(_CTE_PIEZAS_PESO + _CTE_PIEZAS_PRECIO + _CTE_PIEZAS_ULTIMA_PRODUCCION + f"""
             SELECT np.id AS pieza_id, np.nombrepieza,
+                   np."códcliente" AS codigo_cliente,
+                   COALESCE(c.nombrefantasía, c.nombrecliente) AS cliente_nombre,
+                   np."códdeagregados" AS codigo_material,
+                   COALESCE(tm.sobrenombrematerial, np."códdeagregados") AS material_nombre,
                    CASE WHEN ppr.es_por_kg THEN ppr.precio
                         ELSE ppr.precio / NULLIF(pz.peso_promedio, 0) END AS precio_kg
             FROM NombreDePiezas np
             JOIN piezas_precio ppr ON ppr.pieza_id = np.id
             LEFT JOIN piezas_peso pz ON pz.pieza_id = np.id
+            LEFT JOIN Clientes c    ON c."códigocliente" = np."códcliente"
+            LEFT JOIN TiposMaterial tm ON tm."códmaterial" = CAST(np."códdeagregados" AS TEXT)
+            LEFT JOIN piezas_ultima_produccion pup ON pup.pieza_id = np.id
             WHERE (ppr.es_por_kg OR pz.peso_promedio IS NOT NULL)
               {filtro_fecha}
         """, params).fetchall()
 
+        # Lista de materiales para el combo -- del catálogo completo (antes de
+        # aplicar el propio filtro), mismos códigos placeholder excluidos que
+        # dashboard_pendiente_fundir ("--"/"4"/variantes de "Ar" = sin material
+        # real cargado).
+        _EXCLUIR_MATERIAL = ("--", "-", "4", "Ar", "ar", "AR")
+        por_material_combo: dict = {}
+        for r in rows_todas:
+            cod = r["codigo_material"]
+            if cod is None or cod in _EXCLUIR_MATERIAL:
+                continue
+            g = por_material_combo.setdefault(cod, {"codigo": cod, "nombre": r["material_nombre"], "n_piezas": 0})
+            g["n_piezas"] += 1
+        materiales = sorted(por_material_combo.values(), key=lambda g: (g["nombre"] or "").lower())
+
+        rows = [r for r in rows_todas if r["codigo_material"] == material] if material else rows_todas
+
         valores = sorted(r["precio_kg"] for r in rows if r["precio_kg"] and r["precio_kg"] > 0)
         n = len(valores)
         if n < 5:
-            return {"n_piezas": n, "promedio": None, "mediana": None, "bins": [], "bajo_rango": 0, "sobre_rango": 0}
+            return {"n_piezas": n, "promedio": None, "mediana": None, "bins": [], "bajo_rango": 0, "sobre_rango": 0,
+                    "top_clientes": [], "materiales": materiales}
 
         promedio = round(sum(valores) / n, 2)
         mitad = n // 2
@@ -2086,6 +2407,29 @@ def dashboard_precio_kg_distribucion(meses: int = Query(12)):
         if sobre_rango > 0:
             bins.append({"tipo": "sobre", "desde": p99, "hasta": None, "cantidad": sobre_rango})
 
+        # Top 10 clientes -- por cantidad de piezas con precio propio en este
+        # mismo catálogo filtrado (mismo "meses" que el histograma), no por
+        # facturación real (este endpoint es 100% catálogo de tarifas, no
+        # tiene entregas). Cada uno trae su propio promedio de $/kg para poder
+        # marcarlo como una línea vertical más en el gráfico.
+        por_cliente: dict = {}
+        for r in rows:
+            v = r["precio_kg"]
+            if not v or v <= 0:
+                continue
+            cod = r["codigo_cliente"]
+            if cod is None:
+                continue
+            grupo = por_cliente.setdefault(cod, {"codigo": cod, "nombre": r["cliente_nombre"], "valores": []})
+            grupo["valores"].append(v)
+        top_clientes = sorted(por_cliente.values(), key=lambda g: len(g["valores"]), reverse=True)[:10]
+        top_clientes = [{
+            "codigo": g["codigo"],
+            "nombre": g["nombre"],
+            "n_piezas": len(g["valores"]),
+            "promedio_precio_kg": round(sum(g["valores"]) / len(g["valores"]), 2),
+        } for g in top_clientes]
+
         return {
             "n_piezas": n,
             "promedio": promedio,
@@ -2093,6 +2437,8 @@ def dashboard_precio_kg_distribucion(meses: int = Query(12)):
             "bins": bins,
             "bajo_rango": bajo_rango,
             "sobre_rango": sobre_rango,
+            "top_clientes": top_clientes,
+            "materiales": materiales,
         }
     finally:
         conn.close()
@@ -2103,36 +2449,60 @@ def dashboard_precio_kg_distribucion_detalle(
     desde: Optional[float] = Query(None),
     hasta: Optional[float] = Query(None),
     meses: int = Query(12),
+    material: Optional[str] = Query(None),
+    user: Optional[dict] = Depends(_get_auth_user_optional),
 ):
     """Piezas del catálogo cuyo $/kg cae en [desde, hasta] -- lista detrás de una
     barra del histograma de dashboard_precio_kg_distribucion. desde/hasta
     ausentes = sin piso/techo, para las barras "menor a"/"mayor a" de las
     puntas (bins tipo "bajo"/"sobre", ver ese endpoint). Mismo cálculo de
-    precio_kg y mismo filtro por fechaprecio que ese endpoint, para que la lista
-    siempre coincida exacto con la barra que el usuario tocó."""
+    precio_kg y mismo filtro por fechaprecio (y, si vino, por material) que ese
+    endpoint, para que la lista siempre coincida exacto con la barra que el
+    usuario tocó. Mismas columnas extra que .../cliente_detalle (kg, precio de
+    tarifa, es_por_kg, última vez que se actualizó el precio y última vez que
+    se produjo la pieza) más Cliente, que acá sí hace falta -- a diferencia
+    del drill-down de un cliente puntual, una barra mezcla piezas de todos."""
+    if not _tiene_precios(user):
+        return []
     meses = max(0, min(meses, 600))
     conn = get_db()
     try:
         params: list = []
         filtro_fecha = ""
         if meses:
-            filtro_fecha = "AND ppr.fechaprecio >= date('now', ? || ' months')"
+            # Exige precio actualizado Y pieza realmente producida en la misma
+            # ventana -- ver el docstring de dashboard_precio_kg_distribucion
+            # (Access actualiza precios en masa, así que fechaprecio solo no
+            # alcanza para filtrar piezas obsoletas).
+            filtro_fecha = ("AND ppr.fechaprecio >= date('now', ? || ' months')"
+                             " AND pup.ultima_produccion >= date('now', ? || ' months')")
             params.append(f"-{meses}")
+            params.append(f"-{meses}")
+        filtro_material = ""
+        if material:
+            filtro_material = 'AND np."códdeagregados" = ?'
+            params.append(material)
 
-        rows = conn.execute(_CTE_PIEZAS_PESO + _CTE_PIEZAS_PRECIO + f"""
+        rows = conn.execute(_CTE_PIEZAS_PESO + _CTE_PIEZAS_PRECIO + _CTE_PIEZAS_ULTIMA_PRODUCCION + f"""
             SELECT np.id AS pieza_id, np.nombrepieza,
                    np."códigopiezapuestoporcliente"        AS codigo_pieza,
                    np."códcliente"                          AS codigo_cliente,
                    COALESCE(c.nombrefantasía, c.nombrecliente) AS cliente_nombre,
+                   pz.peso_promedio                  AS peso_kg,
+                   ppr.precio                         AS precio_tarifa,
+                   ppr.es_por_kg,
                    CASE WHEN ppr.es_por_kg THEN ppr.precio
                         ELSE ppr.precio / NULLIF(pz.peso_promedio, 0) END AS precio_kg,
-                   ppr.fechaprecio
+                   ppr.fechaprecio,
+                   pup.ultima_produccion
             FROM NombreDePiezas np
             JOIN piezas_precio ppr ON ppr.pieza_id = np.id
             LEFT JOIN piezas_peso pz ON pz.pieza_id = np.id
             LEFT JOIN Clientes c    ON c."códigocliente" = np."códcliente"
+            LEFT JOIN piezas_ultima_produccion pup ON pup.pieza_id = np.id
             WHERE (ppr.es_por_kg OR pz.peso_promedio IS NOT NULL)
               {filtro_fecha}
+              {filtro_material}
         """, params).fetchall()
 
         # Mismos limites semiabiertos [desde, hasta) que arma
@@ -2154,6 +2524,212 @@ def dashboard_precio_kg_distribucion_detalle(
 
         result = [dict(r) for r in rows if _en_rango(r["precio_kg"])]
         result.sort(key=lambda r: r["precio_kg"])
+        return result
+    finally:
+        conn.close()
+
+
+@app.get("/api/dashboard/precio_kg_distribucion/cliente_detalle")
+def dashboard_precio_kg_distribucion_cliente_detalle(
+    codigo: str = Query(...),
+    meses: int = Query(12),
+    material: Optional[str] = Query(None),
+    user: Optional[dict] = Depends(_get_auth_user_optional),
+):
+    """Piezas con precio propio de UN cliente puntual (códcliente) -- drill-down
+    de una de las líneas verdes de "top clientes" en el histograma de
+    dashboard_precio_kg_distribucion. A diferencia de .../detalle (que lista
+    piezas de todos los clientes en un rango de $/kg), acá se trae además el
+    peso en kg y el precio de tarifa tal cual está cargado (precio_tarifa +
+    es_por_kg, para que el front pueda rotular esa columna "$/kg" o "$/pieza"
+    según corresponda) -- lo que el pedido original llama "kg de la pieza,
+    precio, precio por kg". material (opcional), igual que en el endpoint
+    principal: si el histograma está filtrado por material, la línea verde de
+    este cliente representa su promedio DENTRO de ese material, así que el
+    drill-down tiene que mostrar las mismas piezas y no todo su catálogo."""
+    if not _tiene_precios(user):
+        return []
+    meses = max(0, min(meses, 600))
+    conn = get_db()
+    try:
+        params: list = [codigo]
+        filtro_fecha = ""
+        if meses:
+            # Exige precio actualizado Y pieza realmente producida en la misma
+            # ventana -- ver el docstring de dashboard_precio_kg_distribucion.
+            filtro_fecha = ("AND ppr.fechaprecio >= date('now', ? || ' months')"
+                             " AND pup.ultima_produccion >= date('now', ? || ' months')")
+            params.append(f"-{meses}")
+            params.append(f"-{meses}")
+        filtro_material = ""
+        if material:
+            filtro_material = 'AND np."códdeagregados" = ?'
+            params.append(material)
+
+        rows = conn.execute(_CTE_PIEZAS_PESO + _CTE_PIEZAS_PRECIO + _CTE_PIEZAS_ULTIMA_PRODUCCION + f"""
+            SELECT np.id AS pieza_id, np.nombrepieza,
+                   np."códigopiezapuestoporcliente" AS codigo_pieza,
+                   pz.peso_promedio                  AS peso_kg,
+                   ppr.precio                         AS precio_tarifa,
+                   ppr.es_por_kg,
+                   CASE WHEN ppr.es_por_kg THEN ppr.precio
+                        ELSE ppr.precio / NULLIF(pz.peso_promedio, 0) END AS precio_kg,
+                   ppr.fechaprecio,
+                   pup.ultima_produccion
+            FROM NombreDePiezas np
+            JOIN piezas_precio ppr ON ppr.pieza_id = np.id
+            LEFT JOIN piezas_peso pz ON pz.pieza_id = np.id
+            LEFT JOIN piezas_ultima_produccion pup ON pup.pieza_id = np.id
+            WHERE np."códcliente" = ?
+              AND (ppr.es_por_kg OR pz.peso_promedio IS NOT NULL)
+              {filtro_fecha}
+              {filtro_material}
+        """, params).fetchall()
+
+        result = [dict(r) for r in rows if r["precio_kg"] and r["precio_kg"] > 0]
+        result.sort(key=lambda r: r["precio_kg"], reverse=True)
+        return result
+    finally:
+        conn.close()
+
+
+# IPC Nacional (INDEC, base dic-2016) vía la API pública de series de tiempo
+# de datos.gob.ar -- confirmado con el usuario: quiere ajustar por inflación
+# con un dato de una fuente oficial (mencionó BCRA/INDEC), no un % fijo
+# inventado a mano. Esta serie es la que corresponde a "inflación" en sentido
+# estricto (IPC), no el dólar -- son cosas relacionadas pero no lo mismo.
+_IPC_INDEC_URL = ("https://apis.datos.gob.ar/series/api/series/"
+                   "?ids=148.3_INIVELNAL_DICI_M_26&limit=1000&sort=asc&format=json")
+
+
+def _sync_ipc_indec(conn) -> None:
+    """Refresca _ipc_indec desde _IPC_INDEC_URL -- se llama on-demand desde
+    get_dashboard_ipc en vez de en un scheduler aparte: la serie es mensual,
+    así que alcanza con pedirla de nuevo cuando la ÚLTIMA VEZ QUE SE
+    SINCRONIZÓ (sincronizado_en, no la fecha del dato en sí -- el IPC de un
+    mes se publica varias semanas después de terminado ese mes, así que el
+    dato más reciente SIEMPRE tiene más de 20 días si se mide contra su
+    propia fecha, y eso resincronizaría en cada llamado) fue hace más de ~20
+    días. Si la red falla (sin internet en esta PC en ese momento, el
+    servicio caído, etc.) sigue sirviendo lo último que haya en caché sin
+    romper el checkbox de ajuste por inflación -- nunca lanza."""
+    ultimo = conn.execute("SELECT MAX(sincronizado_en) AS f FROM _ipc_indec").fetchone()
+    if ultimo and ultimo["f"]:
+        edad_dias = (datetime.now() - datetime.fromisoformat(ultimo["f"])).days
+        if edad_dias < 20:
+            return
+    try:
+        # datos.gob.ar devuelve 403 al User-Agent por defecto de urllib
+        # ("Python-urllib/x.y") -- alcanza con mandar uno propio.
+        req = urllib.request.Request(_IPC_INDEC_URL, headers={"User-Agent": "GNC-API/1.0 (Fundicion Jose Romero)"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError) as e:
+        log.warning("No se pudo sincronizar el IPC INDEC: %s", e)
+        return
+    ahora = datetime.now().isoformat()
+    filas = [(f, v, ahora) for f, v in (payload.get("data") or []) if f and v is not None]
+    if not filas:
+        return
+    conn.executemany(
+        "INSERT INTO _ipc_indec (fecha, indice, sincronizado_en) VALUES (?, ?, ?) "
+        "ON CONFLICT(fecha) DO UPDATE SET indice = excluded.indice, sincronizado_en = excluded.sincronizado_en",
+        filas,
+    )
+    conn.commit()
+    log.info("IPC INDEC sincronizado: %d meses", len(filas))
+
+
+@app.get("/api/dashboard/ipc")
+def dashboard_ipc():
+    """Serie mensual del IPC Nacional (INDEC) -- alimenta el checkbox
+    "Ajustar por inflación" del modo $ de Última actividad. Dato público
+    (índice macroeconómico de INDEC, no información de precios propios de la
+    empresa), no requiere el permiso 'precios'."""
+    conn = get_db()
+    try:
+        _sync_ipc_indec(conn)
+        rows = conn.execute("SELECT fecha, indice FROM _ipc_indec ORDER BY fecha").fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@app.get("/api/dashboard/ultima_actividad")
+def dashboard_ultima_actividad(user: Optional[dict] = Depends(_get_auth_user_optional)):
+    """Última vez que se coló algo para cada cliente y para cada modelo --
+    alimenta la línea de tiempo del Dashboard: un punto por cliente/modelo,
+    su fecha de última fundición en el eje X y (a elección del front) su
+    cantidad, kg o $ históricos totales en el eje Y, mismo patrón de "modo"
+    que ya usan pendiente_fundir/tendencia (piezas/kg/pesos). Sin filtro de
+    fecha -- acá lo importante es ver TODO el historial, filtrarlo taparía
+    justo lo que se busca.
+
+    Mismo criterio de "producido" que usa dashboard_precio_kg_distribucion
+    (MAX de FundiciónPorFecha.fecha entre los Trabajos correspondientes) pero
+    agregado un nivel más arriba: por cliente (vía Pedidos) y por modelo (vía
+    PiezasPorModelo, que puede vincular un modelo a varias piezas -- se suma
+    entre todas). Clientes/modelos sin ninguna colada registrada no aparecen
+    (no tienen fecha que mostrar en una línea de tiempo).
+
+    kg_total/pesos_total usan el mismo peso/precio efectivo por pieza que
+    dashboard_pendiente_fundir (peso de la variante exacta de la OT si existe,
+    si no el promedio de la pieza; precio de tarifa ACTUAL, no el vigente al
+    momento de cada colada -- Access no guarda ese historial, así que ningún
+    reporte de este archivo puede reconstruirlo). pesos_total se redacta sin
+    el permiso 'precios', igual que el resto de los campos "pesos_*"/"precio_*"."""
+    conn = get_db()
+    try:
+        totales_sql = """
+            SUM(COALESCE(t.cantidadproducida, 0)) AS cantidad_total,
+            SUM(COALESCE(t.cantidadproducida, 0) * COALESCE(
+                CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END, 0)) AS kg_total,
+            SUM(COALESCE(t.cantidadproducida, 0) * COALESCE(
+                CASE WHEN ppr.es_por_kg
+                     THEN ppr.precio * (CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END)
+                     ELSE ppr.precio END, 0)) AS pesos_total
+        """
+        clientes = conn.execute(_CTE_PIEZAS_PESO + _CTE_PIEZAS_PRECIO + f"""
+            SELECT p."códigocliente" AS codigo,
+                   COALESCE(c.nombrefantasía, c.nombrecliente) AS nombre,
+                   MAX(fpf.fecha) AS ultima_produccion,
+                   {totales_sql}
+            FROM Pedidos p
+            JOIN ItemDetallePedido idp    ON idp.idpedido = p.idpedido
+            JOIN Trabajos t               ON t.iditempedido = idp.iditempedido
+            JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf  ON fpf."códfundición" = t."códfundición"
+            JOIN Clientes c               ON c."códigocliente" = p."códigocliente"
+            LEFT JOIN NombreDePiezas np   ON np.id = idp.idpieza
+            LEFT JOIN PesosDePiezas pp    ON pp.códpieza = t.idpesopieza
+            LEFT JOIN piezas_peso pz      ON pz.pieza_id = np.id
+            LEFT JOIN piezas_precio ppr   ON ppr.pieza_id = np.id
+            WHERE fpf.fecha IS NOT NULL
+            GROUP BY p."códigocliente"
+        """).fetchall()
+
+        modelos = conn.execute(_CTE_PIEZAS_PESO + _CTE_PIEZAS_PRECIO + f"""
+            SELECT m.códigomodelo AS codigo, m.nombremodelo AS nombre,
+                   MAX(fpf.fecha) AS ultima_produccion,
+                   {totales_sql}
+            FROM Modelos m
+            JOIN PiezasPorModelo pm       ON pm.códmodelo = m.códigomodelo
+            JOIN ItemDetallePedido idp    ON idp.idpieza = pm.códpieza
+            JOIN Trabajos t               ON t.iditempedido = idp.iditempedido
+            JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf  ON fpf."códfundición" = t."códfundición"
+            LEFT JOIN NombreDePiezas np   ON np.id = idp.idpieza
+            LEFT JOIN PesosDePiezas pp    ON pp.códpieza = t.idpesopieza
+            LEFT JOIN piezas_peso pz      ON pz.pieza_id = np.id
+            LEFT JOIN piezas_precio ppr   ON ppr.pieza_id = np.id
+            WHERE fpf.fecha IS NOT NULL
+            GROUP BY m.códigomodelo
+        """).fetchall()
+
+        result = {
+            "clientes": [dict(r) for r in clientes],
+            "modelos": [dict(r) for r in modelos],
+        }
+        if not _tiene_precios(user):
+            _redactar_precios(result)
         return result
     finally:
         conn.close()
@@ -2308,31 +2884,79 @@ _PRECIO_EFECTIVO_PESOESTABLECIDO = """
          ELSE ppr.precio END
 """
 
+# Peso real de producción, igual a la query "Piezas" de Access (la que usan
+# TODOS sus reportes de indicadores) -- NO es NombreDePiezas.CoefCompl (eso
+# se descartó, confirmado que no lo usa ningún control del reporte). Es un
+# multiplicador aparte, embebido directo en el SQL de esa query, según el
+# sufijo del nombre de la pieza: "(AD)" x2, "(TR)" x3, si no x1. Validado
+# exacto contra Access: para enero 2026 esto cierra 4125,2 -> 4898,0 kg
+# (coincide al decimal con KgEntre del reporte). Requiere PesosDePiezas
+# (alias pp) y NombreDePiezas (alias np) ya unidos en el FROM.
+_PESO_EFECTIVO_ADTR = """
+    CASE WHEN np.nombrepieza LIKE '%(AD)' THEN pp.pesopieza * 2
+         WHEN np.nombrepieza LIKE '%(TR)' THEN pp.pesopieza * 3
+         ELSE pp.pesopieza END
+"""
 
-def _calc_tendencia_anual(conn: sqlite3.Connection, año_desde: int, año_hasta: int) -> list[dict]:
-    # Delivery trend via Pedidos.fechapedido (fechacargaot is NULL on ~85% of rows)
+
+def _calc_tendencia_anual(conn: sqlite3.Connection, año_desde: int, año_hasta: int,
+                           modo: str = "pedido") -> list[dict]:
+    # Delivery trend via Pedidos.fechapedido (fechacargaot is NULL on ~85% of rows).
+    # Sin "AND t.cantidadentregada > 0" -- ese filtro se usaba antes de que este
+    # query trajera producidas: entregada/rechazada no cambian (sumar filas en
+    # 0 no mueve un SUM), pero sacarlo es necesario para no perder producidas
+    # de OTs que todavía no entregaron nada (aprobadas en stock, o 100%
+    # rechazadas) -- confirmado con el usuario que "producida" tiene que ser
+    # el total real, no solo el de OTs que ya entregaron algo.
+    #
+    # modo "pedido" (default): agrupa por fecha del pedido -- vista comercial
+    # (cuándo se vendió/entregó). modo "colada": agrupa por fecha real de
+    # colada (FundiciónPorFecha.Fecha) -- mismo eje que usa el reporte
+    # Access rptIndicadoresHistoricos, para comparar contra planta en vez de
+    # contra ventas. Una OT pedida en diciembre y colada en marzo cae en
+    # años distintos según el modo -- confirmado con el usuario: las CANTIDADES
+    # totales tienen que coincidir entre los dos modos (mismo dataset, solo
+    # cambia el agrupamiento), y eso se verifica en _verificar_totales_tendencia.
+    fecha_col = "fpf.fecha" if modo == "colada" else "p.fechapedido"
+    join_colada = 'JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf.códfundición = t.códfundición\n        ' if modo == "colada" else ""
+    # kg_* usa el peso real de producción (PesosDePiezas.pesopieza con el
+    # multiplicador (AD)/(TR), ver _PESO_EFECTIVO_ADTR) -- mismo criterio
+    # validado contra Access, exacto al decimal, en kpis_dashboard/
+    # evolucion_mensual. NO np.pesoestablecido: ese campo está vacío o
+    # desactualizado para una fracción grande de piezas (confirmado: ~60% de
+    # las unidades entregadas de enero 2026 quedaban sin peso y por lo tanto
+    # sin sumar, subestimando el kg a la mitad). pesos_* (precio en $) sigue
+    # con pesoestablecido a propósito -- es un peso "de tarifario" para el
+    # precio, no el peso físico real de lo producido, son dos preguntas
+    # distintas que comparten fila.
     trend_rows = conn.execute(_CTE_PIEZAS_PESO + _CTE_PIEZAS_PRECIO + f"""
-        SELECT strftime('%Y', p.fechapedido) as año,
+        SELECT strftime('%Y', {fecha_col}) as año,
                COALESCE(SUM(t.cantidadentregada), 0) as entregadas,
                COALESCE(SUM(t.cantidadrechazada), 0) as rechazadas,
-               ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadentregada * np.pesoestablecido ELSE 0 END), 1) as kg_entregadas,
-               ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadrechazada * np.pesoestablecido ELSE 0 END), 1) as kg_rechazadas,
+               COALESCE(SUM(t.cantidadproducida), 0) as producidas,
+               ROUND(SUM(t.cantidadentregada * ({_PESO_EFECTIVO_ADTR})), 1) as kg_entregadas,
+               ROUND(SUM(t.cantidadrechazada * ({_PESO_EFECTIVO_ADTR}) * (CASE WHEN LOWER(sri.descripción)='cantidad mal anotada' THEN 0 ELSE 1 END)), 1) as kg_rechazadas,
+               ROUND(SUM(t.cantidadproducida * ({_PESO_EFECTIVO_ADTR})), 1) as kg_producidas,
                ROUND(SUM(t.cantidadentregada * ({_PRECIO_EFECTIVO_PESOESTABLECIDO})), 2) as pesos_entregadas,
-               ROUND(SUM(t.cantidadrechazada * ({_PRECIO_EFECTIVO_PESOESTABLECIDO})), 2) as pesos_rechazadas
+               ROUND(SUM(t.cantidadrechazada * ({_PRECIO_EFECTIVO_PESOESTABLECIDO})), 2) as pesos_rechazadas,
+               ROUND(SUM(t.cantidadproducida * ({_PRECIO_EFECTIVO_PESOESTABLECIDO})), 2) as pesos_producidas
         FROM Trabajos t
         JOIN ItemDetallePedido idp ON t.iditempedido = idp.iditempedido
         JOIN Pedidos p ON idp.idpedido = p.idpedido
-        LEFT JOIN NombreDePiezas np ON idp.idpieza = np.id
+        {join_colada}LEFT JOIN NombreDePiezas np ON idp.idpieza = np.id
+        LEFT JOIN PesosDePiezas pp ON pp.códpieza = t.idpesopieza
         LEFT JOIN piezas_precio ppr ON ppr.pieza_id = np.id
-        WHERE p.fechapedido >= ? AND p.fechapedido < ? AND t.cantidadentregada > 0
+        LEFT JOIN "SoluciónRechazoInterno" sri ON sri.iditemtrabajo = t.iditemtrabajo
+        WHERE {fecha_col} >= ? AND {fecha_col} < ?
         GROUP BY año ORDER BY año
     """, (f"{año_desde}-01-01", f"{año_hasta + 1}-01-01")).fetchall()
 
-    # Returns by year (with kg via PesosDePiezas → NombreDePiezas)
+    # Returns by year (kg vía PesosDePiezas directo -- ItemDevolución.códpieza
+    # ya apunta a un PesosDePiezas puntual, no hace falta pasar por np).
     dev_rows = conn.execute(_CTE_PIEZAS_PESO + _CTE_PIEZAS_PRECIO + f"""
         SELECT CAST(id.año AS TEXT) as año,
                COALESCE(SUM(id."cantidaddevolución"), 0) as devueltas,
-               ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN id."cantidaddevolución" * np.pesoestablecido ELSE 0 END), 1) as kg_devueltas,
+               ROUND(SUM(id."cantidaddevolución" * ({_PESO_EFECTIVO_ADTR})), 1) as kg_devueltas,
                ROUND(SUM(id."cantidaddevolución" * ({_PRECIO_EFECTIVO_PESOESTABLECIDO})), 2) as pesos_devueltas
         FROM "ItemDevolución" id
         JOIN PesosDePiezas pp ON id.códpieza = pp.códpieza
@@ -2352,43 +2976,106 @@ def _calc_tendencia_anual(conn: sqlite3.Connection, año_desde: int, año_hasta:
         kg_devueltas = dv.get("kg_devueltas", 0.0)
         pesos_entregadas = r["pesos_entregadas"] or 0.0
         pesos_devueltas = dv.get("pesos_devueltas", 0.0)
+        producidas = r["producidas"] or 0
+        kg_producidas = r["kg_producidas"] or 0.0
         tendencia.append({
             "año": r["año"],
             "entregadas": entregadas,
             "rechazadas": r["rechazadas"],
+            "producidas": producidas,
             "devueltas": devueltas,
             "neta": entregadas - devueltas,
             "kg_entregadas": kg_entregadas,
             "kg_rechazadas": r["kg_rechazadas"] or 0.0,
+            "kg_producidas": kg_producidas,
             "kg_devueltas":  kg_devueltas,
             "kg_neta": round(kg_entregadas - kg_devueltas, 1),
             "pesos_entregadas": pesos_entregadas,
             "pesos_rechazadas": r["pesos_rechazadas"] or 0.0,
+            "pesos_producidas": r["pesos_producidas"] or 0.0,
             "pesos_devueltas":  pesos_devueltas,
             "pesos_neta": round(pesos_entregadas - pesos_devueltas, 2),
+            # rechazadas/producidas -- misma cuenta que ya usa analytics_rechazos
+            # por pieza, acá agregada por año. producida = aprobada + rechazada
+            # (confirmado contra los datos reales: 94% de coincidencia exacta,
+            # mucho más consistente que entregada+rechazada, que solo coincide
+            # 86% porque entregada va atrasada respecto de lo ya aprobado).
+            "pct_rechazo": round(r["rechazadas"] / producidas * 100, 2) if producidas else 0,
+            "pct_rechazo_kg": round((r["kg_rechazadas"] or 0.0) / kg_producidas * 100, 2) if kg_producidas else 0,
         })
     return tendencia
 
 
-def _calc_tendencia_mensual(conn: sqlite3.Connection, año_desde: int, año_hasta: int) -> list[dict]:
+def _calc_tendencia_mensual(conn: sqlite3.Connection, año_desde: int, año_hasta: int,
+                             modo: str = "pedido") -> list[dict]:
+    # Sin "AND t.cantidadentregada > 0" -- mismo motivo que en _calc_tendencia_anual.
+    # modo "pedido"/"colada": ver comentario en _calc_tendencia_anual.
+    fecha_col = "fpf.fecha" if modo == "colada" else "p.fechapedido"
+    join_colada = 'JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf.códfundición = t.códfundición\n        ' if modo == "colada" else ""
     rows = conn.execute(_CTE_PIEZAS_PESO + _CTE_PIEZAS_PRECIO + f"""
-        SELECT strftime('%Y', p.fechapedido) AS año,
-               CAST(strftime('%m', p.fechapedido) AS INTEGER) AS mes,
+        SELECT strftime('%Y', {fecha_col}) AS año,
+               CAST(strftime('%m', {fecha_col}) AS INTEGER) AS mes,
                COALESCE(SUM(t.cantidadentregada), 0) AS entregadas,
                COALESCE(SUM(t.cantidadrechazada), 0) AS rechazadas,
-               ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadentregada * np.pesoestablecido ELSE 0 END), 1) AS kg_entregadas,
-               ROUND(SUM(CASE WHEN np.pesoestablecido > 0 THEN t.cantidadrechazada * np.pesoestablecido ELSE 0 END), 1) AS kg_rechazadas,
+               COALESCE(SUM(t.cantidadproducida), 0) AS producidas,
+               ROUND(SUM(t.cantidadentregada * ({_PESO_EFECTIVO_ADTR})), 1) AS kg_entregadas,
+               ROUND(SUM(t.cantidadrechazada * ({_PESO_EFECTIVO_ADTR}) * (CASE WHEN LOWER(sri.descripción)='cantidad mal anotada' THEN 0 ELSE 1 END)), 1) AS kg_rechazadas,
+               ROUND(SUM(t.cantidadproducida * ({_PESO_EFECTIVO_ADTR})), 1) AS kg_producidas,
                ROUND(SUM(t.cantidadentregada * ({_PRECIO_EFECTIVO_PESOESTABLECIDO})), 2) AS pesos_entregadas,
-               ROUND(SUM(t.cantidadrechazada * ({_PRECIO_EFECTIVO_PESOESTABLECIDO})), 2) AS pesos_rechazadas
+               ROUND(SUM(t.cantidadrechazada * ({_PRECIO_EFECTIVO_PESOESTABLECIDO})), 2) AS pesos_rechazadas,
+               ROUND(SUM(t.cantidadproducida * ({_PRECIO_EFECTIVO_PESOESTABLECIDO})), 2) AS pesos_producidas
         FROM Trabajos t
         JOIN ItemDetallePedido idp ON t.iditempedido = idp.iditempedido
         JOIN Pedidos p ON idp.idpedido = p.idpedido
-        LEFT JOIN NombreDePiezas np ON idp.idpieza = np.id
+        {join_colada}LEFT JOIN NombreDePiezas np ON idp.idpieza = np.id
+        LEFT JOIN PesosDePiezas pp ON pp.códpieza = t.idpesopieza
         LEFT JOIN piezas_precio ppr ON ppr.pieza_id = np.id
-        WHERE p.fechapedido >= ? AND p.fechapedido < ? AND t.cantidadentregada > 0
+        LEFT JOIN "SoluciónRechazoInterno" sri ON sri.iditemtrabajo = t.iditemtrabajo
+        WHERE {fecha_col} >= ? AND {fecha_col} < ?
         GROUP BY año, mes ORDER BY año, mes
     """, (f"{año_desde}-01-01", f"{año_hasta + 1}-01-01")).fetchall()
-    return [dict(r) for r in rows]
+
+    # Devueltas por mes: ItemDevolución solo guarda año+semana (sin fecha
+    # exacta) -- se trae por (año, semana) y se aproxima a mes con
+    # _week_to_month (confirmado con el usuario: preferible aproximar antes
+    # que dejar el mensual sin Devueltas/Neta, aunque el resultado sea una
+    # estimación y no un dato exacto como el resto de esta tabla).
+    dev_rows = conn.execute(_CTE_PIEZAS_PESO + _CTE_PIEZAS_PRECIO + f"""
+        SELECT id.año, id.semana,
+               COALESCE(SUM(id."cantidaddevolución"), 0) as devueltas,
+               ROUND(SUM(id."cantidaddevolución" * ({_PESO_EFECTIVO_ADTR})), 1) as kg_devueltas,
+               ROUND(SUM(id."cantidaddevolución" * ({_PRECIO_EFECTIVO_PESOESTABLECIDO})), 2) as pesos_devueltas
+        FROM "ItemDevolución" id
+        JOIN PesosDePiezas pp ON id.códpieza = pp.códpieza
+        JOIN NombreDePiezas np ON pp.nombredepiezasid_ = np.id
+        LEFT JOIN piezas_precio ppr ON ppr.pieza_id = np.id
+        WHERE id.año >= ? AND id.año <= ?
+        GROUP BY id.año, id.semana
+    """, (año_desde, año_hasta)).fetchall()
+    dev_map: dict[str, dict] = {}
+    for dv in dev_rows:
+        try:
+            ym = _week_to_month(int(dv["año"]), int(dv["semana"]))
+        except Exception:
+            continue
+        acc = dev_map.setdefault(ym, {"devueltas": 0, "kg_devueltas": 0.0, "pesos_devueltas": 0.0})
+        acc["devueltas"] += dv["devueltas"]
+        acc["kg_devueltas"] += dv["kg_devueltas"] or 0.0
+        acc["pesos_devueltas"] += dv["pesos_devueltas"] or 0.0
+
+    resultado = []
+    for r in rows:
+        d = dict(r)
+        ym = f'{d["año"]}-{d["mes"]:02d}'
+        dv = dev_map.get(ym, {"devueltas": 0, "kg_devueltas": 0.0, "pesos_devueltas": 0.0})
+        d["devueltas"] = dv["devueltas"]
+        d["kg_devueltas"] = dv["kg_devueltas"]
+        d["pesos_devueltas"] = dv["pesos_devueltas"]
+        d["neta"] = d["entregadas"] - dv["devueltas"]
+        d["kg_neta"] = round((d["kg_entregadas"] or 0.0) - dv["kg_devueltas"], 1)
+        d["pesos_neta"] = round((d["pesos_entregadas"] or 0.0) - dv["pesos_devueltas"], 2)
+        resultado.append(d)
+    return resultado
 
 
 def _año_range_defaults(desde: Optional[int], hasta: Optional[int]) -> tuple[int, int]:
@@ -2400,13 +3087,35 @@ def _año_range_defaults(desde: Optional[int], hasta: Optional[int]) -> tuple[in
     return desde, hasta
 
 
+def _mes_range_defaults(desde: Optional[str], hasta: Optional[str]) -> tuple[str, str]:
+    """Rango "YYYY-MM" -- desde/hasta llegan de un <input type=month>. Default:
+    últimos 24 meses hasta el mes actual, mismo default que tenía el combo
+    "meses" que reemplaza."""
+    mes_actual = datetime.now().strftime("%Y-%m")
+    hasta = hasta if hasta else mes_actual
+    if desde:
+        desde_final = desde
+    else:
+        y, m = (int(x) for x in hasta.split("-"))
+        m -= 23
+        while m <= 0:
+            m += 12
+            y -= 1
+        desde_final = f"{y:04d}-{m:02d}"
+    if desde_final > hasta:
+        desde_final, hasta = hasta, desde_final
+    return desde_final, hasta
+
+
 @app.get("/api/analytics/overview")
-def analytics_overview(desde: Optional[int] = Query(None), hasta: Optional[int] = Query(None)):
+def analytics_overview(desde: Optional[int] = Query(None), hasta: Optional[int] = Query(None),
+                        fecha_modo: str = Query("pedido", pattern="^(pedido|colada)$"),
+                        user: Optional[dict] = Depends(_get_auth_user_optional)):
     conn = get_db()
     try:
         año_actual = datetime.now().year
         rango_desde, rango_hasta = _año_range_defaults(desde, hasta)
-        tendencia = _calc_tendencia_anual(conn, rango_desde, rango_hasta)
+        tendencia = _calc_tendencia_anual(conn, rango_desde, rango_hasta, fecha_modo)
 
         # KPIs del año en curso: independientes del rango elegido para el gráfico de tendencia
         año_ent = año_dev = 0
@@ -2433,7 +3142,7 @@ def analytics_overview(desde: Optional[int] = Query(None), hasta: Optional[int] 
         n_tablas = len(list_user_tables(conn))
         tasa = round(año_dev / año_ent * 100, 2) if año_ent else 0
 
-        return {
+        resultado = {
             "año_actual": año_actual,
             "entregadas_año": año_ent,
             "devueltas_año": año_dev,
@@ -2441,19 +3150,28 @@ def analytics_overview(desde: Optional[int] = Query(None), hasta: Optional[int] 
             "tendencia": tendencia,
             "tendencia_desde": rango_desde,
             "tendencia_hasta": rango_hasta,
+            "tendencia_modo": fecha_modo,
             "top_clientes": [dict(r) for r in top],
             "n_tablas": n_tablas,
         }
+        if not _tiene_precios(user):
+            _redactar_precios(resultado)
+        return resultado
     finally:
         conn.close()
 
 
 @app.get("/api/analytics/tendencia_mensual")
-def analytics_tendencia_mensual(desde: Optional[int] = Query(None), hasta: Optional[int] = Query(None)):
+def analytics_tendencia_mensual(desde: Optional[int] = Query(None), hasta: Optional[int] = Query(None),
+                                 fecha_modo: str = Query("pedido", pattern="^(pedido|colada)$"),
+                                 user: Optional[dict] = Depends(_get_auth_user_optional)):
     conn = get_db()
     try:
         rango_desde, rango_hasta = _año_range_defaults(desde, hasta)
-        return _calc_tendencia_mensual(conn, rango_desde, rango_hasta)
+        resultado = _calc_tendencia_mensual(conn, rango_desde, rango_hasta, fecha_modo)
+        if not _tiene_precios(user):
+            _redactar_precios(resultado)
+        return resultado
     finally:
         conn.close()
 
@@ -2482,12 +3200,19 @@ _MESES_ES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
 @app.get("/api/analytics/tendencia/export")
 def analytics_tendencia_export(
     modo: str = Query("anual", pattern="^(anual|mensual)$"),
+    fecha_modo: str = Query("pedido", pattern="^(pedido|colada)$"),
     desde: Optional[int] = Query(None),
     hasta: Optional[int] = Query(None),
+    user: Optional[dict] = Depends(_get_auth_user_optional),
 ):
     from openpyxl import Workbook
     from openpyxl.styles import Font
     import io
+
+    # A diferencia de _redactar_precios (que pisa campos de un dict/JSON), acá
+    # el $ son columnas enteras de la planilla -- sin el permiso 'precios' se
+    # arman directamente sin esas columnas, en vez de exportarlas vacías.
+    con_precios = _tiene_precios(user)
 
     conn = get_db()
     try:
@@ -2498,28 +3223,39 @@ def analytics_tendencia_export(
 
         if modo == "mensual":
             ws.title = "Tendencia mensual"
-            ws.append(["Año", "Mes", "Entregadas", "Rechazadas", "Kg entregadas", "Kg rechazadas",
-                       "$ entregadas (precio vigente)", "$ rechazadas (precio vigente)"])
-            for r in _calc_tendencia_mensual(conn, rango_desde, rango_hasta):
-                ws.append([
+            header = ["Año", "Mes", "Producidas", "Entregadas", "Rechazadas", "Devueltas (aprox.)", "Entregadas - Devueltas",
+                      "Kg producidas", "Kg entregadas", "Kg rechazadas", "Kg devueltas (aprox.)", "Kg entregadas - Kg devueltas"]
+            if con_precios:
+                header += ["$ producidas (precio vigente)", "$ entregadas (precio vigente)", "$ rechazadas (precio vigente)",
+                           "$ devueltas (aprox., precio vigente)", "$ entregadas - $ devueltas (precio vigente)"]
+            ws.append(header)
+            for r in _calc_tendencia_mensual(conn, rango_desde, rango_hasta, fecha_modo):
+                fila = [
                     int(r["año"]), _MESES_ES[r["mes"] - 1],
-                    r["entregadas"], r["rechazadas"],
-                    r["kg_entregadas"] or 0.0, r["kg_rechazadas"] or 0.0,
-                    r["pesos_entregadas"] or 0.0, r["pesos_rechazadas"] or 0.0,
-                ])
+                    r["producidas"], r["entregadas"], r["rechazadas"], r["devueltas"], r["neta"],
+                    r["kg_producidas"] or 0.0, r["kg_entregadas"] or 0.0, r["kg_rechazadas"] or 0.0, r["kg_devueltas"] or 0.0, r["kg_neta"] or 0.0,
+                ]
+                if con_precios:
+                    fila += [r["pesos_producidas"] or 0.0, r["pesos_entregadas"] or 0.0, r["pesos_rechazadas"] or 0.0,
+                             r["pesos_devueltas"] or 0.0, r["pesos_neta"] or 0.0]
+                ws.append(fila)
             filename = f"tendencia_mensual_{rango_txt}.xlsx"
         else:
             ws.title = "Tendencia anual"
-            ws.append(["Año", "Entregadas", "Rechazadas", "Devueltas", "Entregadas - Devueltas",
-                       "Kg entregadas", "Kg rechazadas", "Kg devueltas", "Kg entregadas - Kg devueltas",
-                       "$ entregadas (precio vigente)", "$ rechazadas (precio vigente)",
-                       "$ devueltas (precio vigente)", "$ entregadas - $ devueltas (precio vigente)"])
-            for r in _calc_tendencia_anual(conn, rango_desde, rango_hasta):
-                ws.append([
-                    int(r["año"]), r["entregadas"], r["rechazadas"], r["devueltas"], r["neta"],
-                    r["kg_entregadas"], r["kg_rechazadas"], r["kg_devueltas"], r["kg_neta"],
-                    r["pesos_entregadas"], r["pesos_rechazadas"], r["pesos_devueltas"], r["pesos_neta"],
-                ])
+            header = ["Año", "Producidas", "Entregadas", "Rechazadas", "% Rechazo", "Devueltas", "Entregadas - Devueltas",
+                      "Kg producidas", "Kg entregadas", "Kg rechazadas", "Kg devueltas", "Kg entregadas - Kg devueltas"]
+            if con_precios:
+                header += ["$ producidas (precio vigente)", "$ entregadas (precio vigente)", "$ rechazadas (precio vigente)",
+                           "$ devueltas (precio vigente)", "$ entregadas - $ devueltas (precio vigente)"]
+            ws.append(header)
+            for r in _calc_tendencia_anual(conn, rango_desde, rango_hasta, fecha_modo):
+                fila = [
+                    int(r["año"]), r["producidas"], r["entregadas"], r["rechazadas"], r["pct_rechazo"], r["devueltas"], r["neta"],
+                    r["kg_producidas"], r["kg_entregadas"], r["kg_rechazadas"], r["kg_devueltas"], r["kg_neta"],
+                ]
+                if con_precios:
+                    fila += [r["pesos_producidas"], r["pesos_entregadas"], r["pesos_rechazadas"], r["pesos_devueltas"], r["pesos_neta"]]
+                ws.append(fila)
             filename = f"tendencia_anual_{rango_txt}.xlsx"
 
         for cell in ws[1]:
@@ -2734,7 +3470,7 @@ def analytics_rechazos_moldeador(anio_desde: int = Query(default=2024)):
                    SUM(t.cantidadreparada)  as reparadas,
                    SUM(t.cantidadproducida) as producidas
             FROM Trabajos t
-            JOIN "FundiciónPorFecha" fpf ON fpf.códfundición = t.códfundición
+            JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf.códfundición = t.códfundición
             JOIN Responsables r ON r.códigoresponsable = t.códigoresponsable1
             WHERE fpf.fecha >= ?
               AND t.códfundición IS NOT NULL
@@ -3173,7 +3909,6 @@ def analytics_tendencia_piezas(ids: List[int] = Query(default=[])):
 
 @app.get("/api/analytics/evolucion_mensual")
 def analytics_evolucion_mensual(meses: int = Query(default=24, ge=3, le=60)):
-    import datetime as _dt
     conn = get_db()
     try:
         # Count-based monthly aggregation — grouped by production date (FundiciónPorFecha)
@@ -3185,7 +3920,7 @@ def analytics_evolucion_mensual(meses: int = Query(default=24, ge=3, le=60)):
                    COALESCE(SUM(t.cantidadaprobada),  0)  as aprobadas,
                    COALESCE(SUM(t.cantidadentregada), 0)  as entregadas
             FROM Trabajos t
-            JOIN "FundiciónPorFecha" fpf ON fpf.códfundición = t.códfundición
+            JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf.códfundición = t.códfundición
             WHERE fpf.fecha IS NOT NULL
               AND t.códfundición IS NOT NULL
               AND strftime('%Y-%m', fpf.fecha) <= strftime('%Y-%m', 'now')
@@ -3194,13 +3929,22 @@ def analytics_evolucion_mensual(meses: int = Query(default=24, ge=3, le=60)):
             LIMIT ?
         """, (meses,)).fetchall()
 
-        # Kg-based monthly aggregation — dos formulas, difieren solo por coefcompl (NO por
-        # AD/TR: ese sufijo es de facturación -- divide el peso en la factura para zafar de
-        # la factura en blanco, no indica mas metal fisico -- se saco de aca, ver commit que
-        # lo agrega):
-        #   metal: peso histórico OT × coefcompl → para KPIs de insumo/rendimiento metalúrgico
-        #   pieza: ÚltimoDePesoPieza (peso vigente actual, igual que Excel Power Query)
-        kg_rows = conn.execute("""
+        # Kg-based monthly aggregation — alineado con /api/analytics/kpis_dashboard
+        # (validado contra el reporte Access rptIndicadoresHistoricos):
+        #   sin coefcompl (Access no lo usa en ningún lado de este reporte),
+        #   kg_rechazados excluye "cantidad mal anotada" (errores de carga),
+        #   peso con el multiplicador (AD)/(TR) de _PESO_EFECTIVO_ADTR.
+        #   pieza: ÚltimoDePesoPieza (peso vigente actual) en vez del peso que
+        #   tenía la OT -- se mantiene como vista alternativa (coincide con
+        #   Excel Power Query), no es la que usa Access -- pero el multiplicador
+        #   (AD)/(TR) igual aplica (es del nombre de la pieza, no de qué fila
+        #   de PesosDePiezas se usó).
+        _peso_pieza_adtr = """
+            CASE WHEN np.nombrepieza LIKE '%(AD)' THEN COALESCE(ppv.pesopieza, pp.pesopieza) * 2
+                 WHEN np.nombrepieza LIKE '%(TR)' THEN COALESCE(ppv.pesopieza, pp.pesopieza) * 3
+                 ELSE COALESCE(ppv.pesopieza, pp.pesopieza) END
+        """
+        kg_rows = conn.execute(f"""
             WITH peso_vigente AS (
                 SELECT nombredepiezasid_,
                        MAX(códpieza) AS max_cod
@@ -3209,20 +3953,21 @@ def analytics_evolucion_mensual(meses: int = Query(default=24, ge=3, le=60)):
                 GROUP BY nombredepiezasid_
             )
             SELECT strftime('%Y-%m', fpf.fecha) as mes,
-                   ROUND(SUM(t.cantidadaprobada  * pp.pesopieza * COALESCE(np.coefcompl, 1)), 2) as kg_aprobados,
-                   ROUND(SUM(t.cantidadrechazada * pp.pesopieza * COALESCE(np.coefcompl, 1)), 2) as kg_rechazados,
-                   ROUND(SUM(t.cantidadreparada  * pp.pesopieza * COALESCE(np.coefcompl, 1)), 2) as kg_reparados,
-                   ROUND(SUM(t.cantidadproducida * pp.pesopieza * COALESCE(np.coefcompl, 1)), 2) as kg_producidos,
-                   ROUND(SUM(t.cantidadaprobada  * COALESCE(ppv.pesopieza, pp.pesopieza)), 2) as kg_aprobados_pieza,
-                   ROUND(SUM(t.cantidadrechazada * COALESCE(ppv.pesopieza, pp.pesopieza)), 2) as kg_rechazados_pieza,
-                   ROUND(SUM(t.cantidadreparada  * COALESCE(ppv.pesopieza, pp.pesopieza)), 2) as kg_reparados_pieza,
-                   ROUND(SUM(t.cantidadproducida * COALESCE(ppv.pesopieza, pp.pesopieza)), 2) as kg_producidos_pieza
+                   ROUND(SUM(t.cantidadaprobada  * ({_PESO_EFECTIVO_ADTR})), 2) as kg_aprobados,
+                   ROUND(SUM(t.cantidadrechazada * ({_PESO_EFECTIVO_ADTR}) * (CASE WHEN LOWER(sri.descripción)='cantidad mal anotada' THEN 0 ELSE 1 END)), 2) as kg_rechazados,
+                   ROUND(SUM(t.cantidadreparada  * ({_PESO_EFECTIVO_ADTR})), 2) as kg_reparados,
+                   ROUND(SUM(t.cantidadproducida * ({_PESO_EFECTIVO_ADTR})), 2) as kg_producidos,
+                   ROUND(SUM(t.cantidadaprobada  * ({_peso_pieza_adtr})), 2) as kg_aprobados_pieza,
+                   ROUND(SUM(t.cantidadrechazada * ({_peso_pieza_adtr}) * (CASE WHEN LOWER(sri.descripción)='cantidad mal anotada' THEN 0 ELSE 1 END)), 2) as kg_rechazados_pieza,
+                   ROUND(SUM(t.cantidadreparada  * ({_peso_pieza_adtr})), 2) as kg_reparados_pieza,
+                   ROUND(SUM(t.cantidadproducida * ({_peso_pieza_adtr})), 2) as kg_producidos_pieza
             FROM Trabajos t
-            JOIN "FundiciónPorFecha" fpf ON fpf.códfundición = t.códfundición
+            JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf.códfundición = t.códfundición
             JOIN PesosDePiezas pp  ON pp.códpieza = t.idpesopieza
             JOIN NombreDePiezas np ON np.id = pp.nombredepiezasid_
             LEFT JOIN peso_vigente pv  ON pv.nombredepiezasid_ = np.id
             LEFT JOIN PesosDePiezas ppv ON ppv.códpieza = pv.max_cod
+            LEFT JOIN "SoluciónRechazoInterno" sri ON sri.iditemtrabajo = t.iditemtrabajo
             WHERE fpf.fecha IS NOT NULL
               AND t.códfundición IS NOT NULL
               AND t.idpesopieza IS NOT NULL
@@ -3232,14 +3977,14 @@ def analytics_evolucion_mensual(meses: int = Query(default=24, ge=3, le=60)):
             LIMIT ?
         """, (meses,)).fetchall()
 
-        # Moldeo-sector hours only (CódSector < 2 OR = 6), matching Access productivity calc
+        # Todo el personal activo del mes (sin filtro de sector) -- confirmado
+        # contra Access: DSum("[HorasTrabajadas]","HorasPorFecha","[Fecha]=...")
+        # no filtra por sector, suma todas las horas cargadas ese día.
         hs_rows = conn.execute("""
             SELECT strftime('%Y-%m', hf.fecha) as mes,
                    SUM(hf.horastrabajadas) as hs_trabajadas
             FROM HorasPorFecha hf
-            JOIN Responsables r ON r.códigoresponsable = hf.códigoresponsable
             WHERE hf.fecha IS NOT NULL
-              AND (r.códsector < 2 OR r.códsector = 6)
               AND strftime('%Y-%m', hf.fecha) <= strftime('%Y-%m', 'now')
             GROUP BY mes
         """).fetchall()
@@ -3256,12 +4001,6 @@ def analytics_evolucion_mensual(meses: int = Query(default=24, ge=3, le=60)):
             LEFT JOIN NombreDePiezas np ON np.id = pp.nombredepiezasid_
             GROUP BY id.año, id.semana
         """).fetchall()
-
-        def _week_to_month(year: int, week: int) -> str:
-            jan4 = _dt.date(year, 1, 4)
-            week1_mon = jan4 - _dt.timedelta(days=jan4.weekday())
-            target = week1_mon + _dt.timedelta(weeks=week - 1)
-            return target.strftime("%Y-%m")
 
         dev_map: dict = {}
         for dv in dev_raw:
@@ -3309,30 +4048,368 @@ def analytics_evolucion_mensual(meses: int = Query(default=24, ge=3, le=60)):
                 "pct_scrap":      round(rech / prod * 100, 2) if prod else 0,
                 "pct_reparacion": round(rep  / apro * 100, 2) if apro else 0,
                 "pct_devolucion": round(devueltas / ent * 100, 2) if ent else 0,
-                # metal = peso × coefcompl
+                # peso que tenía la OT (igual que kpi_productividad/kpi_rechazo de kpis_dashboard)
                 "kg_aprobados":   kg_a,
                 "kg_rechazados":  kg_r,
                 "kg_reparados":   kg_rp,
                 "kg_producidos":  kg_p,
                 "kg_devueltos":   kg_devueltos if (kg_a is not None) else None,
-                "pct_scrap_kg":   round(kg_r  / kg_p * 100, 2) if (kg_p and kg_p > 0) else None,
+                "pct_scrap_kg":   round(kg_r  / (kg_a + kg_r) * 100, 2) if (kg_a is not None and kg_r is not None and (kg_a + kg_r) > 0) else None,
                 "pct_rep_kg":     round(kg_rp / kg_a * 100, 2) if (kg_a and kg_a > 0) else None,
                 "pct_devol_kg":   round(kg_devueltos / kg_a * 100, 2) if (kg_a and kg_a > 0) else None,
                 "productividad":  round(kg_a / hs, 2) if (kg_a and hs and hs > 0) else None,
                 "scrap_hs":       round(kg_r  / hs, 2) if (kg_r  is not None and hs and hs > 0) else None,
                 "devol_hs":       round(kg_devueltos / hs, 2) if (kg_devueltos is not None and hs and hs > 0) else None,
-                # pieza = peso solo (sin coef) → peso físico de la pieza terminada, coincide con Excel
+                # pieza = ÚltimoDePesoPieza (peso vigente) en vez del peso que tenía la OT -- coincide con Excel
                 "kg_aprobados_pieza":   kg_a_pz,
                 "kg_rechazados_pieza":  kg_r_pz,
                 "kg_reparados_pieza":   kg_rp_pz,
                 "kg_producidos_pieza":  kg_p_pz,
                 "kg_devueltos_pieza":   kg_devueltos if (kg_a_pz is not None) else None,
-                "pct_scrap_kg_pieza":   round(kg_r_pz / kg_p_pz * 100, 2) if (kg_p_pz and kg_p_pz > 0) else None,
+                "pct_scrap_kg_pieza":   round(kg_r_pz / (kg_a_pz + kg_r_pz) * 100, 2) if (kg_a_pz is not None and kg_r_pz is not None and (kg_a_pz + kg_r_pz) > 0) else None,
                 "pct_rep_kg_pieza":     round(kg_rp_pz / kg_a_pz * 100, 2) if (kg_a_pz and kg_a_pz > 0) else None,
                 "productividad_pieza":  round(kg_a_pz / hs, 2) if (kg_a_pz and hs and hs > 0) else None,
             })
 
         return {"meses": meses_data}
+    finally:
+        conn.close()
+
+
+_PUNTAJE_ENTREGA_CASE = """
+    CASE
+      WHEN diferencia <= -10.5 THEN 6
+      WHEN diferencia <= 1     THEN 10
+      WHEN diferencia <= 2     THEN 9.5
+      WHEN diferencia <= 3     THEN 9
+      WHEN diferencia <= 4     THEN 8.5
+      WHEN diferencia <= 5     THEN 8
+      WHEN diferencia <= 6     THEN 7.5
+      WHEN diferencia <= 7     THEN 7
+      WHEN diferencia <= 10.5  THEN 6
+      WHEN diferencia <= 14    THEN 5
+      WHEN diferencia <= 17.5  THEN 4
+      WHEN diferencia <= 21    THEN 3
+      WHEN diferencia <= 24.5  THEN 2
+      WHEN diferencia <= 28    THEN 1
+      ELSE 0
+    END
+"""
+
+# Copia literal de las 13 filas del "Tablero de Comando" ISO 9001 de la empresa
+# (Downloads\\Tablero de Comando_2024_2026.xlsx, hoja "2026", filas 8-20) -- proceso,
+# política de la calidad, frecuencia, planificación y responsable son objetivos y texto
+# de negocio fijados a mano por la empresa, no algo que se derive de los datos. Mismo
+# orden que el Excel; "proceso" solo va en la primera fila de cada grupo en el Excel
+# (se repite acá para que cada fila sea autocontenida). direccion ">=" = cumple si es
+# mayor o igual a la meta (mejor cuanto más alto); "<=" = cumple si es menor o igual
+# (mejor cuanto más bajo). El semáforo de la tarjeta usa la misma banda del Excel: verde
+# si cumple la meta, amarillo si está a menos de 10% de la meta, rojo si está a más de 10%.
+# clave=None → todavía no implementado (sin tabla de origen en Access, carga manual en
+# el Excel: encuestas, capacitación, auditorías, herramental) -- la tarjeta lo muestra
+# igual, con los datos de referencia, pero sin valores.
+_KPI_INFO = [
+    {"n": 1, "clave": None, "proceso": "Satisfacción del cliente", "nombre": "Nivel de Satisfacción",
+     "formula": 'Cantidad de respuestas "SI" a la pregunta "¿recomendaría nuestros productos?" / total de respuestas × 100',
+     "unidad": "%", "direccion": ">=", "meta": 90.0, "frecuencia": "Anual",
+     "politica_calidad": "Cumplir con los requisitos del cliente y de otros requisitos aplicables. Entender las necesidades y expectativas actuales y futuras de los clientes. Mantener relaciones mutuamente beneficiosas con los clientes, proveedores y otras partes interesadas.",
+     "planificacion": "Satisfacer los requerimientos y expectativas de los clientes. Mantener una atención personalizada que nos permita comprender los objetivos del cliente e incorporarlos como propios.",
+     "responsable": "Leandro Romero"},
+    {"n": 2, "clave": None, "proceso": "Satisfacción del cliente", "nombre": "Nivel de Satisfacción (negativa)",
+     "formula": "Cantidad de respuestas entre 1 y 2 / total de respuestas × 100",
+     "unidad": "%", "direccion": "<=", "meta": 5.0, "frecuencia": "Anual",
+     "politica_calidad": None, "planificacion": None, "responsable": None},
+    {"n": 3, "clave": "devolucion", "proceso": "Satisfacción del cliente", "nombre": "Devoluciones",
+     "formula": "Suma de KG devueltos / KG aprobados × 100",
+     "unidad": "%", "direccion": "<=", "meta": 2.0, "frecuencia": "Mensual",
+     "politica_calidad": "Buscar constantemente la manera de mejorar la eficacia de nuestros procesos. Asegurarse de que la información necesaria esté disponible para operar, controlar y mejorar los procesos.",
+     "planificacion": "Estar atentos a cambios que puedan surgir a los requisitos de clientes para evitar devoluciones por nuevos requisitos no acordados.",
+     "responsable": "Leandro Romero / Damián Romero"},
+    {"n": 4, "clave": "entregas_termino", "proceso": "Producción / Laboratorio", "nombre": "Entregas en término",
+     "formula": "Puntaje 0-10 ponderado por cantidad, según diferencia entre fecha de carga de OT y fecha prevista (función PuntajeEntrega de Access)",
+     "unidad": "Uni.", "direccion": ">=", "meta": 4.0, "frecuencia": "Mensual",
+     "politica_calidad": None, "planificacion": None, "responsable": None},
+    {"n": 5, "clave": "reclamos_principales", "proceso": "Producción / Laboratorio", "nombre": "Reclamos de clientes principales",
+     "formula": "Cantidad de reclamos de clientes principales / Cantidad de clientes principales",
+     "unidad": "Uni.", "direccion": "<=", "meta": 0.2, "frecuencia": "Mensual",
+     "politica_calidad": None, "planificacion": None, "responsable": None},
+    {"n": 6, "clave": None, "proceso": "Producción / Laboratorio", "nombre": "Percepción de la calidad de los productos",
+     "formula": 'Cantidad de respuestas entre 4 y 5 en el ítem "calidad de las piezas" de la encuesta / total de respuestas × 100',
+     "unidad": "%", "direccion": ">=", "meta": 90.0, "frecuencia": "Anual",
+     "politica_calidad": None,
+     "planificacion": "Establecer estándares de calidad elevados superando los definidos por nuestros clientes.",
+     "responsable": None},
+    {"n": 7, "clave": None, "proceso": "Producción / Laboratorio", "nombre": "Reclamos por pérdidas o daño de herramental",
+     "formula": "Cantidad de reclamos recibidos por herramental",
+     "unidad": "Uni.", "direccion": "<=", "meta": 0.0, "frecuencia": "Anual (seguimiento mensual)",
+     "politica_calidad": None,
+     "planificacion": "Cuidar adecuadamente la propiedad del cliente mientras está bajo nuestra responsabilidad.",
+     "responsable": None},
+    {"n": 8, "clave": None, "proceso": "RRHH", "nombre": "Horas de capacitación",
+     "formula": "Total de horas de capacitación / cantidad de personal de nómina",
+     "unidad": "Uni.", "direccion": ">=", "meta": 1.0, "frecuencia": "Anual (acumulativo)",
+     "politica_calidad": "Fomentar el compromiso con la calidad en toda la organización. Facilitar el diálogo abierto y que se compartan los conocimientos y experiencia. Valorar al personal, considerándolo uno de nuestros principales recursos, colaborando con su formación.",
+     "planificacion": "Valorar al personal, considerándolo uno de nuestros principales recursos, colaborando en el incremento de sus competencias. Cumplir con el plan de capacitación.",
+     "responsable": "Andrea Romero"},
+    {"n": 9, "clave": "productividad", "proceso": "Producción", "nombre": "Productividad / Scrap",
+     "formula": "Suma de KG aprobados / Horas trabajadas",
+     "unidad": "kg/h", "direccion": ">=", "meta": 7.0, "frecuencia": "Mensual",
+     "politica_calidad": "Buscar constantemente la manera de mejorar la eficacia de nuestros procesos. Asegurarse de que la información necesaria esté disponible para operar, controlar y mejorar los procesos.",
+     "planificacion": "Respecto a la productividad seguir en la búsqueda de nuevos clientes para incrementar los kilos fabricados buscando siempre cumplimiento de requisitos, se sigue con la política de mantener el personal. Trabajar para sumar eficiencia en el trabajo, evitando generar scrap. Buscar constantemente la manera de mejorar todos nuestros productos, enfocando las tareas hacia la prevención.",
+     "responsable": "Leandro Romero"},
+    {"n": 10, "clave": "rechazo", "proceso": "Producción", "nombre": "Relación de Rechazo",
+     "formula": "Suma de KG rechazados / (KG aprobados + KG rechazados) × 100",
+     "unidad": "%", "direccion": "<=", "meta": 15.0, "frecuencia": "Mensual",
+     "politica_calidad": None, "planificacion": None, "responsable": None},
+    {"n": 11, "clave": None, "proceso": "Producción", "nombre": "Rendimiento (de molde)",
+     "formula": "Suma de KG entregados por pieza / KG bruto por molde por pieza × 100",
+     "unidad": "%", "direccion": ">=", "meta": 76.0, "frecuencia": "Mensual",
+     "politica_calidad": None, "planificacion": None, "responsable": None},
+    {"n": 12, "clave": "reparacion", "proceso": "Producción", "nombre": "Relación de Reparación",
+     "formula": "Piezas reparadas / Piezas aprobadas × 100",
+     "unidad": "%", "direccion": "<=", "meta": 8.0, "frecuencia": "Mensual",
+     "politica_calidad": None, "planificacion": None, "responsable": None},
+    {"n": 13, "clave": None, "proceso": "SGC", "nombre": "Cumplimiento de Auditorías",
+     "formula": "Verificar el cumplimiento de al menos una auditoría interna y una auditoría externa por año",
+     "unidad": "", "direccion": "=", "meta": None, "frecuencia": "Anual",
+     "politica_calidad": "Mejorar continuamente el Sistema de Gestión de la Calidad. Establecer una cultura basada en nuestros valores.",
+     "planificacion": "Garantizar el cumplimiento de todos los requisitos normativos de manera continua.",
+     "responsable": "Andrea Romero"},
+]
+
+
+def _kpis_periodo_mensual(conn: sqlite3.Connection, fecha_desde: str, fecha_hasta: str) -> dict[str, dict]:
+    """Totales crudos por mes (YYYY-MM) para todo lo que alimenta _KPI_INFO,
+    en el rango [fecha_desde, fecha_hasta). Cada valor es un dict con las
+    sumas del mes -- los ratios se calculan después, tanto por mes como
+    acumulados por año, para que sea razón-de-sumas y no promedio-de-ratios."""
+    meses: dict[str, dict] = {}
+
+    def _acc(mes, **kwargs):
+        d = meses.setdefault(mes, {
+            "kg_aprobados": 0.0, "kg_rechazados": 0.0, "hs_trabajadas": 0.0,
+            "reparadas": 0, "aprobadas": 0, "kg_devueltos": None,
+            "entregas_puntaje": 0.0, "entregas_cantidad": 0.0, "reclamos_principales": 0,
+        })
+        for k, v in kwargs.items():
+            if v is None:
+                continue
+            if k == "kg_devueltos":
+                d[k] = (d[k] or 0.0) + v
+            else:
+                d[k] += v
+        return d
+
+    base_rows = conn.execute(f"""
+        SELECT strftime('%Y-%m', fpf.fecha) as mes,
+               COALESCE(SUM(t.cantidadaprobada),  0) as aprobadas,
+               COALESCE(SUM(t.cantidadreparada),  0) as reparadas,
+               ROUND(SUM(t.cantidadaprobada  * ({_PESO_EFECTIVO_ADTR})), 2) as kg_aprobados,
+               ROUND(SUM(t.cantidadrechazada * ({_PESO_EFECTIVO_ADTR})
+                         * (CASE WHEN LOWER(sri.descripción) = 'cantidad mal anotada' THEN 0 ELSE 1 END)), 2) as kg_rechazados
+        FROM Trabajos t
+        JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf.códfundición = t.códfundición
+        JOIN PesosDePiezas pp  ON pp.códpieza = t.idpesopieza
+        LEFT JOIN NombreDePiezas np ON np.id = pp.nombredepiezasid_
+        LEFT JOIN "SoluciónRechazoInterno" sri ON sri.iditemtrabajo = t.iditemtrabajo
+        WHERE fpf.fecha >= ? AND fpf.fecha < ?
+          AND t.códfundición IS NOT NULL
+          AND t.idpesopieza IS NOT NULL
+        GROUP BY mes
+    """, (fecha_desde, fecha_hasta)).fetchall()
+    for r in base_rows:
+        _acc(r["mes"], kg_aprobados=r["kg_aprobados"] or 0.0, kg_rechazados=r["kg_rechazados"] or 0.0,
+             reparadas=r["reparadas"] or 0, aprobadas=r["aprobadas"] or 0)
+
+    # Horas de TODO el personal activo ese mes (sin filtrar por sector) --
+    # confirmado con el usuario después de probar que restringir a
+    # moldeadores (por sector o por responsables de OT fundidas) alejaba el
+    # resultado del de la tabla original en vez de acercarlo.
+    for r in conn.execute("""
+        SELECT strftime('%Y-%m', fecha) as mes, SUM(horastrabajadas) as hs
+        FROM HorasPorFecha WHERE fecha >= ? AND fecha < ? GROUP BY mes
+    """, (fecha_desde, fecha_hasta)).fetchall():
+        _acc(r["mes"], hs_trabajadas=r["hs"] or 0.0)
+
+    # Devueltas: ItemDevolución solo guarda año+semana, se aproxima a mes con
+    # _week_to_month. None (no 0.0) cuando el mes no tiene ninguna fila --
+    # Access hace lo mismo (DSum sin filas da Null, y Null propaga a través
+    # de la fórmula, dejando RelDev en blanco ese mes, no en 0%).
+    for dv in conn.execute(f"""
+        SELECT id.año, id.semana, ROUND(SUM(id."cantidaddevolución" * ({_PESO_EFECTIVO_ADTR})), 2) as kg_devueltos
+        FROM "ItemDevolución" id
+        JOIN PesosDePiezas pp ON id.códpieza = pp.códpieza
+        JOIN NombreDePiezas np ON pp.nombredepiezasid_ = np.id
+        GROUP BY id.año, id.semana
+    """).fetchall():
+        try:
+            ym = _week_to_month(int(dv["año"]), int(dv["semana"]))
+        except Exception:
+            continue
+        if fecha_desde <= ym + "-01" < fecha_hasta:
+            _acc(ym, kg_devueltos=dv["kg_devueltos"] or 0.0)
+
+    # Entregas en término: puntaje 0-10 ponderado por cantidad, según
+    # PuntajeEntrega() -- función VBA real de Access (módulo
+    # ObjetivoPlazoDeEntrega, query cslObjetivosPlazoEntrega Modificado).
+    # diferencia = FechaCargaOT - FechaPrevista, en días; agrupado por mes de
+    # FechaRemito (cuándo salió la entrega). Excluye remitos/clientes/
+    # responsables de prueba, igual que la query real de Access.
+    for r in conn.execute(f"""
+        WITH base AS (
+            SELECT strftime('%Y-%m', r.fecharemito) as mes,
+                   (julianday(t.fechacargaot) - julianday(t.fechaprevista)) as diferencia,
+                   id.cantidad as cantidad
+            FROM Clientes c
+            JOIN Pedidos p ON c.códigocliente = p.códigocliente
+            JOIN Remitos r ON c.códigocliente = r.códigocliente
+            JOIN ItemDetallePedido idp ON p.idpedido = idp.idpedido
+            JOIN Trabajos t ON idp.iditempedido = t.iditempedido
+            JOIN ItemDetalle id ON t.iditemtrabajo = id.iditemtrabajo AND r.idnroremito = id.idnroremito
+            WHERE r.idnroremito > 10000 AND r.idnroremito < 90000
+              AND t.fechacargaot IS NOT NULL AND t.fechaprevista IS NOT NULL
+              AND r.fecharemito >= '2018-12-01'
+              AND r.códigocliente NOT IN ('BE','BA3','BO1','TE4')
+              AND t.códigoresponsable1 NOT IN (-90,-91,-92,-93,-94)
+        )
+        SELECT mes, SUM({_PUNTAJE_ENTREGA_CASE} * cantidad) as puntaje, SUM(cantidad) as cantidad
+        FROM base WHERE mes >= ? AND mes < ? GROUP BY mes
+    """, (fecha_desde[:7], fecha_hasta[:7])).fetchall():
+        _acc(r["mes"], entregas_puntaje=r["puntaje"] or 0.0, entregas_cantidad=r["cantidad"] or 0.0)
+
+    # Reclamos de clientes principales: Documentos.idtipodoc=4 = "Informe
+    # Reclamo Cliente" (IRC) -- catálogo TiposDocumento, confirmado con
+    # COM automation sobre Indicadores.accdb. "Principales" = mismos 10
+    # clientes que ya usa /api/analytics/overview (top por entregadas,
+    # últimos ~2 años), para no inventar un segundo criterio.
+    top_clientes = [r["codigo"] for r in conn.execute("""
+        SELECT p.códigocliente as codigo, COALESCE(SUM(t.cantidadentregada),0) as entregadas
+        FROM Trabajos t
+        JOIN ItemDetallePedido idp ON t.iditempedido = idp.iditempedido
+        JOIN Pedidos p ON idp.idpedido = p.idpedido
+        WHERE p.fechapedido >= date('now', '-2 years') AND t.cantidadentregada > 0
+        GROUP BY p.códigocliente ORDER BY entregadas DESC LIMIT 10
+    """).fetchall()]
+    if top_clientes:
+        qs = ",".join("?" * len(top_clientes))
+        for r in conn.execute(f"""
+            SELECT strftime('%Y-%m', "fechaemisión") as mes, COUNT(*) as n
+            FROM Documentos
+            WHERE idtipodoc = 4 AND códigocliente IN ({qs})
+              AND "fechaemisión" >= ? AND "fechaemisión" < ?
+            GROUP BY mes
+        """, (*top_clientes, fecha_desde, fecha_hasta)).fetchall():
+            _acc(r["mes"], reclamos_principales=r["n"] or 0)
+
+    return meses
+
+
+def _kpis_calcular(acc: dict) -> dict:
+    """Convierte totales crudos (de _kpis_periodo_mensual, sumados sobre el
+    rango que sea) en los 6 valores finales -- razón de sumas, no promedio de
+    ratios. None cuando el denominador es 0 o falta el dato del todo (no 0),
+    mismo criterio que usa Access (Null se propaga en vez de mostrar 0%)."""
+    kg_a, kg_r = acc["kg_aprobados"], acc["kg_rechazados"]
+    hs, rep, apro = acc["hs_trabajadas"], acc["reparadas"], acc["aprobadas"]
+    kg_d = acc["kg_devueltos"]
+    ent_p, ent_c = acc["entregas_puntaje"], acc["entregas_cantidad"]
+    return {
+        "productividad":        round(kg_a / hs, 2) if hs else None,
+        "rechazo":              round(kg_r / (kg_a + kg_r) * 100, 2) if (kg_a + kg_r) else None,
+        "devolucion":           round(kg_d / kg_a * 100, 2) if (kg_a and kg_d is not None) else None,
+        "reparacion":           round(rep / apro * 100, 2) if apro else None,
+        "entregas_termino":     round(ent_p / ent_c, 2) if ent_c else None,
+        "reclamos_principales": round(acc["reclamos_principales"] / 10, 2),
+    }
+
+
+@app.get("/api/analytics/kpis_dashboard")
+def analytics_kpis_dashboard(anio: int = Query(default=None, ge=2000, le=2100)):
+    """Tabla "Indicadores de producción" del Dashboard, en el mismo formato
+    que el Tablero de Comando ISO 9001 de la empresa (Downloads\\Tablero de
+    Comando_2024_2026.xlsx): un indicador por fila, meses en columnas, con la
+    meta del año, el logro del año anterior y el promedio/acumulado del año
+    en curso -- para comparar de un vistazo contra ese Excel.
+
+    Devuelve las 13 filas del Tablero, en su mismo orden (_KPI_INFO), con todo
+    su texto de contexto (proceso, política de la calidad, frecuencia,
+    planificación, responsable). De esas 13, 6 tienen "clave" (se calculan de
+    verdad, con "implementado": true) y 7 tienen clave=None ("implementado":
+    false, valores/logro_anterior/promedio_anual en None) -- son carga 100%
+    manual en el Excel de la empresa (encuestas de satisfacción, percepción
+    de calidad, horas de capacitación, auditorías, reclamos por herramental,
+    y "Rendimiento" de molde) y no tienen ninguna tabla de origen en Access
+    para automatizar. Se muestran igual (con su nombre/fórmula/meta) para que
+    la tarjeta refleje el Tablero completo, marcando qué falta.
+
+    Las 6 fórmulas implementadas:
+    1. productividad  = Σ kg aprobados / Σ horas trabajadas -- SIN ×100.
+    2. rechazo        = Σ kg rechazados / (Σ kg aprobados + Σ kg rechazados) × 100
+    3. devolucion     = Σ kg devueltos / Σ kg aprobados × 100
+    4. reparacion     = Σ piezas reparadas / Σ piezas aprobadas × 100
+    5. entregas_termino = puntaje 0-10 ponderado por cantidad (PuntajeEntrega,
+       función VBA real de Access) -- 10 si entrega a tiempo o hasta 1 día
+       tarde, baja escalonado hasta 0 pasados 28 días; entregar MUY adelantado
+       (>10.5 días antes) también resta puntos (tope 6), no solo llegar tarde.
+    6. reclamos_principales = reclamos IRC (Documentos.idtipodoc=4) de los 10
+       clientes principales / 10.
+
+    Las primeras 4 están confirmadas exactas al decimal contra 9 meses reales
+    del reporte Access rptIndicadoresHistoricos. Las últimas 2 se validaron
+    contra el propio Tablero de Comando: entregas_termino y
+    reclamos_principales coinciden exacto en todos los meses probados."""
+    año_actual = anio or datetime.now().year
+    año_anterior = año_actual - 1
+    conn = get_db()
+    try:
+        datos = _kpis_periodo_mensual(conn, f"{año_anterior}-01-01", f"{año_actual + 1}-01-01")
+
+        _acc_keys = ("kg_aprobados", "kg_rechazados", "hs_trabajadas", "reparadas", "aprobadas",
+                     "kg_devueltos", "entregas_puntaje", "entregas_cantidad", "reclamos_principales")
+
+        def _acc_cero() -> dict:
+            return {k: (None if k == "kg_devueltos" else 0.0) for k in _acc_keys}
+
+        def _acc_sumar(destino: dict, fuente: dict) -> None:
+            for k, v in fuente.items():
+                if v is None:
+                    continue
+                if k == "kg_devueltos":
+                    destino[k] = (destino[k] or 0.0) + v
+                else:
+                    destino[k] += v
+
+        meses = [f"{año_actual}-{m:02d}" for m in range(1, 13)]
+        acc_actual = _acc_cero()
+        acc_anterior = _acc_cero()
+        valores_por_mes: dict[str, dict] = {}
+        for mes in meses:
+            m = datos.get(mes)
+            valores_por_mes[mes] = _kpis_calcular(m) if m else _kpis_calcular(_acc_cero())
+            if m:
+                _acc_sumar(acc_actual, m)
+        for mes_ant, m in datos.items():
+            if mes_ant.startswith(f"{año_anterior}-"):
+                _acc_sumar(acc_anterior, m)
+
+        promedio_actual = _kpis_calcular(acc_actual)
+        logro_anterior = _kpis_calcular(acc_anterior)
+
+        indicadores = []
+        for info in _KPI_INFO:
+            clave = info["clave"]
+            indicadores.append({
+                **info,
+                "implementado": clave is not None,
+                "logro_anterior": logro_anterior[clave] if clave else None,
+                "valores": [valores_por_mes[mes][clave] for mes in meses] if clave else [None] * 12,
+                "promedio_anual": promedio_actual[clave] if clave else None,
+            })
+
+        return {
+            "año_actual": año_actual, "año_anterior": año_anterior,
+            "meses": meses, "indicadores": indicadores,
+        }
     finally:
         conn.close()
 
@@ -3351,7 +4428,7 @@ def analytics_semanal(semanas: int = Query(default=12, ge=4, le=52)):
                    COALESCE(SUM(t.cantidadaprobada),  0)          as aprobadas,
                    ROUND(SUM(t.cantidadaprobada * pp.pesopieza * COALESCE(np.coefcompl, 1)), 1) as kg_aprobados
             FROM Trabajos t
-            JOIN "FundiciónPorFecha" fpf ON fpf.códfundición = t.códfundición
+            JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf.códfundición = t.códfundición
             LEFT JOIN PesosDePiezas pp  ON pp.códpieza = t.idpesopieza
             LEFT JOIN NombreDePiezas np ON np.id = pp.nombredepiezasid_
             WHERE fpf.fecha IS NOT NULL
@@ -3421,7 +4498,7 @@ def analytics_top_defectos(meses: int = Query(default=6, ge=3, le=12)):
                    sri."Descripción" as defecto
             FROM "SoluciónRechazoInterno" sri
             JOIN Trabajos t ON t.iditemtrabajo = sri."IdItemTrabajo"
-            JOIN "FundiciónPorFecha" fpf ON fpf.códfundición = t.códfundición
+            JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf.códfundición = t.códfundición
             WHERE fpf.fecha IS NOT NULL
               AND t.códfundición IS NOT NULL
               AND strftime('%Y-%m', fpf.fecha) <= strftime('%Y-%m', 'now')
@@ -3432,7 +4509,7 @@ def analytics_top_defectos(meses: int = Query(default=6, ge=3, le=12)):
                    sri."DescripciónRepar" as reparacion
             FROM "SoluciónReparacionInterna" sri
             JOIN Trabajos t ON t.iditemtrabajo = sri."IdItemTrabajo"
-            JOIN "FundiciónPorFecha" fpf ON fpf.códfundición = t.códfundición
+            JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf.códfundición = t.códfundición
             WHERE fpf.fecha IS NOT NULL
               AND t.códfundición IS NOT NULL
               AND strftime('%Y-%m', fpf.fecha) <= strftime('%Y-%m', 'now')
@@ -3474,7 +4551,7 @@ def analytics_top_piezas(meses: int = Query(default=6, ge=3, le=12)):
                    ROUND(SUM(t.cantidadrechazada * pp.pesopieza * COALESCE(np.coefcompl, 1)), 1) as kg,
                    CAST(SUM(t.cantidadrechazada) AS INTEGER) as cant
             FROM Trabajos t
-            JOIN "FundiciónPorFecha" fpf ON fpf.códfundición = t.códfundición
+            JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf.códfundición = t.códfundición
             JOIN PesosDePiezas pp ON pp.códpieza = t.idpesopieza
             LEFT JOIN NombreDePiezas np ON np.id = pp.nombredepiezasid_
             WHERE fpf.fecha IS NOT NULL AND t.códfundición IS NOT NULL
@@ -3503,7 +4580,7 @@ def analytics_top_piezas(meses: int = Query(default=6, ge=3, le=12)):
                    ROUND(SUM(t.cantidadreparada * pp.pesopieza * COALESCE(np.coefcompl, 1)), 1) as kg,
                    CAST(SUM(t.cantidadreparada) AS INTEGER) as cant
             FROM Trabajos t
-            JOIN "FundiciónPorFecha" fpf ON fpf.códfundición = t.códfundición
+            JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf.códfundición = t.códfundición
             JOIN PesosDePiezas pp ON pp.códpieza = t.idpesopieza
             LEFT JOIN NombreDePiezas np ON np.id = pp.nombredepiezasid_
             WHERE fpf.fecha IS NOT NULL AND t.códfundición IS NOT NULL
@@ -4527,7 +5604,7 @@ def get_fundiciones_mensual(meses: int = Query(default=12, ge=3, le=36)):
                    SUM(f.kgarenascrap)                 as kg_scrap,
                    SUM(f.kgdevol)                      as kg_devol
             FROM Fundiciones f
-            JOIN "FundiciónPorFecha" fpf ON fpf.códfundición = f.códfundición
+            JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf.códfundición = f.códfundición
             WHERE fpf.fecha IS NOT NULL
               AND strftime('%Y-%m', fpf.fecha) <= strftime('%Y-%m', 'now')
             GROUP BY mes
@@ -5009,7 +6086,7 @@ def get_personal_produccion(
                    COALESCE(SUM(t.cantidadentregada - t.cantidaddestock), 0) AS entregadas,
                    COALESCE(SUM(t.cantidadenviadastock), 0) AS a_stock
             FROM Trabajos t
-            JOIN "FundiciónPorFecha" fpf ON fpf."códfundición" = t."códfundición"
+            JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf."códfundición" = t."códfundición"
             WHERE t.códigoresponsable1 = ? AND fpf.fecha >= ? AND t."códfundición" IS NOT NULL
         """, (persona_id, f"{anio_desde}-01-01")).fetchone()
 
@@ -5022,7 +6099,7 @@ def get_personal_produccion(
                    COALESCE(SUM(t.cantidadentregada - t.cantidaddestock),0) AS entregadas,
                    COALESCE(SUM(t.cantidadenviadastock),0) AS a_stock
             FROM Trabajos t
-            JOIN "FundiciónPorFecha" fpf ON fpf."códfundición" = t."códfundición"
+            JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf."códfundición" = t."códfundición"
             WHERE t.códigoresponsable1 = ? AND fpf.fecha >= ? AND t."códfundición" IS NOT NULL
             GROUP BY mes ORDER BY mes
         """, (persona_id, f"{anio_desde}-01-01")).fetchall()
@@ -5033,7 +6110,7 @@ def get_personal_produccion(
                    COALESCE(SUM(t.cantidadaprobada), 0) AS aprobadas,
                    COALESCE(SUM(t.cantidadrechazada),0) AS rechazadas
             FROM Trabajos t
-            JOIN "FundiciónPorFecha" fpf ON fpf."códfundición" = t."códfundición"
+            JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf."códfundición" = t."códfundición"
             LEFT JOIN PesosDePiezas pp   ON pp."códpieza" = t.idpesopieza
             LEFT JOIN NombreDePiezas np  ON np.id = pp."nombredepiezasid_"
             WHERE t.códigoresponsable1 = ? AND fpf.fecha >= ? AND t."códfundición" IS NOT NULL
@@ -5066,7 +6143,7 @@ def get_personal_reparaciones(
                    COUNT(*)                             AS n_ots
             FROM "SoluciónReparacionInterna" sri
             JOIN Trabajos t ON t.iditemtrabajo = sri.iditemtrabajo
-            JOIN "FundiciónPorFecha" fpf ON fpf."códfundición" = t."códfundición"
+            JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf."códfundición" = t."códfundición"
             WHERE t.códigoresponsable1 = ? AND fpf.fecha >= ?
         """, (persona_id, f"{anio_desde}-01-01")).fetchone()
 
@@ -5075,7 +6152,7 @@ def get_personal_reparaciones(
                    COALESCE(SUM(t.cantidadreparada), 0) AS reparadas
             FROM "SoluciónReparacionInterna" sri
             JOIN Trabajos t ON t.iditemtrabajo = sri.iditemtrabajo
-            JOIN "FundiciónPorFecha" fpf ON fpf."códfundición" = t."códfundición"
+            JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf."códfundición" = t."códfundición"
             WHERE t.códigoresponsable1 = ? AND fpf.fecha >= ?
             GROUP BY mes ORDER BY mes
         """, (persona_id, f"{anio_desde}-01-01")).fetchall()
@@ -5086,7 +6163,7 @@ def get_personal_reparaciones(
                    COALESCE(SUM(t.cantidadreparada),0) AS total
             FROM "SoluciónReparacionInterna" sri
             JOIN Trabajos t ON t.iditemtrabajo = sri.iditemtrabajo
-            JOIN "FundiciónPorFecha" fpf ON fpf."códfundición" = t."códfundición"
+            JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf."códfundición" = t."códfundición"
             WHERE t.códigoresponsable1 = ? AND fpf.fecha >= ?
             GROUP BY sri.descripciónrepar ORDER BY total DESC LIMIT 15
         """, (persona_id, f"{anio_desde}-01-01")).fetchall()
@@ -5096,7 +6173,7 @@ def get_personal_reparaciones(
                    COALESCE(SUM(t.cantidadreparada), 0) AS reparadas
             FROM "SoluciónReparacionInterna" sri
             JOIN Trabajos t ON t.iditemtrabajo = sri.iditemtrabajo
-            JOIN "FundiciónPorFecha" fpf ON fpf."códfundición" = t."códfundición"
+            JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf."códfundición" = t."códfundición"
             LEFT JOIN PesosDePiezas pp  ON pp."códpieza" = t.idpesopieza
             LEFT JOIN NombreDePiezas np ON np.id = pp."nombredepiezasid_"
             WHERE t.códigoresponsable1 = ? AND fpf.fecha >= ?
@@ -5129,7 +6206,7 @@ def get_personal_rechazos(
                    COALESCE(SUM(t.cantidadreparada),  0) AS reparadas,
                    COALESCE(SUM(t.cantidadaprobada),  0) AS aprobadas
             FROM Trabajos t
-            JOIN "FundiciónPorFecha" fpf ON fpf."códfundición" = t."códfundición"
+            JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf."códfundición" = t."códfundición"
             WHERE t.códigoresponsable1 = ?
               AND fpf.fecha >= ?
               AND t."códfundición" IS NOT NULL
@@ -5142,7 +6219,7 @@ def get_personal_rechazos(
                    COALESCE(SUM(t.cantidadrechazada),0) AS rechazadas,
                    COALESCE(SUM(t.cantidadreparada), 0) AS reparadas
             FROM Trabajos t
-            JOIN "FundiciónPorFecha" fpf ON fpf."códfundición" = t."códfundición"
+            JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf."códfundición" = t."códfundición"
             WHERE t.códigoresponsable1 = ?
               AND fpf.fecha >= ?
               AND t."códfundición" IS NOT NULL
@@ -5155,7 +6232,7 @@ def get_personal_rechazos(
                    COALESCE(SUM(t.cantidadrechazada),0) AS rechazadas,
                    COALESCE(SUM(t.cantidadproducida),0) AS producidas
             FROM Trabajos t
-            JOIN "FundiciónPorFecha" fpf ON fpf."códfundición" = t."códfundición"
+            JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf."códfundición" = t."códfundición"
             LEFT JOIN PesosDePiezas pp   ON pp."códpieza" = t.idpesopieza
             LEFT JOIN NombreDePiezas np  ON np.id = pp."nombredepiezasid_"
             WHERE t.códigoresponsable1 = ?
@@ -5248,7 +6325,7 @@ def get_personal_rechazos_mes(
                    t.cantidadenviadastock                 AS a_stock,
                    sri.descripción                 AS motivo
             FROM Trabajos t
-            JOIN "FundiciónPorFecha" fpf ON fpf."códfundición" = t."códfundición"
+            JOIN (SELECT códfundición, MIN(fecha) as fecha FROM "FundiciónPorFecha" GROUP BY códfundición) fpf ON fpf."códfundición" = t."códfundición"
             LEFT JOIN PesosDePiezas pp   ON pp."códpieza" = t.idpesopieza
             LEFT JOIN NombreDePiezas np  ON np.id = pp."nombredepiezasid_"
             LEFT JOIN "SoluciónRechazoInterno" sri ON sri.iditemtrabajo = t.iditemtrabajo
@@ -5496,7 +6573,7 @@ def get_trabajos(
         offset = (page - 1) * page_size
 
         rows = conn.execute(
-            f"""SELECT t.iditemtrabajo, t.origen,
+            f"""SELECT t.iditemtrabajo, t.origen, t.reemplazogenerado,
                 t.fechaprevista, p.fechapedido as fecha,
                 t.códfundición as fundicion, t.estadotrabajo,
                 p.códigocliente as codigo_cliente,
@@ -5694,7 +6771,7 @@ def get_trabajo_detail(trabajo_id: int):
 # NombreDePiezas) y se queda con el que corresponda con COALESCE.
 _MOLDEO_SELECT = """
     SELECT m.id, m.fecha, m.trabajo_id, m.pieza_id, m.operario_id, m.cantidad_cajas,
-           m.cajas_sin_cerrar, m.cantidad_noyos,
+           m.cajas_sin_cerrar, m.cantidad_noyos, m.nota,
            m.creado_por_legajo, m.creado_en,
            v.apellidoynombre AS operario_nombre,
            t.estadotrabajo,
@@ -5748,6 +6825,83 @@ def _moldeo_asignacion_heredada(conn: sqlite3.Connection, origen_id: Optional[in
         actual = sig["origen"] if sig else None
         saltos += 1
     return None
+
+
+def _moldeo_responsables_heredados(conn: sqlite3.Connection, origen_id: Optional[int], tabla: str,
+                                    max_saltos: int = 20) -> list:
+    """Como _moldeo_asignacion_heredada, pero para un rol N a N (tabla:
+    _trabajo_responsable_moldeo o _trabajo_responsables_noyos): la OT
+    reemplazo hereda TODOS los responsables de la OT mas reciente de la
+    cadena que tenga alguno, no solo uno -- si dos personas estaban
+    moldeando (o haciendo noyos de) la OT vieja, las dos siguen apareciendo
+    en el reemplazo. Nunca recibe entrada de usuario, siempre uno de esos
+    dos literales fijos.
+
+    Para responsable de moldeo, si un eslabon de la cadena no tiene nada en
+    nuestra tabla propia, se prueba con Trabajos.códigoresponsable1 (el
+    campo que Access llena recien al fundir, ver responsable_confirmado en
+    get_trabajos) antes de seguir subiendo -- el eslabon mas comun de la
+    cadena es justo una OT que ya se fundio (Access genera el reemplazo por
+    lo que falto y la OT vieja pasa a Fundido en el mismo momento, nunca
+    conviven las dos en el mismo estado), y si esa OT nunca paso por esta
+    pantalla mientras estaba abierta (o se fundio antes de que existiera
+    esta funcionalidad) nuestra tabla no tiene nada aunque Access si sepa
+    quien la hizo. Responsable de noyos no tiene equivalente en Access, asi
+    que este fallback no aplica para esa tabla."""
+    visto = set()
+    actual = origen_id
+    saltos = 0
+    while actual and saltos < max_saltos and actual not in visto:
+        visto.add(actual)
+        rows = conn.execute(
+            f"SELECT rm.operario_id, v.apellidoynombre AS operario_nombre "
+            f"FROM {tabla} rm "
+            f"LEFT JOIN _v_responsables v ON v.codigoresponsable = rm.operario_id "
+            f"WHERE rm.trabajo_id = ?",
+            (actual,)
+        ).fetchall()
+        if rows:
+            return [dict(r) for r in rows]
+        if tabla == "_trabajo_responsable_moldeo":
+            confirmado = conn.execute(
+                "SELECT t.códigoresponsable1 AS operario_id, r.apellidoynombreresponsable AS operario_nombre "
+                "FROM Trabajos t LEFT JOIN Responsables r ON r.códigoresponsable = t.códigoresponsable1 "
+                "WHERE t.iditemtrabajo = ? AND t.códigoresponsable1 IS NOT NULL",
+                (actual,)
+            ).fetchone()
+            if confirmado:
+                return [dict(confirmado)]
+        sig = conn.execute("SELECT origen FROM Trabajos WHERE iditemtrabajo=?", (actual,)).fetchone()
+        actual = sig["origen"] if sig else None
+        saltos += 1
+    return []
+
+
+def _moldeo_heredar_responsables_si_corresponde(conn: sqlite3.Connection, trabajo_id: int,
+                                                 origen_id: Optional[int], tabla: str) -> None:
+    """Materializa (INSERT real, no solo la respuesta) los responsables (de
+    moldeo o de noyos, segun `tabla`) heredados de la cadena de origen la
+    primera vez que se lee una OT reemplazo sin responsables propios -- a
+    partir de ahi son filas reales, editables (agregar/quitar) igual que si
+    se hubieran elegido a mano; no hace falta acordarse de "esto es
+    heredado" en ningun otro lado. No comitea -- el llamador decide cuando
+    (una vez para una OT, una vez al final de un lote para el bulk fetch)."""
+    if not origen_id:
+        return
+    ya_tiene = conn.execute(
+        f"SELECT 1 FROM {tabla} WHERE trabajo_id=?", (trabajo_id,)
+    ).fetchone()
+    if ya_tiene:
+        return
+    heredados = _moldeo_responsables_heredados(conn, origen_id, tabla)
+    if not heredados:
+        return
+    ahora = datetime.now().isoformat()
+    for h in heredados:
+        conn.execute(
+            f"INSERT OR IGNORE INTO {tabla} (trabajo_id, operario_id, asignado_en) VALUES (?,?,?)",
+            (trabajo_id, h["operario_id"], ahora)
+        )
 
 
 def _moldeo_validar_body(conn: sqlite3.Connection, body: dict) -> tuple:
@@ -5813,7 +6967,12 @@ def _moldeo_validar_body(conn: sqlite3.Connection, body: dict) -> tuple:
         raise HTTPException(400, "ingresá cajas cerradas, cajas sin cerrar o noyos")
     if not conn.execute("SELECT 1 FROM _v_responsables WHERE codigoresponsable=?", (operario_id,)).fetchone():
         raise HTTPException(404, f"Operario {operario_id} no encontrado")
-    return fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos
+    # Nunca obligatoria -- es la unica trazabilidad de un pedido informal
+    # (sin OT ni pedido real detras), pero forzarla rompería cargas viejas o
+    # el modo "con OT", donde no hace falta ninguna aclaracion.
+    nota_raw = body.get("nota")
+    nota = str(nota_raw).strip()[:500] if nota_raw not in (None, "") else None
+    return fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos, nota
 
 
 @app.get("/api/produccion_moldeo")
@@ -5841,12 +7000,12 @@ async def post_produccion_moldeo(req: Request, user: dict = Depends(_get_auth_us
     body = await req.json()
     conn = get_db()
     try:
-        fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos = _moldeo_validar_body(conn, body)
+        fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos, nota = _moldeo_validar_body(conn, body)
         conn.execute(
             "INSERT INTO _produccion_moldeo "
-            "(fecha, trabajo_id, pieza_id, operario_id, cantidad_cajas, cajas_sin_cerrar, cantidad_noyos, creado_por_legajo, creado_en) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
-            (fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos, user["legajo"], datetime.now().isoformat())
+            "(fecha, trabajo_id, pieza_id, operario_id, cantidad_cajas, cajas_sin_cerrar, cantidad_noyos, nota, creado_por_legajo, creado_en) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos, nota, user["legajo"], datetime.now().isoformat())
         )
         new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.commit()
@@ -5863,10 +7022,10 @@ async def put_produccion_moldeo(entry_id: int, req: Request, user: dict = Depend
         existente = conn.execute("SELECT id FROM _produccion_moldeo WHERE id=?", (entry_id,)).fetchone()
         if not existente:
             raise HTTPException(404, "Registro no encontrado")
-        fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos = _moldeo_validar_body(conn, body)
+        fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos, nota = _moldeo_validar_body(conn, body)
         conn.execute(
-            "UPDATE _produccion_moldeo SET fecha=?, trabajo_id=?, pieza_id=?, operario_id=?, cantidad_cajas=?, cajas_sin_cerrar=?, cantidad_noyos=? WHERE id=?",
-            (fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos, entry_id)
+            "UPDATE _produccion_moldeo SET fecha=?, trabajo_id=?, pieza_id=?, operario_id=?, cantidad_cajas=?, cajas_sin_cerrar=?, cantidad_noyos=?, nota=? WHERE id=?",
+            (fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos, nota, entry_id)
         )
         conn.commit()
         return _moldeo_row(conn, entry_id)
@@ -5887,12 +7046,12 @@ def delete_produccion_moldeo(entry_id: int, user: dict = Depends(_get_auth_user)
 
 @app.put("/api/trabajos/{trabajo_id}/asignar_operario")
 async def put_trabajo_asignar_operario(trabajo_id: int, req: Request, user: dict = Depends(_get_auth_user)):
-    """Asigna (o desasigna) un operario a una OT Programado. Es la UNICA via
-    que escribe _trabajo_operario_asignado -- elegir un operario en el combo
-    de la fila alcanza para que quede asignada, no hace falta que tenga
-    ninguna carga guardada. _produccion_moldeo (las cargas con su fecha y su
-    propio operario_id) es solo el historial de "quien cargo que ese día":
-    guardar o borrar una carga nunca toca esta asignacion."""
+    """Superado por /api/trabajos/{id}/responsables_moldeo (N a N -- una caja
+    puede tener mas de un responsable de moldeo). Cargar moldeo ya no llama a
+    este endpoint ni lee _trabajo_operario_asignado, que queda sin escribirse
+    desde el frontend pero no se borra: no vale la pena el riesgo de tocar una
+    tabla en produccion por una que ya no se usa. Se deja funcionando por si
+    algo externo todavia la llama."""
     body = await req.json()
     conn = get_db()
     try:
@@ -5928,9 +7087,11 @@ async def put_trabajo_asignar_operario(trabajo_id: int, req: Request, user: dict
 
 @app.put("/api/trabajos/{trabajo_id}/asignar_responsable_noyos")
 async def put_trabajo_asignar_responsable_noyos(trabajo_id: int, req: Request, user: dict = Depends(_get_auth_user)):
-    """Mismo mecanismo que asignar_operario (put_trabajo_asignar_operario) pero
-    para _trabajo_responsable_noyos -- rol separado: quien es responsable de
-    los noyos de esta OT, no de moldear la caja."""
+    """Superado por /api/trabajos/{id}/responsables_noyos (N a N -- mismo
+    sistema que responsable de moldeo). Cargar moldeo ya no llama a este
+    endpoint ni lee _trabajo_responsable_noyos, que queda sin escribirse
+    desde el frontend pero no se borra. Se deja funcionando por si algo
+    externo todavia la llama."""
     body = await req.json()
     conn = get_db()
     try:
@@ -6037,6 +7198,210 @@ def get_moldeo_ayudantes(user: dict = Depends(_get_auth_user)):
             "FROM _trabajo_ayudante ta "
             "LEFT JOIN _v_responsables v ON v.codigoresponsable = ta.operario_id "
             "ORDER BY ta.trabajo_id, ta.asignado_en"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+# ── Responsables de moldeo (N a N) ──────────────────────────────────────────────
+# Mismo mecanismo exacto que ayudante (arriba) -- N a N, mismo patron de
+# endpoints -- pero a diferencia de ayudante, estos SI cuentan para
+# productividad: cada responsable de moldeo carga su propia cantidad de cajas
+# ese dia (ver _MOLDEO_KG_CTE / get_moldeo_productividad, que ya agrupan por
+# operario_id sin asumir una sola fila por OT). A diferencia de ayudante,
+# ESTE rol si hereda por cadena de origen (ver _moldeo_heredar_responsables_
+# si_corresponde) -- una OT reemplazo arranca con los mismos responsables que
+# la OT que reemplaza, materializados como filas reales la primera vez que se
+# lee (agregar/quitar funciona igual que si se hubieran elegido a mano).
+
+@app.get("/api/trabajos/{trabajo_id}/responsables_moldeo")
+def get_trabajo_responsables_moldeo(trabajo_id: int, user: dict = Depends(_get_auth_user)):
+    conn = get_db()
+    try:
+        t = conn.execute("SELECT origen FROM Trabajos WHERE iditemtrabajo=?", (trabajo_id,)).fetchone()
+        if t:
+            _moldeo_heredar_responsables_si_corresponde(conn, trabajo_id, t["origen"], "_trabajo_responsable_moldeo")
+            conn.commit()
+        rows = conn.execute(
+            "SELECT rm.operario_id, v.apellidoynombre AS operario_nombre "
+            "FROM _trabajo_responsable_moldeo rm "
+            "LEFT JOIN _v_responsables v ON v.codigoresponsable = rm.operario_id "
+            "WHERE rm.trabajo_id = ? ORDER BY rm.asignado_en",
+            (trabajo_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@app.post("/api/trabajos/{trabajo_id}/responsables_moldeo")
+async def post_trabajo_responsable_moldeo(trabajo_id: int, req: Request, user: dict = Depends(_get_auth_user)):
+    """Agrega un responsable de moldeo a la OT -- no reemplaza, solo suma; para
+    sacar uno ver DELETE .../responsables_moldeo/{operario_id}. Hereda primero
+    (si corresponde) para no pisar con un alta explícita lo que la OT ya
+    tendría heredado de su cadena de origen."""
+    body = await req.json()
+    conn = get_db()
+    try:
+        t = conn.execute("SELECT estadotrabajo, origen FROM Trabajos WHERE iditemtrabajo=?", (trabajo_id,)).fetchone()
+        if not t:
+            raise HTTPException(404, f"OT {trabajo_id} no encontrada")
+        if (t["estadotrabajo"] or "").upper() not in ("P", "I"):
+            raise HTTPException(400, "Solo se pueden agregar responsables de moldeo a una OT en estado Inicial o Programado")
+
+        try:
+            operario_id = int(body.get("operario_id"))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "operario inválido")
+        if not conn.execute("SELECT 1 FROM _v_responsables WHERE codigoresponsable=?", (operario_id,)).fetchone():
+            raise HTTPException(404, f"Operario {operario_id} no encontrado")
+
+        _moldeo_heredar_responsables_si_corresponde(conn, trabajo_id, t["origen"], "_trabajo_responsable_moldeo")
+        conn.execute(
+            "INSERT OR IGNORE INTO _trabajo_responsable_moldeo (trabajo_id, operario_id, asignado_en) VALUES (?,?,?)",
+            (trabajo_id, operario_id, datetime.now().isoformat())
+        )
+        conn.commit()
+        return get_trabajo_responsables_moldeo(trabajo_id, user)
+    finally:
+        conn.close()
+
+
+@app.delete("/api/trabajos/{trabajo_id}/responsables_moldeo/{operario_id}")
+def delete_trabajo_responsable_moldeo(trabajo_id: int, operario_id: int, user: dict = Depends(_get_auth_user)):
+    conn = get_db()
+    try:
+        conn.execute(
+            "DELETE FROM _trabajo_responsable_moldeo WHERE trabajo_id=? AND operario_id=?",
+            (trabajo_id, operario_id)
+        )
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@app.get("/api/moldeo/responsables_moldeo")
+def get_moldeo_responsables_moldeo(user: dict = Depends(_get_auth_user)):
+    """Todos los responsables de moldeo de todas las OT activas, sin filtrar --
+    mismo patron que /api/moldeo/ayudantes. De paso materializa la herencia
+    por cadena de origen pendiente de cualquier OT activa que todavia no
+    tenga responsables propios -- es el punto de entrada que usa Cargar
+    moldeo al abrir, asi que corre en cada apertura de la pantalla."""
+    conn = get_db()
+    try:
+        activas = conn.execute(
+            "SELECT iditemtrabajo, origen FROM Trabajos WHERE estadotrabajo IN ('P','I')"
+        ).fetchall()
+        for t in activas:
+            _moldeo_heredar_responsables_si_corresponde(conn, t["iditemtrabajo"], t["origen"], "_trabajo_responsable_moldeo")
+        conn.commit()
+        rows = conn.execute(
+            "SELECT rm.trabajo_id, rm.operario_id, v.apellidoynombre AS operario_nombre "
+            "FROM _trabajo_responsable_moldeo rm "
+            "LEFT JOIN _v_responsables v ON v.codigoresponsable = rm.operario_id "
+            "ORDER BY rm.trabajo_id, rm.asignado_en"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+# ── Responsables de noyos de una OT (N a N -- ver _trabajo_responsables_noyos) ──
+# Mismo sistema exacto que responsables de moldeo (arriba): de "un solo
+# asignado por OT" (_trabajo_responsable_noyos, tabla vieja de PK simple,
+# queda sin usar desde el frontend pero no se borra) a un conjunto, con
+# herencia por cadena de origen materializada la primera vez que se lee. La
+# diferencia de nombre con la tabla vieja (responsableS_noyos, plural) es
+# justamente para no pisarla -- convive con la vieja en vez de migrarla in
+# place, mismo criterio que _trabajo_operario_asignado -> _trabajo_
+# responsable_moldeo.
+
+@app.get("/api/trabajos/{trabajo_id}/responsables_noyos")
+def get_trabajo_responsables_noyos(trabajo_id: int, user: dict = Depends(_get_auth_user)):
+    conn = get_db()
+    try:
+        t = conn.execute("SELECT origen FROM Trabajos WHERE iditemtrabajo=?", (trabajo_id,)).fetchone()
+        if t:
+            _moldeo_heredar_responsables_si_corresponde(conn, trabajo_id, t["origen"], "_trabajo_responsables_noyos")
+            conn.commit()
+        rows = conn.execute(
+            "SELECT rn.operario_id, v.apellidoynombre AS operario_nombre "
+            "FROM _trabajo_responsables_noyos rn "
+            "LEFT JOIN _v_responsables v ON v.codigoresponsable = rn.operario_id "
+            "WHERE rn.trabajo_id = ? ORDER BY rn.asignado_en",
+            (trabajo_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@app.post("/api/trabajos/{trabajo_id}/responsables_noyos")
+async def post_trabajo_responsable_noyos(trabajo_id: int, req: Request, user: dict = Depends(_get_auth_user)):
+    """Agrega un responsable de noyos a la OT -- no reemplaza, solo suma; para
+    sacar uno ver DELETE .../responsables_noyos/{operario_id}. Hereda primero
+    (si corresponde) para no pisar con un alta explícita lo que la OT ya
+    tendría heredado de su cadena de origen."""
+    body = await req.json()
+    conn = get_db()
+    try:
+        t = conn.execute("SELECT estadotrabajo, origen FROM Trabajos WHERE iditemtrabajo=?", (trabajo_id,)).fetchone()
+        if not t:
+            raise HTTPException(404, f"OT {trabajo_id} no encontrada")
+        if (t["estadotrabajo"] or "").upper() not in ("P", "I"):
+            raise HTTPException(400, "Solo se pueden agregar responsables de noyos a una OT en estado Inicial o Programado")
+
+        try:
+            operario_id = int(body.get("operario_id"))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "operario inválido")
+        if not conn.execute("SELECT 1 FROM _v_responsables WHERE codigoresponsable=?", (operario_id,)).fetchone():
+            raise HTTPException(404, f"Operario {operario_id} no encontrado")
+
+        _moldeo_heredar_responsables_si_corresponde(conn, trabajo_id, t["origen"], "_trabajo_responsables_noyos")
+        conn.execute(
+            "INSERT OR IGNORE INTO _trabajo_responsables_noyos (trabajo_id, operario_id, asignado_en) VALUES (?,?,?)",
+            (trabajo_id, operario_id, datetime.now().isoformat())
+        )
+        conn.commit()
+        return get_trabajo_responsables_noyos(trabajo_id, user)
+    finally:
+        conn.close()
+
+
+@app.delete("/api/trabajos/{trabajo_id}/responsables_noyos/{operario_id}")
+def delete_trabajo_responsable_noyos(trabajo_id: int, operario_id: int, user: dict = Depends(_get_auth_user)):
+    conn = get_db()
+    try:
+        conn.execute(
+            "DELETE FROM _trabajo_responsables_noyos WHERE trabajo_id=? AND operario_id=?",
+            (trabajo_id, operario_id)
+        )
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@app.get("/api/moldeo/responsables_noyos")
+def get_moldeo_responsables_noyos(user: dict = Depends(_get_auth_user)):
+    """Todos los responsables de noyos de todas las OT activas, sin filtrar --
+    mismo patron que /api/moldeo/responsables_moldeo (incluye la herencia)."""
+    conn = get_db()
+    try:
+        activas = conn.execute(
+            "SELECT iditemtrabajo, origen FROM Trabajos WHERE estadotrabajo IN ('P','I')"
+        ).fetchall()
+        for t in activas:
+            _moldeo_heredar_responsables_si_corresponde(conn, t["iditemtrabajo"], t["origen"], "_trabajo_responsables_noyos")
+        conn.commit()
+        rows = conn.execute(
+            "SELECT rn.trabajo_id, rn.operario_id, v.apellidoynombre AS operario_nombre "
+            "FROM _trabajo_responsables_noyos rn "
+            "LEFT JOIN _v_responsables v ON v.codigoresponsable = rn.operario_id "
+            "ORDER BY rn.trabajo_id, rn.asignado_en"
         ).fetchall()
         return [dict(r) for r in rows]
     finally:
@@ -6510,11 +7875,11 @@ def _pv_fmt_num(value):
         return str(int(value))
     return ("%.2f" % value).rstrip("0").rstrip(".")
 
-def _pv_recalc_quality(provider_rows, psp_rows, today=None):
+def _pv_recalc_quality(provider_rows, psp_rows, today=None, start=None):
     """Recalcula nivel de calidad. provider_rows y psp_rows son dicts."""
     from datetime import date as _date, timedelta as _td
     today = today or _date.today()
-    start = today - _td(days=365)
+    start = start or (today - _td(days=365))
     next_review = _date(today.year + 1, 1, 1)
     cond_review = next_review - _td(days=182)
     updated = []
@@ -6709,6 +8074,7 @@ def prov_delete_unidad(uid: str, admin: dict = Depends(_require_admin)):
 @app.get("/api/prov/proveedores")
 def prov_get_proveedores(
     eval_date: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
     recalc: bool = Query(False),
     user: dict = Depends(_pv_require_prov),
 ):
@@ -6724,9 +8090,16 @@ def prov_get_proveedores(
                     today = _date.fromisoformat(eval_date)
                 except ValueError:
                     pass
-            updated = _pv_recalc_quality(providers, psps, today)
-            # Persist only if using today's date (real recalc)
-            if not eval_date:
+            start = None
+            if start_date:
+                try:
+                    from datetime import date as _date
+                    start = _date.fromisoformat(start_date)
+                except ValueError:
+                    pass
+            updated = _pv_recalc_quality(providers, psps, today, start)
+            # Persist only si es el recalculo real (sin fechas elegidas a mano)
+            if not eval_date and not start_date:
                 _pv_persist_quality(conn, updated)
                 conn.commit()
             return updated
@@ -6789,6 +8162,7 @@ def prov_delete_proveedor(pid: int, admin: dict = Depends(_require_admin)):
 @app.get("/api/prov/proveedores/print")
 def prov_print_proveedores(
     eval_date: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
     solo_aprobados: bool = Query(False),
     user: dict = Depends(_pv_require_prov),
 ):
@@ -6805,11 +8179,19 @@ def prov_print_proveedores(
             today = _date.fromisoformat(eval_date)
         except ValueError:
             pass
-    rows = _pv_recalc_quality(providers, psps, today)
+    start = None
+    if start_date:
+        try:
+            from datetime import date as _date
+            start = _date.fromisoformat(start_date)
+        except ValueError:
+            pass
+    rows = _pv_recalc_quality(providers, psps, today, start)
     if solo_aprobados:
         rows = [r for r in rows if str(r.get("nivel","")).upper().startswith("APROBADO")]
-    from datetime import date as _date
+    from datetime import date as _date, timedelta as _td
     eval_str = (today or _date.today()).strftime("%d/%m/%Y")
+    start_str = (start or ((today or _date.today()) - _td(days=365))).strftime("%d/%m/%Y")
 
     def _nivel_color(nivel):
         n = nivel.lower()
@@ -6855,7 +8237,7 @@ td{{padding:3px 6px;border-bottom:1px solid #e0e0e0;vertical-align:top}}
 @media print{{*{{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}}}}
 </style></head><body>
 <div class="hdr"><h1>Listado de Proveedores — Nivel de Calidad</h1>
-<p>Período evaluado al: {eval_str} &nbsp;|&nbsp; Generado: {_date.today().strftime("%d/%m/%Y")}{" &nbsp;|&nbsp; Solo aprobados" if solo_aprobados else ""}</p></div>
+<p>Período evaluado: {start_str} — {eval_str} &nbsp;|&nbsp; Generado: {_date.today().strftime("%d/%m/%Y")}{" &nbsp;|&nbsp; Solo aprobados" if solo_aprobados else ""}</p></div>
 <table><thead><tr>{''.join(f"<th>{l}</th>" for l in labels)}</tr></thead>
 <tbody>{rows_html}</tbody></table>
 </body></html>"""

@@ -37,7 +37,11 @@ const _trendProyeccionPlugin = {
   id: 'trendProyeccion',
   afterDatasetsDraw(chart, args, opts) {
     if (!opts || !opts.items || !opts.items.length) return;
-    const meta = chart.getDatasetMeta(0); // dataset "Entregadas"
+    // El plugin es compartido entre el anual (5 series, "Entregadas" en el
+    // índice 1 porque "Producidas" se agregó adelante) y el mensual (2
+    // series, "Entregadas" en el índice 0) -- cada llamador tiene que decir
+    // el suyo, no se puede adivinar un número fijo acá sin romper al otro.
+    const meta = chart.getDatasetMeta(opts.datasetIndex ?? 0);
     const ctx = chart.ctx;
     ctx.save();
     ctx.lineWidth = 1.5;
@@ -95,19 +99,25 @@ function _renderTendenciaBarras(canvasId, data, proyeccion, modo, kgBtnId, onBar
 
   const opts = chartDefaults();
   opts.layout = { padding: { top: 30 } }; // lugar para la proyección arriba de la barra del año actual
+  // mode:'index'+intersect:false -- por defecto el tooltip solo se activa
+  // parado exactamente sobre el rectangulo de la barra real, y la
+  // proyección (Inicial/Programado/Fundido) se dibuja como franjas
+  // punteadas POR ENCIMA de esa barra, fuera de esa zona -- sin esto, pasar
+  // el mouse por la parte de proyección no mostraba nada.
+  opts.interaction = { mode: 'index', intersect: false };
   const añoActualTT = String(new Date().getFullYear());
   const idxActual = data.findIndex(t => t.año === añoActualTT);
   const entregadasActual = idxActual >= 0 ? (data[idxActual][campo('entregadas')] || 0) : 0;
   const partes = _proyeccionPartes(proyeccion, modo);
   opts.plugins.trendProyeccion = (proyeccion && idxActual >= 0)
-    ? { items: [{ index: idxActual, entregadasActual, ...partes }] }
+    ? { items: [{ index: idxActual, entregadasActual, ...partes }], datasetIndex: 1 } // "Entregadas": 0 es "Producidas"
     : null;
   // En la barra Entregadas del año actual, el tooltip desglosa la proyección
   // en Programado y Fundido, igual que Pendientes de fundir.
   opts.plugins.tooltip = { callbacks: { label: (ctx) => {
     const label = ctx.dataset.label || '';
     const val = ctx.parsed.y;
-    if (ctx.datasetIndex === 0 && proyeccion && ctx.dataIndex === idxActual) {
+    if (ctx.datasetIndex === 1 && proyeccion && ctx.dataIndex === idxActual) {
       return [
         label + ': ' + fmtFn(val),
         'Inicial: ' + fmtFn(partes.inicial),
@@ -128,6 +138,7 @@ function _renderTendenciaBarras(canvasId, data, proyeccion, modo, kgBtnId, onBar
     data: {
       labels: data.map(t => t.año),
       datasets: [
+        { label: 'Producidas'+sfx, data: data.map(t=>t[campo('producidas')]||0), backgroundColor: '#78909cbb', borderRadius: 4 },
         { label: 'Entregadas'+sfx, data: data.map(t=>t[campo('entregadas')]||0), backgroundColor: '#66bb6abb', borderRadius: 4 },
         { label: 'Rechazadas'+sfx, data: data.map(t=>t[campo('rechazadas')]||0), backgroundColor: '#ef5350bb', borderRadius: 4 },
         { label: 'Devueltas'+sfx,  data: data.map(t=>t[campo('devueltas')]||0), backgroundColor: '#a78bfabb', borderRadius: 4 },

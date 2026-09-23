@@ -73,15 +73,6 @@ SYNC_GROUPS: dict[str, list[str]] = {
     ],
 }
 
-# Intervalo mínimo entre syncs de cada grupo (segundos).
-GROUP_INTERVALS: dict[str, int] = {
-    "en_curso":    15 * 60,    #  15 minutos
-    "movimientos": 30 * 60,    #  30 minutos
-    "resoluciones":30 * 60,    #  30 minutos
-    "maestros":    30 * 60,    #  30 minutos
-}
-
-
 # ── Helpers internos ──────────────────────────────────────────────────────────
 
 def _sanitize_name(name: str) -> str:
@@ -115,8 +106,19 @@ def _coerce(value: str, col_type: str):
     if not value.strip():
         return None
     if col_type == "INTEGER":
-        try: return int(value)
-        except ValueError: return None
+        try:
+            return int(value)
+        except ValueError:
+            # _infer_type solo mira una muestra de 200 filas -- si esa muestra
+            # daba todos enteros pero una fila más adelante trae un decimal
+            # (ej. HorasTrabajadas=35.5 con muchos 0 alrededor), no se puede
+            # perder el valor silenciosamente: SQLite no fuerza el tipo de
+            # columna (type affinity), así que guardar un REAL en una columna
+            # "INTEGER" funciona sin problema.
+            try:
+                return float(value.replace(",", "."))
+            except ValueError:
+                return None
     if col_type == "REAL":
         try: return float(value.replace(",", "."))
         except ValueError: return None

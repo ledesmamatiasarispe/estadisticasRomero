@@ -6,7 +6,7 @@
 <title>Kiosk — Fundición José Romero</title>
 <script src="/vendor/chart.min.js"></script>
 <script src="/js/pend_fundir.js?v=20260909-1"></script>
-<script src="/js/tendencia.js?v=20260909-1"></script>
+<script src="/js/tendencia.js?v=20260917-3"></script>
 <link rel="stylesheet" href="/css/pend_fundir.css">
 <style>
 :root {
@@ -270,12 +270,14 @@ const KIOSK_SLIDES = [
   { id: 'defectos_rech',   label: 'Motivos de Rechazo',   icon: '⚠️', group: 'Estadística', period: true },
   { id: 'defectos_rep',    label: 'Tipos de Reparación',  icon: '🛠️', group: 'Estadística', period: true },
   { id: 'probeta',         label: 'Probetas de Tracción', icon: '🔬', group: 'Calidad',     period: true },
+  // El kiosko es una pantalla publica sin login -- nunca ofrece "pesos" como
+  // unidad (ver el mismo comentario en index.html, que es donde se configura).
   { id: 'pend_fundir_grafico',    label: 'Pendiente de Fundir',     icon: '⚙️', group: 'Producción', period: true,
-    modos: [{ key: 'unidad', label: 'Unidad', options: [{v:'piezas',l:'Piezas'},{v:'kg',l:'Kg'},{v:'pesos',l:'Pesos ($)'}] }] },
+    modos: [{ key: 'unidad', label: 'Unidad', options: [{v:'piezas',l:'Piezas'},{v:'kg',l:'Kg'}] }] },
   { id: 'pend_fundir_calendario', label: 'Calendario de Entregas',  icon: '📅', group: 'Producción', period: true,
     modos: [{ key: 'vista', label: 'Vista', options: [{v:'mes',l:'Mes'},{v:'año',l:'Año'}] }] },
   { id: 'tendencia', label: 'Tendencia Anual', icon: '📈', group: 'Producción',
-    modos: [{ key: 'unidad', label: 'Unidad', options: [{v:'piezas',l:'Piezas'},{v:'kg',l:'Kg'},{v:'pesos',l:'Pesos ($)'}] }] },
+    modos: [{ key: 'unidad', label: 'Unidad', options: [{v:'piezas',l:'Piezas'},{v:'kg',l:'Kg'}] }] },
 ];
 
 function _kioskGetConfig() {
@@ -1044,8 +1046,9 @@ let _kioskTendenciaModo = 'piezas'; // 'piezas' | 'kg' | 'pesos'
 let _kioskTendenciaData = null;
 let _kioskTendenciaProyeccion = null;
 
+// Pantalla publica sin login -- nunca ofrece $ (ver _tienePrecios en pend_fundir.js).
 function _kioskToggleTendenciaKg() {
-  _kioskTendenciaModo = _kioskTendenciaModo === 'piezas' ? 'kg' : _kioskTendenciaModo === 'kg' ? 'pesos' : 'piezas';
+  _kioskTendenciaModo = _kioskTendenciaModo === 'piezas' ? 'kg' : 'piezas';
   _renderTendenciaBarras('chart-tendencia-kiosk', _kioskTendenciaData, _kioskTendenciaProyeccion, _kioskTendenciaModo, 'tendencia-kg-btn', null);
 }
 
@@ -1125,7 +1128,7 @@ async function _kioskShowSlide(slide) {
         const m = _sM('pend_fundir_grafico');
         html = _kioskShellPendFundir(slide);
         afterRender = () => {
-          _pendFundirModo = _kioskModo('pend_fundir_grafico', 'unidad') || 'piezas';
+          _pendFundirModo = _modoSeguro(_kioskModo('pend_fundir_grafico', 'unidad') || 'piezas');
           _renderPendienteFundirChart('chart-pend-fundir-kiosk', 'kiosk-pend-fundir-sub', m);
         };
         break;
@@ -1149,7 +1152,7 @@ async function _kioskShowSlide(slide) {
         try { p = await api('/api/dashboard/proyeccion_pipeline?meses=' + m); } catch(_) { p = null; }
         _kioskTendenciaData = d?.tendencia || [];
         _kioskTendenciaProyeccion = p;
-        _kioskTendenciaModo = _kioskModo('tendencia', 'unidad') || 'piezas';
+        _kioskTendenciaModo = _modoSeguro(_kioskModo('tendencia', 'unidad') || 'piezas');
         html = _kioskShellTendencia(slide);
         afterRender = () => _renderTendenciaBarras('chart-tendencia-kiosk', _kioskTendenciaData, _kioskTendenciaProyeccion, _kioskTendenciaModo, 'tendencia-kg-btn', null);
         break;

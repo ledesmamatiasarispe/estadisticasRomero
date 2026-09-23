@@ -9,6 +9,17 @@
 //     detalle abre su ficha). kiosk.html no la define -- ver _pendFundirIrATrabajo,
 //     que revisa que exista antes de llamarla y en kiosk simplemente no navega.
 
+// Permiso transversal 'precios' (ver _ALL_SECCIONES en main.py) -- controla si
+// esta sesion puede ver montos en $ en cualquier parte de la app. Vive aca (no
+// en index.html) porque este archivo lo carga TAMBIEN kiosk.html, que nunca
+// define _AUTH (es una pantalla publica sin login) -- default false para que
+// el kiosko, que nunca lo toca, nunca muestre $. index.html lo pone en true/
+// false despues de loguearse, segun _AUTH.user.tiene_precios (ver _authInit).
+// El backend redacta estos mismos campos igual si alguien llama la API
+// directo salteando el frontend -- esto es solo para no ofrecer la opcion en
+// la UI de quien no la puede usar.
+let _tienePrecios = false;
+
 // 'piezas' | 'kg' | 'pesos' -- que unidad muestran las barras/tooltip/subtitulo.
 // El nombre viejo (_pendFundirKgMode, booleano) se reemplaza por este modo de 3
 // estados; pesos_pendientes viene de la misma resolucion de precio que usa
@@ -68,11 +79,23 @@ async function _renderPendienteFundirChart(canvasId, subtitleId, meses) {
   _drawPendienteFundirChart(canvasId, subtitleId, data);
 }
 
-const _PEND_FUNDIR_MODOS = ['piezas', 'kg', 'pesos'];
+function _pendFundirModos() {
+  return _tienePrecios ? ['piezas', 'kg', 'pesos'] : ['piezas', 'kg'];
+}
+
+// Corrige un modo leido de una config guardada (kiosko) que pueda venir en
+// 'pesos' de antes de que esa opcion se sacara del selector -- una config
+// vieja no se reescribe sola. Sin esto, el kiosko (que nunca tiene el
+// permiso 'precios') intentaria dibujar en $ con datos ya redactados en None
+// por el backend, mostrando un grafico vacio en vez de caer a piezas.
+function _modoSeguro(modo) {
+  return (modo === 'pesos' && !_tienePrecios) ? 'piezas' : modo;
+}
 
 function _ciclarPendFundirModo() {
-  const i = _PEND_FUNDIR_MODOS.indexOf(_pendFundirModo);
-  _pendFundirModo = _PEND_FUNDIR_MODOS[(i + 1) % _PEND_FUNDIR_MODOS.length];
+  const modos = _pendFundirModos();
+  const i = modos.indexOf(_pendFundirModo);
+  _pendFundirModo = modos[(i + 1) % modos.length];
   if (_pendFundirData && _pendFundirIds) {
     _drawPendienteFundirChart(_pendFundirIds.canvasId, _pendFundirIds.subtitleId, _pendFundirData);
   }
