@@ -460,16 +460,28 @@ ${cuerpo}
 
 // ── Modal de detalle: lista de OTs detras de una barra (codigo+estado) o de
 // un dia de calendario (fecha, sin estado -- trae Programadas y Fundidas
-// juntas, cada fila con la suya) -- mismo endpoint para los dos casos.
+// juntas, cada fila con la suya) -- mismo endpoint para los dos casos. Mismo
+// modal (y mismo mecanismo de _trabajo_oculto que ya usa Cargar moldeo) para
+// "OT trabadas" (_abrirPendFundirTrabadasModal, más abajo) -- "olvidadas" y
+// "ocultas" son la MISMA lista vista en dos momentos (candidata a ocultar /
+// ya oculta), así que van juntas en un solo botón y un solo modal en vez de
+// dos por separado -- tenerlas aparte confundía más de lo que aclaraba.
 let _pendFundirDetalleRows = [];
 let _pendFundirDetalleTitulo = 'OTs';
+// 'detalle' (clic en una barra o un día -- columnas de kg/$/pendientes) |
+// 'trabadas' (olvidadas + ocultas combinado, sin esas columnas) -- decide
+// qué hace _pendFundirOcultarOT/_pendFundirRestaurarOT al terminar.
+let _pendFundirModalTipo = 'detalle';
 
 async function _abrirPendFundirDetalle(titulo, filtros) {
   const modal = $id('pend-fundir-detalle-modal');
   const body = $id('pend-fundir-detalle-modal-body');
   const tituloEl = $id('pend-fundir-detalle-titulo');
+  const imprimirBtn = $id('pend-fundir-detalle-imprimir');
   _pendFundirDetalleTitulo = titulo || 'OTs';
+  _pendFundirModalTipo = 'detalle';
   if (tituloEl) tituloEl.textContent = titulo;
+  if (imprimirBtn) imprimirBtn.style.display = '';
   if (modal) modal.classList.add('open');
   if (body) body.innerHTML = '<div class="loading">Cargando...</div>';
 
@@ -478,13 +490,22 @@ async function _abrirPendFundirDetalle(titulo, filtros) {
   catch (e) { if (body) body.innerHTML = '<div class="empty">No se pudo cargar</div>'; return; }
 
   _pendFundirDetalleRows = rows;
+  _renderPendFundirDetalle();
+}
+
+function _renderPendFundirDetalle() {
+  const body = $id('pend-fundir-detalle-modal-body');
   if (!body) return;
+  const rows = _pendFundirDetalleRows;
   if (!rows.length) { body.innerHTML = '<div class="empty">Sin OTs</div>'; return; }
 
   const totalPz = rows.reduce((s, r) => s + (r.pendientes || 0), 0);
   const totalKg = rows.reduce((s, r) => s + (r.kg_pendientes || 0), 0);
   const totalPesos = rows.reduce((s, r) => s + (r.pesos_pendientes || 0), 0);
   const hayVarios = new Set(rows.map(r => r.estado)).size > 1;
+  // Solo Inicial/Programado se pueden ocultar (misma regla que valida el
+  // backend en POST /api/trabajos_ocultos) -- Fundido no ofrece el botón.
+  const puedeOcultar = r => r.estado === 'I' || r.estado === 'P';
 
   body.innerHTML = `
     <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
@@ -494,7 +515,7 @@ async function _abrirPendFundirDetalle(titulo, filtros) {
       <table>
         <thead><tr>
           <th>OT</th>${hayVarios ? '<th>Estado</th>' : ''}<th>Pieza</th><th>Material</th><th>Cliente</th>
-          <th style="text-align:right">Pend.</th><th style="text-align:right">Kg</th><th style="text-align:right">$</th><th>Entrega</th>
+          <th style="text-align:right">Pend.</th><th style="text-align:right">Kg</th><th style="text-align:right">$</th><th>Entrega</th><th></th>
         </tr></thead>
         <tbody>${rows.map(r => `
           <tr class="tr-link" onclick="closePendFundirDetalleModal();_pendFundirIrATrabajo(${r.ot_id})">
@@ -507,10 +528,153 @@ async function _abrirPendFundirDetalle(titulo, filtros) {
             <td style="text-align:right">${r.kg_pendientes != null ? fmtKg(r.kg_pendientes) : '—'}</td>
             <td style="text-align:right">${r.pesos_pendientes != null ? fmtPesos(r.pesos_pendientes) : '—'}</td>
             <td style="font-size:11px;color:var(--muted)">${r.fechaprevista ? r.fechaprevista.slice(0, 10) : '—'}</td>
+            <td style="text-align:right">${puedeOcultar(r)
+              ? `<span onclick="event.stopPropagation();_pendFundirOcultarOT(${r.ot_id})" style="cursor:pointer;color:#e74c3c;font-weight:700;font-size:14px" title="Ocultar (OT trabada en Programado, corregir en Access)">&#10005;</span>`
+              : ''}</td>
           </tr>`).join('')}
         </tbody>
       </table>
     </div>`;
+}
+
+// Refresca lo que esté visible ahora mismo (gráfico y, si corresponde,
+// calendario) después de ocultar/restaurar una OT -- mismo criterio en los
+// dos sentidos: no hace falta cerrar y reabrir la pantalla para ver el
+// número actualizado. _pendFundirCalData se invalida (no solo se re-pide)
+// porque togglePendFundirCal la reusa como cache si ya existe.
+function _pendFundirRefrescarVista() {
+  if (!_pendFundirIds) return;
+  _renderPendienteFundirChart(_pendFundirIds.canvasId, _pendFundirIds.subtitleId, _pendFundirMeses).then(() => {
+    if (!_pendFundirCalMode) return;
+    _pendFundirCalData = null;
+    api('/api/dashboard/pendiente_fundir/calendario?' + _pendFundirQS({ meses: _pendFundirMeses }))
+      .then(d => { _pendFundirCalData = d; _renderPendFundirCalendario(_pendFundirIds.canvasId); })
+      .catch(() => {});
+  });
+}
+
+// Ocultar/restaurar reusan exactamente el mecanismo de Cargar moldeo
+// (_trabajo_oculto vía /api/trabajos_ocultos) -- es el mismo parche local
+// para OT trabadas, ahora también disponible desde Pendiente de fundir.
+// Ramifica según _pendFundirModalTipo porque el mismo botón "Ocultar" vive
+// en dos modales distintos: el detalle de una barra/día (_renderPendFundirDetalle)
+// y el combinado de OT trabadas (_renderPendFundirTrabadas).
+async function _pendFundirOcultarOT(otId) {
+  if (!confirm('¿Ocultar la OT ' + String(otId).padStart(6, '0') + ' de esta tabla?\n\nEs un parche local para OT trabadas en Programado -- no toca Access, pero se comparte con Cargar moldeo (ocultarla acá también la saca de ahí). Si alguien la corrige en Access y cambia de estado, se vuelve a mostrar sola -- también se puede revertir a mano desde "Ver OT ocultas".')) return;
+  try { await api('/api/trabajos_ocultos/' + otId, { method: 'POST' }); }
+  catch (e) { alert('No se pudo ocultar: ' + e.message); return; }
+  if (_pendFundirModalTipo === 'trabadas') {
+    const idx = _pendFundirOlvidadasRows.findIndex(r => r.ot_id === otId);
+    if (idx >= 0) _pendFundirOlvidadasRows.splice(idx, 1);
+    // Cant. pedido/producida (cadena de origen) se calcula en el backend --
+    // no hay forma barata de aproximarlo acá, así que en vez de un objeto
+    // optimista a medias se vuelve a pedir la lista entera (chica, no pasa
+    // de un par de decenas de filas).
+    try { _pendFundirOcultasRows = await api('/api/trabajos_ocultos'); }
+    catch (e) { /* deja la lista anterior si falla */ }
+    _renderPendFundirTrabadas();
+  } else {
+    _pendFundirDetalleRows = _pendFundirDetalleRows.filter(r => r.ot_id !== otId);
+    _renderPendFundirDetalle();
+  }
+  _pendFundirRefrescarVista();
+}
+
+async function _pendFundirRestaurarOT(otId) {
+  try { await api('/api/trabajos_ocultos/' + otId, { method: 'DELETE' }); }
+  catch (e) { alert('No se pudo mostrar: ' + e.message); return; }
+  _pendFundirOcultasRows = _pendFundirOcultasRows.filter(o => o.trabajo_id !== otId);
+  _renderPendFundirTrabadas();
+  _pendFundirRefrescarVista();
+}
+
+// "OT trabadas": un solo botón/modal para las dos caras de lo mismo --
+// "olvidadas" (Programadas hace más de un mes, candidatas a ocultar) y
+// "ocultas" (ya ocultas, candidatas a restaurar) son la misma lista vista
+// en dos momentos, así que van juntas acá en vez de en dos modales separados
+// que antes se veían (y eran) redundantes entre sí.
+let _pendFundirOlvidadasRows = [];
+let _pendFundirOcultasRows = [];
+
+// "Cant. pedido / producida": pedido es lo que pedía ese ítem del pedido
+// completo (ItemDetallePedido.cantidadpedida) -- no Trabajos.cantidad de la
+// OT trabada, que solo tiene el resto que le faltaba a ESA punta de la
+// cadena. Producida es la suma de cantidadproducida de TODA la cadena de
+// origen de esa OT (GET /api/trabajos_ocultos ya la trae sumada, ver
+// _trabajo_cadena_cantidad_producida en main.py): la OT trabada en sí casi
+// nunca produjo nada -- es la cadena entera la que dice cuánto falta de
+// verdad. Compartida entre el modal "Ver OT ocultas" (acá abajo) y la lista
+// impresa de Cargar moldeo (index.html, _moldeoImprimirOcultas).
+function _cantidadPedidoProducidaHtml(pedido, producida) {
+  const ped = pedido || 0;
+  const prod = producida || 0;
+  const color = (ped > 0 && prod >= ped) ? 'var(--green)' : 'var(--accent)';
+  return ped + ' / <span style="color:' + color + '">' + prod + '</span>';
+}
+
+function _renderPendFundirTrabadas() {
+  const body = $id('pend-fundir-detalle-modal-body');
+  if (!body) return;
+  const olv = _pendFundirOlvidadasRows;
+  const oc  = _pendFundirOcultasRows;
+
+  const filasOlv = olv.length ? olv.map(r => `
+    <tr class="tr-link" onclick="closePendFundirDetalleModal();_pendFundirIrATrabajo(${r.ot_id})">
+      <td><code style="color:var(--accent)">${String(r.ot_id).padStart(6, '0')}</code></td>
+      <td>${r.nombrepieza || '—'}</td>
+      <td>${r.cliente_nombre || '—'}</td>
+      <td style="font-size:11px;color:var(--muted)">${r.fechaprevista ? r.fechaprevista.slice(0, 10).split('-').reverse().join('/') : '—'}</td>
+      <td style="text-align:right"><span onclick="event.stopPropagation();_pendFundirOcultarOT(${r.ot_id})" style="cursor:pointer;color:#e74c3c;font-weight:700;font-size:14px" title="Ocultar (OT trabada en Programado, corregir en Access)">&#10005;</span></td>
+    </tr>`).join('') : '<tr><td colspan="5" class="empty">Ninguna -- no hay OT Programadas hace más de un mes.</td></tr>';
+
+  const filasOc = oc.length ? oc.map(o => `
+    <tr>
+      <td><code style="color:var(--accent);cursor:pointer" onclick="closePendFundirDetalleModal();_pendFundirIrATrabajo(${o.trabajo_id})">${String(o.trabajo_id).padStart(6, '0')}</code></td>
+      <td>${o.nombrepieza || '—'}</td>
+      <td>${o.cliente_nombre || '—'}</td>
+      <td style="text-align:right;font-weight:600;white-space:nowrap">${_cantidadPedidoProducidaHtml(o.cantidadpedida, o.cantidad_producida_cadena)}</td>
+      <td style="font-size:11px;color:var(--muted)">${o.oculto_en ? o.oculto_en.slice(0, 10).split('-').reverse().join('/') : '—'}</td>
+      <td style="font-size:11px;color:var(--muted)">${o.oculto_por_nombre || (o.oculto_por_legajo != null ? 'Legajo ' + o.oculto_por_legajo : '—')}</td>
+      <td style="text-align:right"><button class="page-btn" style="font-size:11px;padding:3px 8px" onclick="_pendFundirRestaurarOT(${o.trabajo_id})" title="Volver a mostrar">&#8635; Volver a mostrar</button></td>
+    </tr>`).join('') : '<tr><td colspan="7" class="empty">Ninguna OT oculta.</td></tr>';
+
+  body.innerHTML = `
+    <div style="font-size:11px;color:var(--muted);margin-bottom:14px">Mismo mecanismo que "Ver OT ocultas" en Cargar moldeo: es un parche local para OT trabadas en Programado -- no toca Access, y ocultar/restaurar acá se ve reflejado ahí también.</div>
+    <div style="font-weight:600;font-size:13px;margin-bottom:8px">Olvidadas &mdash; Programadas hace m&aacute;s de 1 mes, candidatas a ocultar (${olv.length})</div>
+    <div class="tbl-wrap" style="margin-bottom:20px"><table>
+      <thead><tr><th>OT</th><th>Pieza</th><th>Cliente</th><th>Prevista</th><th></th></tr></thead>
+      <tbody>${filasOlv}</tbody>
+    </table></div>
+    <div style="font-weight:600;font-size:13px;margin-bottom:8px">Ya ocultas (${oc.length})</div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>OT</th><th>Pieza</th><th>Cliente</th><th style="text-align:right">Cant. pedido / producida</th><th>Oculta desde</th><th>Por</th><th></th></tr></thead>
+      <tbody>${filasOc}</tbody>
+    </table></div>`;
+}
+
+async function _abrirPendFundirTrabadasModal() {
+  const modal = $id('pend-fundir-detalle-modal');
+  const body = $id('pend-fundir-detalle-modal-body');
+  const tituloEl = $id('pend-fundir-detalle-titulo');
+  const imprimirBtn = $id('pend-fundir-detalle-imprimir');
+  _pendFundirDetalleTitulo = 'OT ocultas';
+  _pendFundirModalTipo = 'trabadas';
+  if (tituloEl) tituloEl.textContent = 'OT ocultas';
+  if (imprimirBtn) imprimirBtn.style.display = 'none'; // formato distinto al de /detalle, no comparte columnas
+  if (modal) modal.classList.add('open');
+  if (body) body.innerHTML = '<div class="loading">Cargando...</div>';
+
+  let olvidadas, ocultas;
+  try {
+    [olvidadas, ocultas] = await Promise.all([
+      api('/api/dashboard/pendiente_fundir/detalle?' + _pendFundirQS({ meses: 60, olvidadas: true })),
+      api('/api/trabajos_ocultos'),
+    ]);
+  } catch (e) { if (body) body.innerHTML = '<div class="empty">No se pudo cargar</div>'; return; }
+
+  _pendFundirOlvidadasRows = olvidadas;
+  _pendFundirOcultasRows = ocultas;
+  _renderPendFundirTrabadas();
 }
 
 function _imprimirPendFundirDetalle() {

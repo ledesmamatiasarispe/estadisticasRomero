@@ -42,6 +42,24 @@ FOTOS_MODELOS_PATHS: list[str] = [
 ]
 INFORMES_PSP = ROOT / "data" / "informes_psp"
 INFORMES_PSP.mkdir(parents=True, exist_ok=True)
+# Fotos de las mediciones ("óvalos") de sinterizado: una por planilla+altura, en
+# disco (no en la fila de la base) -- mismo criterio que INFORMES_PSP. Se
+# nombran por el mm (entero, ya único dentro de la planilla) para no necesitar
+# un id propio por medición.
+FOTOS_SINTER = ROOT / "data" / "fotos_sinterizado"
+FOTOS_SINTER.mkdir(parents=True, exist_ok=True)
+
+# Imágenes insertadas dentro del contenido de un procedimiento: a diferencia
+# de FOTOS_SINTER (un slot fijo por mm), un documento puede tener N imágenes
+# agregadas/sacadas con el tiempo, así que el nombre es un id propio (uuid4),
+# no una clave de negocio -- ver _proc_limpiar_huerfanos para el barrido de
+# las que ya no están referenciadas en el contenido.
+PROC_IMG_DIR = ROOT / "data" / "procedimientos_imagenes"
+PROC_IMG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _sinter_foto_path(sid: int, mm: int) -> Path:
+    return FOTOS_SINTER / str(sid) / f"{mm}.jpg"
 
 _fotos_ok: Optional[bool] = None
 _fotos_ok_ts: float = 0.0
@@ -444,7 +462,13 @@ _SESSION_HOURS = 10
 _ALL_SECCIONES = [
     "dashboard", "clientes", "analisis", "trabajos", "pedidos", "remitos",
     "piezas", "stock", "modelos", "fundiciones", "personal", "documentos",
-    "presentacion", "proveedores", "admin",
+    "presentacion", "proveedores", "sinterizado", "admin",
+    # Pestaña PRINCIPAL que lista TODOS los procedimientos visibles para la
+    # persona (de cualquier módulo, filtrados por su propio 'seccion_ver' --
+    # ver GET /api/procedimientos). Es una página real como las de arriba
+    # (necesita su propio permiso para aparecer en el menú), distinta de
+    # 'procedimientos_editar' de más abajo (esa es para EDITAR, transversal).
+    "procedimientos",
     # "precios" no es una pagina -- es un permiso transversal que habilita ver
     # montos en $ (modo pesos de Pendiente de fundir/Tendencia, distribucion
     # de precio/kg, export a Excel) dentro de paginas que la persona ya puede
@@ -452,6 +476,20 @@ _ALL_SECCIONES = [
     # (es solo un set de strings por usuario), pero el frontend lo muestra
     # aparte, no mezclado con las secciones reales.
     "precios",
+    # Mismo criterio que "precios": no es una pagina, es el permiso para EDITAR
+    # la curva de referencia del sinterizado (ver _require_sinterizado_curva).
+    # Verla es parte de ver la pestaña Sinterizado (permiso 'sinterizado'); esto
+    # es aparte porque cambiarla afecta lo que ve TODO el mundo de ahí en más
+    # (es una sola curva compartida, no una por planilla).
+    "sinterizado_curva",
+    # Mismo criterio otra vez: permiso transversal para EDITAR cualquier
+    # procedimiento (módulo general, ver _proc_chequear_ver / _require_procedimientos_editar
+    # más abajo). VER un procedimiento no depende de este permiso -- cada
+    # procedimiento guarda en 'seccion_ver' qué sección hace falta tener para
+    # verlo (ej. 'sinterizado'), así que un usuario normal sigue viendo la
+    # pestaña Procedimiento como siempre. Este permiso es para quien arma o
+    # corrige el contenido, sea de la sección que sea.
+    "procedimientos_editar",
 ]
 
 
@@ -741,6 +779,48 @@ def _seed_lookups():
     # ofrece en el modo sin OT.
     if "nota" not in _cols_moldeo:
         conn.execute("ALTER TABLE _produccion_moldeo ADD COLUMN nota TEXT")
+    # Cajas compartidas: varias OT distintas moldeadas en la misma caja física
+    # (piezas chicas, aprovechan el molde juntas). grupo_id enlaza la carga a
+    # _moldeo_grupo/_moldeo_grupo_ot (mas abajo); cantidad_piezas es la unidad
+    # para ESTAS filas en vez de cantidad_cajas (que queda en 0) -- ver
+    # _MOLDEO_KG_CTE, que multiplica por una u otra segun corresponda, y
+    # _moldeo_validar_body, que exige cantidad_piezas > 0 solo cuando hay
+    # grupo_id. NULL en cargas normales, no cambia nada de lo que ya habia.
+    if "grupo_id" not in _cols_moldeo:
+        conn.execute("ALTER TABLE _produccion_moldeo ADD COLUMN grupo_id INTEGER")
+    if "cantidad_piezas" not in _cols_moldeo:
+        conn.execute("ALTER TABLE _produccion_moldeo ADD COLUMN cantidad_piezas INTEGER")
+    # conjunto_datos: foto (JSON) de como estaba el conjunto -- que OT lo
+    # formaban, con que pieza/cliente, y quienes eran sus ayudantes/
+    # responsables -- en el momento de guardar esa carga (ver
+    # _moldeo_conjunto_snapshot). Fija: romper el conjunto, reemplazar una
+    # de sus OT o cambiar su roster despues no la altera. NULL en cargas
+    # normales (sin grupo_id).
+    if "conjunto_datos" not in _cols_moldeo:
+        conn.execute("ALTER TABLE _produccion_moldeo ADD COLUMN conjunto_datos TEXT")
+    # _moldeo_grupo/_moldeo_grupo_ot: la "plantilla" de un conjunto de caja
+    # compartida -- que OT lo forman, no cuanto se cargo cada dia (eso sigue
+    # en _produccion_moldeo, arriba). _moldeo_grupo_ot.trabajo_id guarda la OT
+    # ACTUAL de cada miembro (no la original): si esa OT se reemplaza
+    # (Trabajos.origen/reemplazogenerado), se actualiza in place la primera
+    # vez que se lee el grupo -- ver _moldeo_grupo_resolver_ot_actual, mismo
+    # criterio "materializar al leer" que _moldeo_heredar_responsables_si_corresponde
+    # usa para responsables heredados por cadena de origen.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _moldeo_grupo (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            creado_por_legajo INTEGER,
+            creado_en         TEXT    NOT NULL,
+            activo            INTEGER NOT NULL DEFAULT 1
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _moldeo_grupo_ot (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            grupo_id   INTEGER NOT NULL,
+            trabajo_id INTEGER NOT NULL
+        )
+    """)
     # Quien quedo asignado a una OT -- se escribe UNICAMENTE desde
     # put_trabajo_asignar_operario (elegir el combo alcanza, sin necesidad de
     # ninguna carga guardada). Es un reemplazo provisorio de
@@ -866,9 +946,9 @@ def _seed_lookups():
         )
     """)
     # Parche local para OT que quedaron trabadas en Programado en Access (un
-    # problema de datos que solo se arregla ahi) -- las saca de la tabla de
-    # Cargar moldeo sin tocar Pendiente de fundir ni el resto de la app, que
-    # siguen viendo la OT tal cual esta. Nunca se aplica fuera de ese modal.
+    # problema de datos que solo se arregla ahi) -- las saca de Cargar moldeo
+    # Y de Pendiente de fundir (compartido entre las dos pantallas), sin tocar
+    # el resto de la app, que sigue viendo la OT tal cual esta.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS _trabajo_oculto (
             trabajo_id        INTEGER PRIMARY KEY,
@@ -876,6 +956,17 @@ def _seed_lookups():
             oculto_en         TEXT    NOT NULL
         )
     """)
+    # estado_al_ocultar: el estadotrabajo que tenia la OT en el momento de
+    # ocultarla. Si alguien la corrige en Access y ese estado cambia, ya no
+    # aplica el motivo por el que se oculto -- se saca sola (ver
+    # _trabajo_oculto_purgar_cambiados) en vez de quedar oculta para siempre
+    # esperando que alguien la restaure a mano. NULL en filas viejas
+    # (ocultadas antes de que existiera esta columna): sin un estado de
+    # referencia no hay con que comparar, asi que esas siguen ocultas hasta
+    # una restauracion manual, como antes.
+    _cols_oculto = [r[1] for r in conn.execute("PRAGMA table_info(_trabajo_oculto)").fetchall()]
+    if "estado_al_ocultar" not in _cols_oculto:
+        conn.execute("ALTER TABLE _trabajo_oculto ADD COLUMN estado_al_ocultar TEXT")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS _responsables_extra (
             codigoresponsable   INTEGER PRIMARY KEY,
@@ -1026,6 +1117,289 @@ def _seed_lookups():
             sincronizado_en TEXT NOT NULL
         )
     """)
+    # Kg que produce el horno hoy (ver get_horno_kg): un registro por cada vez
+    # que alguien lo guarda -- quien, cuando y cuanto -- en vez de pisar un unico
+    # valor; el vigente es el ultimo.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _horno_kg (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            kg                  REAL    NOT NULL,
+            cambiado_por_legajo INTEGER,
+            cambiado_por_nombre TEXT,
+            fecha               TEXT    NOT NULL,
+            cambiado_en         TEXT    NOT NULL
+        )
+    """)
+    # Sinterizado de horno de induccion (PG 851.06): una fila por cada vez que se
+    # desarma un crisol y se arma/sinteriza uno nuevo, con los datos de la planilla
+    # PCS-PG851.06-A3 (Hoja 1 desarme + Hoja 2 armado). Lo que es lista de renglones
+    # o estado de un dibujo va en JSON (lecturas de temperatura, marcas del
+    # grafico, pasos del procedimiento); lo que se consulta/agrega para el
+    # indicador va en columnas propias.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _sinterizado (
+            id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+            estado                  TEXT    NOT NULL DEFAULT 'en_curso',
+            desarme_fecha           TEXT,
+            coladas                 INTEGER,
+            diametro_final          REAL,
+            altura                  REAL,
+            altura_conicidad        REAL,
+            aspecto                 TEXT,
+            espesor_min             REAL,
+            filtraciones            TEXT,
+            manta_oscura            TEXT,
+            foto                    TEXT,
+            foto_archivo            TEXT,
+            polvo                   TEXT,
+            polvo_mm                REAL,
+            armado_fecha            TEXT,
+            formaleta_medidas       TEXT,
+            formaleta_medidas_ok    INTEGER NOT NULL DEFAULT 0,
+            formaleta_rebabado      TEXT,
+            formaleta_rebabado_ok   INTEGER NOT NULL DEFAULT 0,
+            centrado_reviso         TEXT,
+            centrado_vb_fusion      TEXT,
+            centrado_vb_produccion  TEXT,
+            paredes_vb_produccion   TEXT,
+            observaciones           TEXT,
+            lecturas                TEXT,
+            marcas                  TEXT,
+            pasos                   TEXT,
+            bolsas                  TEXT,
+            creado_por_legajo       INTEGER,
+            creado_por_nombre       TEXT,
+            creado_en               TEXT    NOT NULL,
+            modificado_por_legajo   INTEGER,
+            modificado_por_nombre   TEXT,
+            modificado_en           TEXT    NOT NULL,
+            finalizado_por_nombre   TEXT,
+            finalizado_en           TEXT
+        )
+    """)
+    # Altura del crisol, altura de la conicidad y bolsas se agregaron despues de
+    # crear la tabla: en una base que ya la tenia se suman por ALTER. piso_*/
+    # paredes_* (producto/bolsas/fecha_fab de un solo renglón) se reemplazaron
+    # por "bolsas" (JSON, varias por sección -- piso/pared/corona, con
+    # producto+lote de trazabilidad); en una base vieja quedan como columnas
+    # sueltas sin usar, no vale la pena migrarlas a mano.
+    _cols_sinter = {r[1] for r in conn.execute("PRAGMA table_info(_sinterizado)").fetchall()}
+    for _col, _tipo in (("altura", "REAL"), ("altura_conicidad", "REAL"), ("bolsas", "TEXT"), ("antena_orificio_ok", "INTEGER DEFAULT 0")):
+        if _col not in _cols_sinter:
+            conn.execute(f"ALTER TABLE _sinterizado ADD COLUMN {_col} {_tipo}")
+    # Curva de referencia del sinterizado (paso 7): UNA sola, compartida por
+    # todas las planillas -- no por colada, sino por el procedimiento en sí, así
+    # que no va como columna de _sinterizado sino en su propia tabla, con el
+    # mismo patrón de historial append-only que _horno_kg (cada guardado es una
+    # fila nueva, la vigente es la última -- ver _sinter_curva_ref_actual).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _sinter_curva_ref (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            puntos              TEXT    NOT NULL,
+            cambiado_por_legajo INTEGER,
+            cambiado_por_nombre TEXT,
+            cambiado_en         TEXT    NOT NULL
+        )
+    """)
+    # Rango (°C) de la banda de tolerancia alrededor de la curva: se agregó
+    # después de crear la tabla, así que en una base que ya la tenía se suma
+    # por ALTER (mismo patrón que altura/bolsas en _sinterizado más arriba).
+    _cols_curva = {r[1] for r in conn.execute("PRAGMA table_info(_sinter_curva_ref)").fetchall()}
+    if "rango" not in _cols_curva:
+        conn.execute("ALTER TABLE _sinter_curva_ref ADD COLUMN rango REAL")
+    # Procedimientos (módulo general, no solo Sinterizado): contenido editable
+    # tipo blog, por bloques (JSON {blocks:[{type,data},...]}, mismo espíritu
+    # que lecturas/marcas/pasos de _sinterizado). 'codigo' es la clave estable
+    # que usa cada módulo consumidor (ej. 'sinterizado_pg85106') -- nunca el id,
+    # que es un detalle interno. 'seccion_ver' es la sección (_ALL_SECCIONES)
+    # que hace falta tener para VER este procedimiento en particular; separado
+    # del permiso 'procedimientos_editar' (transversal, de arriba), que es para
+    # EDITAR cualquiera. 'modificado_en' es el mismo optimistic lock de
+    # _sinterizado -- el contenido se pisa con UPDATE en cada autoguardado, NO
+    # un historial append-only (eso generaría cientos de filas casi idénticas
+    # por sesión de edición); el historial real vive aparte, en
+    # _procedimientos_versiones, con checkpoints gruesos (ver _proc_version_crear).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _procedimientos (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            codigo                TEXT    NOT NULL UNIQUE,
+            titulo                TEXT    NOT NULL,
+            seccion_ver           TEXT,
+            metadatos             TEXT,
+            contenido             TEXT    NOT NULL,
+            estado                TEXT    NOT NULL DEFAULT 'activo',
+            creado_por_legajo     INTEGER,
+            creado_por_nombre     TEXT,
+            creado_en             TEXT    NOT NULL,
+            modificado_por_legajo INTEGER,
+            modificado_por_nombre TEXT,
+            modificado_en         TEXT    NOT NULL
+        )
+    """)
+    # Control de versiones con aprobación (pedido explícito del usuario):
+    # tocar "Modificar" arranca un borrador (borrador_estado='editando') que
+    # convive con el contenido PUBLICADO (contenido/titulo de arriba, que no
+    # se toca mientras se edita el borrador) -- autoguardado propio, mismo
+    # patrón de optimistic lock que el resto (borrador_modificado_en). Al
+    # "Guardar" pasa a 'pendiente_aprobacion' con un motivo obligatorio (qué
+    # se cambió). Aprobarlo archiva el contenido VIEJO en
+    # _procedimientos_versiones (motivo='reemplazo') y lo reemplaza por el
+    # del borrador, subiendo 'revision' +1; rechazarlo lo devuelve a
+    # 'editando' (con borrador_motivo_rechazo) para que el autor corrija y
+    # reenvíe. Aprobar/rechazar exige 'procedimientos_editar' Y no ser el
+    # propio autor del borrador (ver post_procedimiento_borrador_aprobar) --
+    # es un control de 4 ojos, se aplica incluso a un admin: si de verdad
+    # hace falta que la misma persona redacte y apruebe, que se lo pida a
+    # otro editor, no hay bypass para esto. Solo puede haber UN borrador a
+    # la vez por procedimiento, evita que dos ediciones en paralelo se
+    # pisen entre sí.
+    _cols_proc = {r[1] for r in conn.execute("PRAGMA table_info(_procedimientos)").fetchall()}
+    for _col, _tipo in (
+        ("revision", "INTEGER NOT NULL DEFAULT 0"),
+        ("borrador_estado", "TEXT"),
+        ("borrador_titulo", "TEXT"),
+        ("borrador_contenido", "TEXT"),
+        ("borrador_motivo", "TEXT"),
+        ("borrador_motivo_rechazo", "TEXT"),
+        ("borrador_por_legajo", "INTEGER"),
+        ("borrador_por_nombre", "TEXT"),
+        ("borrador_creado_en", "TEXT"),
+        ("borrador_enviado_en", "TEXT"),
+        ("borrador_modificado_en", "TEXT"),
+        ("tipo_id", "INTEGER"),
+    ):
+        if _col not in _cols_proc:
+            conn.execute(f"ALTER TABLE _procedimientos ADD COLUMN {_col} {_tipo}")
+    # Catálogo de tipos de documento (pedido explícito: "PE"/"PG" como
+    # ejemplo, pero cargable a mano -- su propio crear/modificar/eliminar,
+    # ver /api/procedimientos/tipos más abajo). NULLABLE en _procedimientos
+    # (tipo_id arriba): un documento viejo, o uno nuevo todavía sin
+    # clasificar, no tiene por qué tener uno. Eliminar un tipo que algún
+    # documento ya tiene asignado se bloquea (confirmado con el usuario) --
+    # ver delete_procedimiento_tipo.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _procedimientos_tipos (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            sigla                 TEXT    NOT NULL UNIQUE,
+            nombre                TEXT    NOT NULL,
+            creado_por_legajo     INTEGER,
+            creado_por_nombre     TEXT,
+            creado_en             TEXT    NOT NULL,
+            modificado_por_legajo INTEGER,
+            modificado_por_nombre TEXT,
+            modificado_en         TEXT    NOT NULL
+        )
+    """)
+    for _sigla, _nombre in (("PE", "Procedimiento Específico"), ("PG", "Procedimiento General")):
+        conn.execute(
+            "INSERT OR IGNORE INTO _procedimientos_tipos (sigla, nombre, creado_por_legajo, creado_por_nombre, creado_en, "
+            "modificado_por_legajo, modificado_por_nombre, modificado_en) VALUES (?,?,0,'Sistema',?,0,'Sistema',?)",
+            (_sigla, _nombre, datetime.now().isoformat(), datetime.now().isoformat())
+        )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _procedimientos_versiones (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            procedimiento_id    INTEGER NOT NULL,
+            titulo              TEXT,
+            contenido           TEXT    NOT NULL,
+            metadatos           TEXT,
+            motivo              TEXT    NOT NULL,
+            nota                TEXT,
+            creado_por_legajo   INTEGER,
+            creado_por_nombre   TEXT,
+            creado_en           TEXT    NOT NULL
+        )
+    """)
+    # Migración única del PG 851.06 (hoy texto estático en sinterizado.js,
+    # _SN_PASOS/_SN_ANEXOS/el <dl> de _snRenderProcedimiento) a un procedimiento
+    # real editable. INSERT OR IGNORE por 'codigo' -- si ya existe (alguien ya
+    # lo editó, o esto corrió antes), no lo pisa nunca.
+    _proc_pg85106 = {
+        "blocks": [
+            {"type": "ficha", "data": {"filas": [
+                ["Revisión", "Rev. 05 · 18/12/2023"], ["Revisó", "Leandro Romero"], ["Aprobó", "Carlos Romero"],
+                ["Objetivo", "Desarmar el crisol existente y poner en marcha un crisol nuevo."],
+                ["Alcance", "Todos los sinterizados de hornos de inducción."],
+                ["Responsables", "Responsable de Producción · Responsable de Fusión · Ayudante de Fusión"],
+                ["Registro", "Planilla PCS-PG851.06-A3 (es lo que se completa en cada sinterizado de esta pestaña)"],
+                ["Indicador", "Seguimiento de cantidad y frecuencia de preparación de horno nuevo (pestaña Indicador)"],
+            ]}},
+            {"type": "pasos", "data": {"pasos": [
+                {"titulo": "Desarme del horno", "detalles": [
+                    "Desarmar el crisol existente.",
+                    "Completar la Hoja 1 (Desarme) de la planilla: aspecto general, espesor mínimo, filtraciones, estado de la manta y polvo refractario."]},
+                {"titulo": "Revoque de la bobina", "detalles": [
+                    "Parcial o total, según el estado de la bobina.", "Si es total, colocar aros para dar la conicidad.",
+                    "Aplicar el enduido.", "Dejar secar."]},
+                {"titulo": "Colocación de la manta cerámica", "detalles": [
+                    "3 trozos de manta cerámica de 1,3 m cada uno.", "Solapados entre sí de 30 a 40 cm."]},
+                {"titulo": "Colocación de antena y construcción del piso", "detalles": [
+                    "Antena preparada según el Anexo, con aislación eléctrica de la base.",
+                    "Picado del piso: primero 2 bolsas (≈ 50 kg), luego 1,5 bolsas, hasta completar 5 bolsas en total.",
+                    "Compactar con tridente y vibrador."],
+                    "nota": "El piso tiene que quedar de ≈ 18 cm. La cantidad de bolsas depende del diámetro inferior del horno sin refractario."},
+                {"titulo": "Posicionamiento de la formaleta", "detalles": [
+                    "Formaleta centrada y contrapesada, sin óxidos.", "Verificar la soldadura de la costura.",
+                    "Completar en la Hoja 2 el control y la colocación de la formaleta."],
+                    "nota": "Modificar la altura de la formaleta según el espesor del piso."},
+                {"titulo": "Construcción de las paredes", "detalles": [
+                    "Una bolsa (25 kg) por vuelta.", "4 vueltas con tridente y 3 con vibrador.",
+                    "Pasar el tridente entre capas hasta llegar al nivel.",
+                    "A la altura de la piquera, terminar con refractario de fragua a baja temperatura."]},
+                {"titulo": "Sinterizado", "detalles": [
+                    "Cargar hasta ¼ del crisol y colocar el canasto guiador de llama.",
+                    "Completar la carga y encender el quemador.", "Calentar según la curva del fabricante.",
+                    "Llegar a 1580 °C y mantener 60 minutos (registrarlo abajo).",
+                    "El quemador se usa solo por motivos energéticos; respetar los tiempos de mantenimiento."]},
+            ]}},
+            {"type": "anexo", "data": {"nombre": "Antena", "filas": [
+                ["Material", "Alambre Resistohm 140 % · 2,5 mm · K"],
+                ["Tramo 1", "250 + 95 + 250 = 595 mm"], ["Tramo 2", "Tramo 1 + 105 = 700 mm"],
+                ["Tramo 3", "Tramo 2 + 105 = 805 mm"], ["Tramo 4", "Tramo 3 + 105 = 910 mm"],
+                ["Patas", "250 mm"], ["Ancho", "405 mm"], ["Extremos", "Rulo para tornillo de 3/4\""],
+            ]}},
+            {"type": "anexo", "data": {"nombre": "Formaleta", "filas": [
+                ["Material", "Chapa de hierro de 0,635 mm"], ["Diámetro superior", "Ø 500 mm"],
+                ["Diámetro inferior", "Ø 400 mm"], ["Altura total", "1050 mm"], ["Parte cónica", "250 mm"],
+            ]}},
+        ]
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO _procedimientos (codigo, titulo, seccion_ver, contenido, creado_por_legajo, creado_por_nombre, creado_en, modificado_por_legajo, modificado_por_nombre, modificado_en) "
+        "VALUES ('sinterizado_pg85106', 'PG 851.06 · Preparación y Sinterizado de Horno Inducción', 'sinterizado', ?, 0, 'Sistema', ?, 0, 'Sistema', ?)",
+        (json.dumps(_proc_pg85106, ensure_ascii=False), datetime.now().isoformat(), datetime.now().isoformat())
+    )
+    # Arreglo único: el INSERT OR IGNORE de arriba ya corrió una vez en esta
+    # base ANTES de que existiera el tipo de bloque 'anexo' (cuando los dos
+    # anexos todavía eran bloques 'ficha' con titulo "Anexo · X"), así que no
+    # lo vuelve a tocar. Convierte esos bloques viejos a 'anexo' con 'nombre'
+    # (la palabra clave) -- idempotente: una vez convertidos, no encuentra
+    # nada que convertir la próxima vez que esto corra.
+    for _r in conn.execute("SELECT id, contenido FROM _procedimientos").fetchall():
+        _cont = json.loads(_r[1] or "{}")
+        _cambio = False
+        for _b in _cont.get("blocks") or []:
+            if _b.get("type") == "ficha" and isinstance(_b.get("data"), dict) and str(_b["data"].get("titulo") or "").startswith("Anexo · "):
+                _b["type"] = "anexo"
+                _b["data"] = {"nombre": _b["data"]["titulo"][len("Anexo · "):], "filas": _b["data"].get("filas") or []}
+                _cambio = True
+        if _cambio:
+            conn.execute("UPDATE _procedimientos SET contenido=? WHERE id=?", (json.dumps(_cont, ensure_ascii=False), _r[0]))
+    # Cargas de conjunto guardadas ANTES de que existiera conjunto_datos: se
+    # les arma la foto con lo que hay hoy, marcada "reconstruido" -- es lo
+    # mejor que se puede (el roster de ese día no se guardó), pero evita
+    # dejarlas sin ningún dato del conjunto si después se rompe.
+    _rf_previo = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    for _r in conn.execute(
+        "SELECT id, grupo_id, fecha FROM _produccion_moldeo "
+        "WHERE grupo_id IS NOT NULL AND conjunto_datos IS NULL"
+    ).fetchall():
+        conn.execute(
+            "UPDATE _produccion_moldeo SET conjunto_datos=? WHERE id=?",
+            (json.dumps(_moldeo_conjunto_snapshot(conn, _r["grupo_id"], _r["fecha"], reconstruido=True), ensure_ascii=False), _r["id"])
+        )
+    conn.row_factory = _rf_previo
     conn.commit()
     conn.close()
 
@@ -1553,7 +1927,10 @@ _PROXIMOS_SELECT = """
         qty.tot_producida,
         qty.tot_rechazada,
         qty.tot_entregada,
-        COALESCE(pc.pide_probeta_traccion, 0) AS pide_probeta_traccion
+        COALESCE(pc.pide_probeta_traccion, 0) AS pide_probeta_traccion,
+        CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END AS peso_kg,
+        t_last."códdeagregados" AS codigo_material,
+        COALESCE(tm.sobrenombrematerial, t_last."códdeagregados") AS material
     FROM ItemDetallePedido idp
     JOIN Pedidos p ON idp.idpedido = p.idpedido
     JOIN Clientes c ON p.códigocliente = c.códigocliente
@@ -1564,6 +1941,7 @@ _PROXIMOS_SELECT = """
         GROUP BY iditempedido
     ) last_ot ON last_ot.iditempedido = idp.iditempedido
     LEFT JOIN Trabajos t_last ON t_last.iditemtrabajo = last_ot.ot_id
+    LEFT JOIN TiposMaterial tm ON tm."códmaterial" = CAST(t_last."códdeagregados" AS TEXT)
     LEFT JOIN (
         SELECT iditempedido,
                COALESCE(SUM(cantidadentregada), 0) AS tot_entregada,
@@ -1573,6 +1951,8 @@ _PROXIMOS_SELECT = """
         GROUP BY iditempedido
     ) qty ON qty.iditempedido = idp.iditempedido
     LEFT JOIN _piezas_config pc ON pc.pieza_id = np.id
+    LEFT JOIN PesosDePiezas pp ON pp.códpieza = t_last.idpesopieza
+    LEFT JOIN piezas_peso pz   ON pz.pieza_id = np.id
     WHERE idp.fechadeentrega IS NOT NULL
       AND upper(p.estadopedido) NOT IN ('K','D')
       AND upper(idp.estadoitem) NOT IN ('K','D')
@@ -1595,7 +1975,7 @@ def dashboard_proximos():
     conn = get_db()
     try:
         rows = conn.execute(
-            _PROXIMOS_SELECT +
+            _CTE_PIEZAS_PESO + _PROXIMOS_SELECT +
             "  AND date(idp.fechadeentrega) BETWEEN date('now') AND date('now', '+30 days')"
             " ORDER BY idp.fechadeentrega ASC LIMIT 50"
         ).fetchall()
@@ -1610,7 +1990,7 @@ def dashboard_vencidos(meses: int = 2):
     conn = get_db()
     try:
         rows = conn.execute(
-            _PROXIMOS_SELECT +
+            _CTE_PIEZAS_PESO + _PROXIMOS_SELECT +
             "  AND date(idp.fechadeentrega) BETWEEN date('now', ? || ' months') AND date('now', '-1 days')"
             " ORDER BY idp.fechadeentrega ASC LIMIT 50",
             (f"-{meses}",)
@@ -1626,7 +2006,7 @@ def dashboard_entregados(meses: int = 6):
     conn = get_db()
     try:
         est = _est_map(conn)
-        rows = conn.execute("""
+        rows = conn.execute(_CTE_PIEZAS_PESO + """
             SELECT
                 p.idpedido, p.nropedido, p.códigocliente,
                 COALESCE(c.nombrefantasía, c.nombrecliente) AS cliente_nombre,
@@ -1637,7 +2017,8 @@ def dashboard_entregados(meses: int = 6):
                 qty.tot_producida,
                 last_ot.ot_id,
                 t_last.estadotrabajo AS ot_estado,
-                COALESCE(pc.pide_probeta_traccion, 0) AS pide_probeta_traccion
+                COALESCE(pc.pide_probeta_traccion, 0) AS pide_probeta_traccion,
+                CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END AS peso_kg
             FROM ItemDetallePedido idp
             JOIN Pedidos p ON idp.idpedido = p.idpedido
             JOIN Clientes c ON p.códigocliente = c.códigocliente
@@ -1654,6 +2035,8 @@ def dashboard_entregados(meses: int = 6):
                 FROM Trabajos GROUP BY iditempedido
             ) qty ON qty.iditempedido = idp.iditempedido
             LEFT JOIN _piezas_config pc ON pc.pieza_id = np.id
+            LEFT JOIN PesosDePiezas pp ON pp.códpieza = t_last.idpesopieza
+            LEFT JOIN piezas_peso pz   ON pz.pieza_id = np.id
             WHERE idp.fechadeentrega IS NOT NULL
               AND qty.tot_entregada > 0
               AND date(idp.fechadeentrega) BETWEEN date('now', ? || ' months') AND date('now', '+30 days')
@@ -1678,8 +2061,8 @@ def dashboard_entregados(meses: int = 6):
 # sin asignar aunque la pieza sí tenga peso cargado en otras variantes (ver
 # dashboard_pendiente_fundir_sin_peso). -1 aparece como valor centinela de
 # "todavía no pesado" en algunas filas viejas, por eso el filtro > 0 en vez de
-# IS NOT NULL. Ambos endpoints resuelven primero por la variante exacta de la OT
-# y recién si esa no existe caen al promedio de las variantes válidas de la pieza.
+# IS NOT NULL. Todo consumidor resuelve primero por la variante exacta de la OT
+# y recién si esa no existe cae al promedio de las variantes válidas de la pieza.
 _CTE_PIEZAS_PESO = """
     WITH piezas_peso AS (
         SELECT nombredepiezasid_ AS pieza_id, AVG(pesopieza) AS peso_promedio
@@ -1742,6 +2125,7 @@ def dashboard_pendiente_fundir(meses: int = 6, user: Optional[dict] = Depends(_g
     meses = max(1, min(meses, 60))
     conn = get_db()
     try:
+        _trabajo_oculto_purgar_cambiados(conn)
         # Antigüedad de la OT: fechacargaot es NULL en ~93% de las OTs activas pendientes de
         # fundir (a diferencia de datos históricas ya cerradas), así que igual que en
         # analytics_top_defectos/analytics_top_piezas usamos p.fechapedido como respaldo.
@@ -1773,6 +2157,7 @@ def dashboard_pendiente_fundir(meses: int = 6, user: Optional[dict] = Depends(_g
                   AND upper(p.estadopedido)  NOT IN ('K','D')
                   AND upper(idp.estadoitem)  NOT IN ('K','D')
                   AND t."códdeagregados" NOT IN ('--', '4', 'Ar', 'ar', 'AR')
+                  AND t.iditemtrabajo NOT IN (SELECT trabajo_id FROM _trabajo_oculto)
                   AND (upper(t.estadotrabajo) = 'F'
                        OR t.fechaprevista IS NULL
                        OR date(t.fechaprevista) >= date('now', '-1 month'))
@@ -1847,6 +2232,7 @@ def dashboard_pendiente_fundir_calendario(meses: int = 6):
     meses = max(1, min(meses, 60))
     conn = get_db()
     try:
+        _trabajo_oculto_purgar_cambiados(conn)
         cte_base = _CTE_PIEZAS_PESO + """
             , base AS (
                 SELECT
@@ -1869,6 +2255,7 @@ def dashboard_pendiente_fundir_calendario(meses: int = 6):
                   AND upper(p.estadopedido)  NOT IN ('K','D')
                   AND upper(idp.estadoitem)  NOT IN ('K','D')
                   AND t."códdeagregados" NOT IN ('--', '4', 'Ar', 'ar', 'AR')
+                  AND t.iditemtrabajo NOT IN (SELECT trabajo_id FROM _trabajo_oculto)
                   AND COALESCE(t.fechacargaot, p.fechapedido) >= date('now', ? || ' months')
                   AND (upper(t.estadotrabajo) = 'F'
                        OR t.fechaprevista IS NULL
@@ -1945,11 +2332,13 @@ def dashboard_pendiente_fundir_detalle(
     ya dice de qué cliente es (codigo_cliente/cliente_nombre)."""
     conn = get_db()
     try:
+        _trabajo_oculto_purgar_cambiados(conn)
         where = [
             "upper(t.estadotrabajo) IN ('I', 'P', 'F')",
             "upper(p.estadopedido)  NOT IN ('K','D')",
             "upper(idp.estadoitem)  NOT IN ('K','D')",
             "t.\"códdeagregados\" NOT IN ('--', '4', 'Ar', 'ar', 'AR')",
+            "t.iditemtrabajo NOT IN (SELECT trabajo_id FROM _trabajo_oculto)",
         ]
         params: list = []
         if olvidadas:
@@ -6540,9 +6929,10 @@ def get_trabajos(
                 " OR CAST(t.obsot AS TEXT) LIKE ?"
                 " OR p.códigocliente LIKE ?"
                 " OR np.códigopiezapuestoporcliente LIKE ?"
-                " OR printf('%06d', t.iditemtrabajo) LIKE ?)"
+                " OR printf('%06d', t.iditemtrabajo) LIKE ?"
+                " OR t.cuño LIKE ?)"
             )
-            params.extend([s, s, s, s, s, s])
+            params.extend([s, s, s, s, s, s, s])
 
         where = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
 
@@ -6575,7 +6965,7 @@ def get_trabajos(
         rows = conn.execute(
             f"""SELECT t.iditemtrabajo, t.origen, t.reemplazogenerado,
                 t.fechaprevista, p.fechapedido as fecha,
-                t.códfundición as fundicion, t.estadotrabajo,
+                t.códfundición as fundicion, t.iditemproducción as colada_pos, t.cuño as cuno, t.estadotrabajo,
                 p.códigocliente as codigo_cliente,
                 COALESCE(c.nombrefantasía, c.nombrecliente) as cliente_nombre,
                 np.nombrepieza, np.códigopiezapuestoporcliente as codigo_pieza,
@@ -6771,8 +7161,8 @@ def get_trabajo_detail(trabajo_id: int):
 # NombreDePiezas) y se queda con el que corresponda con COALESCE.
 _MOLDEO_SELECT = """
     SELECT m.id, m.fecha, m.trabajo_id, m.pieza_id, m.operario_id, m.cantidad_cajas,
-           m.cajas_sin_cerrar, m.cantidad_noyos, m.nota,
-           m.creado_por_legajo, m.creado_en,
+           m.cajas_sin_cerrar, m.cantidad_noyos, m.nota, m.grupo_id, m.cantidad_piezas,
+           m.conjunto_datos, m.creado_por_legajo, m.creado_en,
            v.apellidoynombre AS operario_nombre,
            t.estadotrabajo,
            COALESCE(np_ot.nombrepieza, np_dir.nombrepieza) AS nombrepieza,
@@ -6790,9 +7180,78 @@ _MOLDEO_SELECT = """
 """
 
 
+def _moldeo_dict(r) -> dict:
+    """Fila de _MOLDEO_SELECT como dict, con la foto del conjunto (JSON en la
+    columna conjunto_datos) ya parseada bajo la clave `conjunto` -- None si
+    la carga no es de un conjunto."""
+    d = dict(r)
+    raw = d.pop("conjunto_datos", None)
+    try:
+        d["conjunto"] = json.loads(raw) if raw else None
+    except (TypeError, ValueError):
+        d["conjunto"] = None
+    return d
+
+
 def _moldeo_row(conn: sqlite3.Connection, entry_id: int) -> Optional[dict]:
     r = conn.execute(_MOLDEO_SELECT + " WHERE m.id = ?", (entry_id,)).fetchone()
-    return dict(r) if r else None
+    return _moldeo_dict(r) if r else None
+
+
+# Foto FIJA de un conjunto para guardarla junto con cada carga suya (columna
+# conjunto_datos): que OT lo formaban (con pieza/cliente) y quienes eran sus
+# ayudantes, responsables de moldeo y responsables de noyos -- lo que el
+# conjunto "es" en ese momento vive en tablas que despues cambian (se
+# rompe, una OT se reemplaza y _moldeo_grupo_ot pasa a apuntar a la nueva,
+# el roster se edita), y la carga tiene que seguir diciendo lo que decia el
+# dia que se hizo. El roster de un conjunto es la union de los de sus OT
+# (ver _moldeoRosterDe en el frontend). `reconstruido` marca las fotos
+# armadas despues de hecho, con el estado de hoy (ver _seed_lookups).
+def _moldeo_conjunto_snapshot(conn: sqlite3.Connection, grupo_id: int, fecha: str, reconstruido: bool = False) -> dict:
+    miembros = [r["trabajo_id"] for r in conn.execute(
+        "SELECT trabajo_id FROM _moldeo_grupo_ot WHERE grupo_id=? ORDER BY trabajo_id", (grupo_id,)
+    ).fetchall()]
+    ots = []
+    for tid in miembros:
+        r = conn.execute(
+            "SELECT np.nombrepieza AS nombrepieza, np.códigopiezapuestoporcliente AS codigo_pieza, "
+            "       COALESCE(c.nombrefantasía, c.nombrecliente) AS cliente_nombre "
+            "FROM Trabajos t "
+            "LEFT JOIN ItemDetallePedido idp ON idp.iditempedido = t.iditempedido "
+            "LEFT JOIN Pedidos p ON p.idpedido = idp.idpedido "
+            "LEFT JOIN Clientes c ON c.códigocliente = p.códigocliente "
+            "LEFT JOIN NombreDePiezas np ON np.id = idp.idpieza "
+            "WHERE t.iditemtrabajo = ?", (tid,)
+        ).fetchone()
+        ots.append({
+            "trabajo_id": tid,
+            "nombrepieza": r["nombrepieza"] if r else None,
+            "codigo_pieza": r["codigo_pieza"] if r else None,
+            "cliente_nombre": r["cliente_nombre"] if r else None,
+        })
+
+    def roster(tabla: str) -> list:  # tabla: siempre un literal fijo de abajo
+        nombres: dict = {}
+        for tid in miembros:
+            for r in conn.execute(
+                f"SELECT x.operario_id, v.apellidoynombre AS nombre FROM {tabla} x "
+                f"LEFT JOIN _v_responsables v ON v.codigoresponsable = x.operario_id "
+                f"WHERE x.trabajo_id = ?", (tid,)
+            ).fetchall():
+                nombres.setdefault(r["operario_id"], r["nombre"] or f"#{r['operario_id']}")
+        return list(nombres.values())
+
+    snap = {
+        "grupo_id": grupo_id,
+        "fecha": fecha,
+        "ots": ots,
+        "ayudantes": roster("_trabajo_ayudante"),
+        "responsables_moldeo": roster("_trabajo_responsable_moldeo"),
+        "responsables_noyos": roster("_trabajo_responsables_noyos"),
+    }
+    if reconstruido:
+        snap["reconstruido"] = True
+    return snap
 
 
 def _moldeo_asignacion_heredada(conn: sqlite3.Connection, origen_id: Optional[int], max_saltos: int = 20,
@@ -6904,6 +7363,31 @@ def _moldeo_heredar_responsables_si_corresponde(conn: sqlite3.Connection, trabaj
         )
 
 
+def _moldeo_grupo_resolver_ot_actual(conn: sqlite3.Connection, trabajo_id: int, max_saltos: int = 20) -> int:
+    """Un conjunto (_moldeo_grupo_ot) guarda la OT actual de cada miembro. Si
+    esa OT se reemplaza (Trabajos.origen/reemplazogenerado -- ver
+    _moldeo_asignacion_heredada para la cadena hacia atras), el conjunto
+    tiene que seguir la cadena hacia ADELANTE para no quedarse marcando una
+    OT vieja que ya no se puede cargar. Mismo shape que el walker hacia
+    atras, con guarda de ciclos, pero caminando reemplazogenerado."""
+    visto = set()
+    actual = trabajo_id
+    saltos = 0
+    while actual and saltos < max_saltos and actual not in visto:
+        visto.add(actual)
+        sig = conn.execute(
+            "SELECT reemplazogenerado FROM Trabajos WHERE iditemtrabajo=?", (actual,)
+        ).fetchone()
+        siguiente = sig["reemplazogenerado"] if sig else None
+        if not siguiente or not conn.execute(
+            "SELECT 1 FROM Trabajos WHERE iditemtrabajo=?", (siguiente,)
+        ).fetchone():
+            break
+        actual = siguiente
+        saltos += 1
+    return actual
+
+
 def _moldeo_validar_body(conn: sqlite3.Connection, body: dict) -> tuple:
     fecha = str(body.get("fecha") or "").strip()
     if not fecha:
@@ -6963,7 +7447,27 @@ def _moldeo_validar_body(conn: sqlite3.Connection, body: dict) -> tuple:
         raise HTTPException(400, "cantidad de noyos inválida")
     if noyos < 0:
         raise HTTPException(400, "la cantidad de noyos no puede ser negativa")
-    if cantidad == 0 and sin_cerrar == 0 and noyos == 0:
+    # Cajas compartidas (grupo_id): la unidad de estas filas es piezas, no
+    # cajas -- cantidad_cajas/sin_cerrar/noyos no aplican (quedan en 0/None)
+    # y en cambio cantidad_piezas es obligatoria. Ver _MOLDEO_KG_CTE, que
+    # multiplica por una u otra columna segun haya grupo_id.
+    grupo_id_raw = body.get("grupo_id")
+    grupo_id = None
+    cantidad_piezas = None
+    if grupo_id_raw not in (None, ""):
+        try:
+            grupo_id = int(grupo_id_raw)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "grupo inválido")
+        if not conn.execute("SELECT 1 FROM _moldeo_grupo WHERE id=? AND activo=1", (grupo_id,)).fetchone():
+            raise HTTPException(404, f"Conjunto {grupo_id} no encontrado")
+        try:
+            cantidad_piezas = int(body.get("cantidad_piezas"))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "cantidad de piezas requerida para un conjunto")
+        if cantidad_piezas <= 0:
+            raise HTTPException(400, "la cantidad de piezas del conjunto tiene que ser mayor a cero")
+    elif cantidad == 0 and sin_cerrar == 0 and noyos == 0:
         raise HTTPException(400, "ingresá cajas cerradas, cajas sin cerrar o noyos")
     if not conn.execute("SELECT 1 FROM _v_responsables WHERE codigoresponsable=?", (operario_id,)).fetchone():
         raise HTTPException(404, f"Operario {operario_id} no encontrado")
@@ -6972,7 +7476,25 @@ def _moldeo_validar_body(conn: sqlite3.Connection, body: dict) -> tuple:
     # el modo "con OT", donde no hace falta ninguna aclaracion.
     nota_raw = body.get("nota")
     nota = str(nota_raw).strip()[:500] if nota_raw not in (None, "") else None
-    return fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos, nota
+    return fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos, nota, grupo_id, cantidad_piezas
+
+
+@app.get("/api/produccion_moldeo/con_carga")
+def get_produccion_moldeo_con_carga(user: dict = Depends(_get_auth_user)):
+    """IDs de Trabajo con al menos una carga registrada, sin importar la fecha
+    -- Cargar moldeo lo usa para decidir qué OT entran en el filtro por
+    defecto (_moldeoOtsVisiblesPorCarga en el frontend) en vez de mirar solo
+    el día que se está viendo: una OT en la que se sigue cargando produccion
+    día a día no tiene por qué desaparecer de la vista por defecto el día que
+    todavía no se cargó nada. Las OT ya Fundidas quedan igual ocultas por el
+    filtro aparte "Ver fundidas" (destildado por defecto), así que no hace
+    falta acotar por fecha ni por estado acá."""
+    conn = get_db()
+    try:
+        rows = conn.execute("SELECT DISTINCT trabajo_id FROM _produccion_moldeo WHERE trabajo_id IS NOT NULL").fetchall()
+        return [r["trabajo_id"] for r in rows]
+    finally:
+        conn.close()
 
 
 @app.get("/api/produccion_moldeo")
@@ -6990,7 +7512,7 @@ def get_produccion_moldeo(
         if operario_id: where.append("m.operario_id = ?"); params.append(operario_id)
         wsql = ("WHERE " + " AND ".join(where)) if where else ""
         rows = conn.execute(f"{_MOLDEO_SELECT} {wsql} ORDER BY m.id DESC", params).fetchall()
-        return [dict(r) for r in rows]
+        return [_moldeo_dict(r) for r in rows]
     finally:
         conn.close()
 
@@ -7000,12 +7522,16 @@ async def post_produccion_moldeo(req: Request, user: dict = Depends(_get_auth_us
     body = await req.json()
     conn = get_db()
     try:
-        fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos, nota = _moldeo_validar_body(conn, body)
+        fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos, nota, grupo_id, cantidad_piezas = _moldeo_validar_body(conn, body)
+        conjunto_datos = (
+            json.dumps(_moldeo_conjunto_snapshot(conn, grupo_id, fecha), ensure_ascii=False)
+            if grupo_id else None
+        )
         conn.execute(
             "INSERT INTO _produccion_moldeo "
-            "(fecha, trabajo_id, pieza_id, operario_id, cantidad_cajas, cajas_sin_cerrar, cantidad_noyos, nota, creado_por_legajo, creado_en) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos, nota, user["legajo"], datetime.now().isoformat())
+            "(fecha, trabajo_id, pieza_id, operario_id, cantidad_cajas, cajas_sin_cerrar, cantidad_noyos, nota, grupo_id, cantidad_piezas, conjunto_datos, creado_por_legajo, creado_en) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos, nota, grupo_id, cantidad_piezas, conjunto_datos, user["legajo"], datetime.now().isoformat())
         )
         new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.commit()
@@ -7019,13 +7545,24 @@ async def put_produccion_moldeo(entry_id: int, req: Request, user: dict = Depend
     body = await req.json()
     conn = get_db()
     try:
-        existente = conn.execute("SELECT id FROM _produccion_moldeo WHERE id=?", (entry_id,)).fetchone()
+        existente = conn.execute("SELECT id, conjunto_datos, grupo_id FROM _produccion_moldeo WHERE id=?", (entry_id,)).fetchone()
         if not existente:
             raise HTTPException(404, "Registro no encontrado")
-        fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos, nota = _moldeo_validar_body(conn, body)
+        fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos, nota, grupo_id, cantidad_piezas = _moldeo_validar_body(conn, body)
+        # La foto del conjunto es fija: al corregir una carga de un dia
+        # anterior se conserva la que ya tenia (armarla de nuevo con el
+        # roster/OT de HOY falsearia lo que decia ese dia). Solo se rearma si
+        # se corrige la del dia de hoy -- el conjunto pudo cambiar durante el
+        # mismo dia -- o si la carga todavia no tenia foto.
+        conjunto_datos = None
+        if grupo_id:
+            hoy = datetime.now().strftime("%Y-%m-%d")
+            previo = existente["conjunto_datos"] if existente["grupo_id"] == grupo_id else None
+            conjunto_datos = previo if (previo and fecha != hoy) else json.dumps(
+                _moldeo_conjunto_snapshot(conn, grupo_id, fecha), ensure_ascii=False)
         conn.execute(
-            "UPDATE _produccion_moldeo SET fecha=?, trabajo_id=?, pieza_id=?, operario_id=?, cantidad_cajas=?, cajas_sin_cerrar=?, cantidad_noyos=?, nota=? WHERE id=?",
-            (fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos, nota, entry_id)
+            "UPDATE _produccion_moldeo SET fecha=?, trabajo_id=?, pieza_id=?, operario_id=?, cantidad_cajas=?, cajas_sin_cerrar=?, cantidad_noyos=?, nota=?, grupo_id=?, cantidad_piezas=?, conjunto_datos=? WHERE id=?",
+            (fecha, trabajo_id, pieza_id, operario_id, cantidad, sin_cerrar, noyos, nota, grupo_id, cantidad_piezas, conjunto_datos, entry_id)
         )
         conn.commit()
         return _moldeo_row(conn, entry_id)
@@ -7038,6 +7575,92 @@ def delete_produccion_moldeo(entry_id: int, user: dict = Depends(_get_auth_user)
     conn = get_db()
     try:
         conn.execute("DELETE FROM _produccion_moldeo WHERE id=?", (entry_id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+# Cajas compartidas: un "conjunto" agrupa varias OT que comparten caja fisica
+# (ver _seed_lookups, _moldeo_grupo/_moldeo_grupo_ot). El conjunto persiste
+# como plantilla de un dia para el otro -- lo que cambia dia a dia es la
+# carga en _produccion_moldeo (grupo_id + cantidad_piezas por miembro), no el
+# conjunto en si.
+@app.get("/api/moldeo/grupos")
+def get_moldeo_grupos(user: dict = Depends(_get_auth_user)):
+    conn = get_db()
+    try:
+        grupos = conn.execute("SELECT id FROM _moldeo_grupo WHERE activo=1").fetchall()
+        result = []
+        for g in grupos:
+            grupo_id = g["id"]
+            miembros = conn.execute(
+                "SELECT id, trabajo_id FROM _moldeo_grupo_ot WHERE grupo_id=?", (grupo_id,)
+            ).fetchall()
+            trabajo_ids = []
+            for m in miembros:
+                actual = _moldeo_grupo_resolver_ot_actual(conn, m["trabajo_id"])
+                if actual != m["trabajo_id"]:
+                    conn.execute(
+                        "UPDATE _moldeo_grupo_ot SET trabajo_id=? WHERE id=?", (actual, m["id"])
+                    )
+                estado = conn.execute(
+                    "SELECT estadotrabajo FROM Trabajos WHERE iditemtrabajo=?", (actual,)
+                ).fetchone()
+                if estado and estado["estadotrabajo"] in ("P", "I"):
+                    trabajo_ids.append(actual)
+            if trabajo_ids:
+                result.append({"grupo_id": grupo_id, "trabajo_ids": trabajo_ids})
+        conn.commit()
+        return result
+    finally:
+        conn.close()
+
+
+@app.post("/api/moldeo/grupos")
+async def post_moldeo_grupos(req: Request, user: dict = Depends(_get_auth_user)):
+    body = await req.json()
+    trabajo_ids_raw = body.get("trabajo_ids") or []
+    try:
+        trabajo_ids = sorted({int(t) for t in trabajo_ids_raw})
+    except (TypeError, ValueError):
+        raise HTTPException(400, "OT inválidas")
+    if len(trabajo_ids) < 2:
+        raise HTTPException(400, "un conjunto necesita al menos 2 OT")
+    conn = get_db()
+    try:
+        for tid in trabajo_ids:
+            if not conn.execute("SELECT 1 FROM Trabajos WHERE iditemtrabajo=?", (tid,)).fetchone():
+                raise HTTPException(404, f"OT {tid} no encontrada")
+        ahora = datetime.now().isoformat()
+        conn.execute(
+            "INSERT INTO _moldeo_grupo (creado_por_legajo, creado_en, activo) VALUES (?,?,1)",
+            (user["legajo"], ahora)
+        )
+        grupo_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        for tid in trabajo_ids:
+            conn.execute(
+                "INSERT INTO _moldeo_grupo_ot (grupo_id, trabajo_id) VALUES (?,?)", (grupo_id, tid)
+            )
+        conn.commit()
+        return {"grupo_id": grupo_id, "trabajo_ids": trabajo_ids}
+    finally:
+        conn.close()
+
+
+# Romper un conjunto: baja logica (activo=0), nunca DELETE de la fila --
+# las cargas ya guardadas en _produccion_moldeo con este grupo_id quedan
+# intactas como historial (su kg ya se sumo a productividad y no tiene
+# sentido que un dato del pasado cambie), simplemente dejan de poder sumarse
+# cargas NUEVAS contra el (_moldeo_validar_body exige activo=1). Las OT
+# vuelven a verse como filas independientes en cuanto se refresca /api/moldeo/grupos.
+@app.delete("/api/moldeo/grupos/{grupo_id}")
+def delete_moldeo_grupo(grupo_id: int, user: dict = Depends(_get_auth_user)):
+    conn = get_db()
+    try:
+        if not conn.execute("SELECT 1 FROM _moldeo_grupo WHERE id=? AND activo=1", (grupo_id,)).fetchone():
+            raise HTTPException(404, f"Conjunto {grupo_id} no encontrado")
+        conn.execute("UPDATE _moldeo_grupo SET activo=0 WHERE id=?", (grupo_id,))
         conn.commit()
         return {"ok": True}
     finally:
@@ -7439,7 +8062,8 @@ def _moldeo_periodo_partes(periodo: str) -> tuple:
 # ots_sin_peso alla.
 _MOLDEO_KG_CTE = _CTE_PIEZAS_PESO + """
     , moldeo_peso_base AS (
-        SELECT mm.id AS entrada_id, mm.cantidad_cajas,
+        SELECT mm.id AS entrada_id,
+               CASE WHEN mm.grupo_id IS NOT NULL THEN mm.cantidad_piezas ELSE mm.cantidad_cajas END AS unidades,
                COALESCE(np_ot.coefcompl, np_dir.coefcompl, 1) AS coefcompl,
                CASE WHEN pp.pesopieza > 0 THEN pp.pesopieza ELSE pz.peso_promedio END AS peso_efectivo
         FROM _produccion_moldeo mm
@@ -7452,11 +8076,85 @@ _MOLDEO_KG_CTE = _CTE_PIEZAS_PESO + """
     )
     , moldeo_kg AS (
         SELECT entrada_id,
-               ROUND(cantidad_cajas * peso_efectivo * coefcompl, 2) AS kg
+               ROUND(unidades * peso_efectivo * coefcompl, 2) AS kg
         FROM moldeo_peso_base
         WHERE peso_efectivo IS NOT NULL
     )
 """
+
+
+# RRHH carga HorasPorFecha a mano y sin periodicidad fija -- puede haber
+# meses sin ninguna carga nueva. Toda pantalla que calcule productividad
+# (kg o cajas / horas trabajadas) necesita poder avisar cuando ese dato está
+# desactualizado, en vez de mostrar un número silenciosamente poco confiable.
+# Un solo endpoint compartido en vez de que cada pantalla arme su propia
+# consulta -- MAX(fecha) sin filtrar por responsable, es la misma frescura
+# para toda la fábrica.
+# Kg que produce el horno hoy: un solo valor compartido por todos los usuarios.
+# Las vistas "por campañas" (x3) y "por materiales" (directo) de Trabajos lo
+# usan para saber de cuantos kg armar cada grupo. Arranca en 1100 hasta que
+# alguien lo guarde. Cada guardado queda como una fila nueva (quien, cuando,
+# cuanto) y el vigente es la ultima.
+_HORNO_KG_DEFECTO = 1100.0
+
+
+def _horno_kg_actual(conn: sqlite3.Connection) -> dict:
+    r = conn.execute(
+        "SELECT kg, cambiado_por_legajo, cambiado_por_nombre, fecha, cambiado_en "
+        "FROM _horno_kg ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if not r:
+        return {"kg": _HORNO_KG_DEFECTO, "por_defecto": True, "cambiado_por_legajo": None,
+                "cambiado_por_nombre": None, "fecha": None, "cambiado_en": None}
+    d = dict(r)
+    d["por_defecto"] = False
+    return d
+
+
+@app.get("/api/horno/kg")
+def get_horno_kg(user: dict = Depends(_get_auth_user)):
+    conn = get_db()
+    try:
+        return _horno_kg_actual(conn)
+    finally:
+        conn.close()
+
+
+@app.post("/api/horno/kg")
+async def post_horno_kg(req: Request, user: dict = Depends(_get_auth_user)):
+    import math
+    body = await req.json()
+    try:
+        kg = float(body.get("kg"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "kg inválidos")
+    if not math.isfinite(kg) or kg <= 0 or kg > 100000:
+        raise HTTPException(400, "Los kg del horno tienen que ser mayores a 0 (máximo 100000)")
+    ahora = datetime.now()
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO _horno_kg (kg, cambiado_por_legajo, cambiado_por_nombre, fecha, cambiado_en) VALUES (?,?,?,?,?)",
+            (round(kg, 1), user["legajo"], user["nombre"], ahora.strftime("%Y-%m-%d"), ahora.isoformat())
+        )
+        conn.commit()
+        return _horno_kg_actual(conn)
+    finally:
+        conn.close()
+
+
+@app.get("/api/horas/ultima_carga")
+def get_horas_ultima_carga(user: dict = Depends(_get_auth_user)):
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT MAX(fecha) as f FROM HorasPorFecha").fetchone()
+        ultima = row["f"]
+        dias = None
+        if ultima:
+            dias = (datetime.now() - datetime.strptime(ultima[:10], "%Y-%m-%d")).days
+        return {"ultima_fecha": ultima[:10] if ultima else None, "dias": dias}
+    finally:
+        conn.close()
 
 
 @app.get("/api/moldeo/productividad")
@@ -7581,19 +8279,87 @@ def get_moldeo_productividad_operario(
 
 # ── Trabajos: ocultar OT trabadas en Inicial/Programado (parche local) ─────────
 # Workaround para OT que quedaron olvidadas en Access en estado Inicial o
-# Programado y no se pueden corregir desde acá -- las saca de la tabla de
-# Cargar moldeo sin tocar el resto de la app (Pendiente de fundir, Trabajos,
-# kiosk siguen mostrándolas igual). Solo aplica a OT que estén en uno de esos
-# dos estados en este momento (los únicos que aparecen en esa tabla).
+# Programado y no se pueden corregir desde acá -- las saca de Cargar moldeo Y
+# de Pendiente de fundir (compartido, ver _trabajo_oculto), sin tocar el
+# resto de la app. Solo se puede ocultar una OT que esté en uno de esos dos
+# estados en el momento de ocultarla.
+
+# Si alguien corrige en Access la OT que motivó el ocultamiento, ya no hace
+# falta ir a "Ver OT ocultas" a restaurarla a mano -- se saca sola la próxima
+# vez que se lee _trabajo_oculto (mismo criterio "materializar al leer" que
+# _moldeo_heredar_responsables_si_corresponde o el walker de
+# /api/moldeo/grupos). DELETE en una sola sentencia en vez de un loop en
+# Python: no hay volumen que lo justifique, y evita traer las filas a
+# memoria solo para decidir si se van. Filas con estado_al_ocultar NULL
+# (ocultadas antes de que existiera esta columna) no se tocan.
+def _trabajo_oculto_purgar_cambiados(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+        DELETE FROM _trabajo_oculto
+        WHERE trabajo_id IN (
+            SELECT o.trabajo_id FROM _trabajo_oculto o
+            JOIN Trabajos t ON t.iditemtrabajo = o.trabajo_id
+            WHERE o.estado_al_ocultar IS NOT NULL
+              AND t.estadotrabajo != o.estado_al_ocultar
+        )
+    """)
+    conn.commit()
+
+
+# Suma cantidadproducida de toda la cadena de origen de una OT (ella misma +
+# todos los reemplazos anteriores que la generaron) -- una OT trabada en
+# Programado casi nunca tiene nada producido en SI MISMA (es la punta que
+# quedó pendiente, ver _trabajo_oculto_purgar_cambiados), pero la cadena que
+# la generó puede haber producido casi todo el pedido ya. Mismo shape que
+# _moldeo_asignacion_heredada, cadena hacia atrás vía origen, pero sumando
+# en vez de devolver el primer valor que encuentra.
+def _trabajo_cadena_cantidad_producida(conn: sqlite3.Connection, trabajo_id: int, max_saltos: int = 20) -> int:
+    total = 0
+    visto = set()
+    actual = trabajo_id
+    saltos = 0
+    while actual and saltos < max_saltos and actual not in visto:
+        visto.add(actual)
+        row = conn.execute(
+            "SELECT cantidadproducida, origen FROM Trabajos WHERE iditemtrabajo=?", (actual,)
+        ).fetchone()
+        if not row:
+            break
+        total += row["cantidadproducida"] or 0
+        actual = row["origen"]
+        saltos += 1
+    return total
+
 
 @app.get("/api/trabajos_ocultos")
 def get_trabajos_ocultos(user: dict = Depends(_get_auth_user)):
+    # LEFT JOIN hasta Trabajos/pieza/cliente (no solo el id) para que "OT
+    # trabadas" en Pendiente de fundir pueda mostrar qué OT es cada una sin
+    # una segunda consulta -- LEFT y no JOIN por si alguna vez el trabajo_id
+    # ya no existiera en el espejo, la fila de _trabajo_oculto se sigue
+    # viendo igual (con esos campos en None) en vez de desaparecer sola.
     conn = get_db()
     try:
-        rows = conn.execute(
-            "SELECT trabajo_id, oculto_por_legajo, oculto_en FROM _trabajo_oculto"
-        ).fetchall()
-        return [dict(r) for r in rows]
+        _trabajo_oculto_purgar_cambiados(conn)
+        rows = conn.execute("""
+            SELECT o.trabajo_id, o.oculto_por_legajo, o.oculto_en, u.nombre as oculto_por_nombre,
+                   t.estadotrabajo, np.nombrepieza,
+                   COALESCE(c.nombrefantasía, c.nombrecliente) as cliente_nombre,
+                   idp.cantidadpedida
+            FROM _trabajo_oculto o
+            LEFT JOIN _usuarios u        ON u.legajo = o.oculto_por_legajo
+            LEFT JOIN Trabajos t         ON t.iditemtrabajo = o.trabajo_id
+            LEFT JOIN ItemDetallePedido idp ON idp.iditempedido = t.iditempedido
+            LEFT JOIN Pedidos p          ON p.idpedido = idp.idpedido
+            LEFT JOIN Clientes c         ON c.códigocliente = p.códigocliente
+            LEFT JOIN NombreDePiezas np  ON np.id = idp.idpieza
+            ORDER BY o.oculto_en DESC
+        """).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["cantidad_producida_cadena"] = _trabajo_cadena_cantidad_producida(conn, r["trabajo_id"])
+            result.append(d)
+        return result
     finally:
         conn.close()
 
@@ -7608,9 +8374,10 @@ def post_trabajo_oculto(trabajo_id: int, user: dict = Depends(_get_auth_user)):
         if (t["estadotrabajo"] or "").upper() not in ("P", "I"):
             raise HTTPException(400, "Solo se pueden ocultar OT en estado Inicial o Programado")
         conn.execute(
-            "INSERT INTO _trabajo_oculto (trabajo_id, oculto_por_legajo, oculto_en) VALUES (?,?,?) "
-            "ON CONFLICT(trabajo_id) DO UPDATE SET oculto_por_legajo=excluded.oculto_por_legajo, oculto_en=excluded.oculto_en",
-            (trabajo_id, user["legajo"], datetime.now().isoformat())
+            "INSERT INTO _trabajo_oculto (trabajo_id, oculto_por_legajo, oculto_en, estado_al_ocultar) VALUES (?,?,?,?) "
+            "ON CONFLICT(trabajo_id) DO UPDATE SET oculto_por_legajo=excluded.oculto_por_legajo, "
+            "oculto_en=excluded.oculto_en, estado_al_ocultar=excluded.estado_al_ocultar",
+            (trabajo_id, user["legajo"], datetime.now().isoformat(), t["estadotrabajo"])
         )
         conn.commit()
         return {"ok": True}
@@ -8683,6 +9450,1482 @@ def prov_get_relaciones(user: dict = Depends(_pv_require_prov)):
             issues.append({"nivel":"Aviso","producto":p["nombre"],
                            "detalle":f"Grupo '{grupo}' no existe en tabla de grupos"})
     return {"issues": issues, "total": len(issues)}
+
+
+# ── Sinterizado de horno de inducción (PG 851.06 / planilla PCS-PG851.06-A3) ──
+# Una fila de _sinterizado por cada crisol que se desarma y se arma de nuevo. El
+# frontend (frontend/js/sinterizado.js) la muestra como la planilla de campo:
+# Hoja 1 (desarme), Hoja 2 (armado) y el registro de temperatura, mas el avance
+# del procedimiento paso por paso.
+#
+#  * Toda la validacion esta aca: el frontend manda texto crudo (un "7,5" mal
+#    tipeado termina en 400 con mensaje, no en un 500).
+#  * Los pasos del procedimiento los firma el SERVIDOR: el cliente solo dice
+#    cuales estan tildados, y quien/cuando se sella con el usuario logueado la
+#    primera vez que pasan a hecho (no se puede firmar por otra persona).
+#  * Dos personas pueden estar con la misma planilla (Produccion y Fusion firman
+#    partes distintas): el PUT lleva la marca de la ultima modificacion que el
+#    cliente vio y el UPDATE solo pisa si sigue siendo esa (sin esto, el que
+#    guarda segundo borra en silencio lo del primero).
+#  * Finalizada = congelada (es un registro de calidad): no se edita hasta
+#    reabrirla, y no se anula. Reabrir es solo de administrador -- el resto del
+#    equipo puede finalizar, pero deshacer eso queda para quien audita.
+#  * Guardado automático: el frontend (sinterizado.js) manda un PUT del estado
+#    completo del formulario después de cada cambio, con un debounce corto para
+#    los campos de texto/número y sin espera para acciones puntuales (tildar un
+#    paso, un click en el gráfico). El servidor no distingue ese PUT de uno
+#    disparado por el botón "Guardar" -- es la misma ruta y las mismas reglas.
+_SINTER_PASOS = ("desarme", "revoque", "manta", "antena_piso", "formaleta", "paredes", "sinterizado")
+_SINTER_TIPOS_MARCA = ("espesor", "filtracion", "manta")
+_SINTER_SECTORES = 8
+# Las mediciones ("óvalos") ya no son 5 alturas fijas: la persona las crea con
+# "Nueva medición", indicando a cuántos mm de la boca la está tomando. Tope
+# generoso (no hay una razón de negocio para más) y un poco más que la
+# profundidad del horno (1100mm, ver _SN_CRISOL en sinterizado.js) de margen
+# para la altura en sí.
+_SINTER_ALTURAS_MAX = 30
+_SINTER_ALTURA_MAX_MM = 1200
+# campo -> (tipo, maximo/largo, etiqueta para el mensaje de error)
+_SINTER_CAMPOS = {
+    "desarme_fecha":          ("fecha", None, "Fecha del desarme"),
+    "coladas":                ("entero", 100000, "Cantidad de coladas"),
+    "diametro_final":         ("numero", 10000, "Ø final"),
+    "altura":                 ("numero", 10000, "Altura del crisol"),
+    "altura_conicidad":       ("numero", 10000, "Altura de la conicidad"),
+    "aspecto":                ("texto", 1000, "Aspecto general"),
+    "espesor_min":            ("numero", 10000, "Espesor mínimo"),
+    "filtraciones":           ("texto", 300, "Filtraciones"),
+    "manta_oscura":           ("sino", None, "Manta oscura/quemada"),
+    "foto":                   ("sino", None, "Se tomó fotografía"),
+    "foto_archivo":           ("texto", 300, "Archivo de la fotografía"),
+    "polvo":                  ("sino", None, "Polvo refractario en contacto con la manta"),
+    "polvo_mm":               ("numero", 10000, "Cantidad de polvo (mm)"),
+    "armado_fecha":           ("fecha", None, "Fecha del armado"),
+    "antena_orificio_ok":     ("bool", None, "Orificio de la antena revisado (no demasiado grande)"),
+    "formaleta_medidas":      ("texto", 200, "Medidas de la formaleta"),
+    "formaleta_medidas_ok":   ("bool", None, "Medidas revisadas"),
+    "formaleta_rebabado":     ("texto", 200, "Rebabado de la formaleta"),
+    "formaleta_rebabado_ok":  ("bool", None, "Rebabado revisado"),
+    "centrado_reviso":        ("texto", 100, "Revisó centrado"),
+    "centrado_vb_fusion":     ("texto", 100, "V°B° Resp. de Fusión"),
+    "centrado_vb_produccion": ("texto", 100, "V°B° Resp. de Producción"),
+    "paredes_vb_produccion":  ("texto", 100, "V°B° colocación (Resp. de Producción)"),
+    "observaciones":          ("texto", 4000, "Observaciones"),
+}
+
+# Las bolsas de refractario del paso 4 (piso/pared/corona) van aparte de
+# _SINTER_CAMPOS: no son UN valor por planilla sino una LISTA por sección (0 a
+# N bolsas, cada una con su producto y su lote), así que se validan y guardan
+# como el resto de las listas (lecturas, alturas): JSON en su propia columna.
+_SINTER_SECCIONES_BOLSA = ("piso", "pared", "corona")
+_SINTER_BOLSAS_MAX_POR_SECCION = 30
+
+
+def _sinter_bolsas_validar(v) -> dict:
+    """{'piso'|'pared'|'corona': [{'cantidad': bolsas, 'producto': nombre,
+    'lote': código de trazabilidad}]}. `producto` es el nombre tal cual lo
+    eligió la persona (de la lista de Proveedores > Material Refractario, o
+    escrito a mano si no está en la lista -- ver /api/sinterizados/
+    productos-refractarios); no se guarda un id porque el catálogo de
+    Proveedores puede cambiar y esto es un registro histórico."""
+    if v is None:
+        return {s: [] for s in _SINTER_SECCIONES_BOLSA}
+    if not isinstance(v, dict):
+        raise HTTPException(400, "Bolsas: formato inválido")
+    out = {}
+    for seccion in _SINTER_SECCIONES_BOLSA:
+        crudas = v.get(seccion) or []
+        if not isinstance(crudas, list) or len(crudas) > _SINTER_BOLSAS_MAX_POR_SECCION:
+            raise HTTPException(400, f"Bolsas de {seccion}: demasiadas entradas (máximo {_SINTER_BOLSAS_MAX_POR_SECCION})")
+        entradas = []
+        for entrada in crudas:
+            if not isinstance(entrada, dict):
+                raise HTTPException(400, f"Bolsas de {seccion}: entrada inválida")
+            cantidad = _sinter_numero(entrada.get("cantidad"), f"Cantidad de bolsas ({seccion})", 10000)
+            if cantidad is None:
+                raise HTTPException(400, f"Bolsas de {seccion}: falta la cantidad")
+            producto = str(entrada.get("producto") or "").strip()
+            if not producto:
+                raise HTTPException(400, f"Bolsas de {seccion}: falta el producto")
+            if len(producto) > 200:
+                raise HTTPException(400, f"Bolsas de {seccion}: producto demasiado largo (máximo 200 caracteres)")
+            lote = str(entrada.get("lote") or "").strip()
+            if len(lote) > 100:
+                raise HTTPException(400, f"Bolsas de {seccion}: lote demasiado largo (máximo 100 caracteres)")
+            entradas.append({"cantidad": cantidad, "producto": producto, "lote": lote or None})
+        out[seccion] = entradas
+    return out
+
+
+def _require_sinterizado(user: dict = Depends(_get_auth_user)) -> dict:
+    """Login + permiso de la seccion 'sinterizado' (el admin pasa siempre)."""
+    if user["is_admin"]:
+        return user
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        ok = conn.execute(
+            "SELECT 1 FROM _permisos WHERE legajo=? AND seccion='sinterizado'", (user["legajo"],)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not ok:
+        raise HTTPException(403, "No tenés permiso para la sección Sinterizado")
+    return user
+
+
+def _require_sinterizado_curva(user: dict = Depends(_get_auth_user)) -> dict:
+    """Login + permiso 'sinterizado_curva' (el admin pasa siempre). Aparte de
+    'sinterizado': verla es parte de ver la planilla, pero es UNA sola curva
+    compartida por todas -- cambiarla afecta lo que ve todo el mundo."""
+    if user["is_admin"]:
+        return user
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        ok = conn.execute(
+            "SELECT 1 FROM _permisos WHERE legajo=? AND seccion='sinterizado_curva'", (user["legajo"],)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not ok:
+        raise HTTPException(403, "No tenés permiso para editar la curva de referencia")
+    return user
+
+
+def _require_procedimientos_editar(user: dict = Depends(_get_auth_user)) -> dict:
+    """Login + permiso 'procedimientos_editar' (el admin pasa siempre). Igual
+    que 'sinterizado_curva': transversal a todas las secciones -- ver un
+    procedimiento concreto se chequea aparte, con _proc_chequear_ver."""
+    if user["is_admin"]:
+        return user
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        ok = conn.execute(
+            "SELECT 1 FROM _permisos WHERE legajo=? AND seccion='procedimientos_editar'", (user["legajo"],)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not ok:
+        raise HTTPException(403, "No tenés permiso para editar procedimientos")
+    return user
+
+
+def _sinter_numero(v, etiqueta: str, maximo: float, entero: bool = False):
+    import math
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return None
+    try:
+        n = float(v.strip().replace(",", ".")) if isinstance(v, str) else float(v)
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"{etiqueta}: no es un número válido")
+    if not math.isfinite(n) or n < 0 or n > maximo:
+        raise HTTPException(400, f"{etiqueta}: tiene que estar entre 0 y {maximo:g}")
+    if entero:
+        if n != int(n):
+            raise HTTPException(400, f"{etiqueta}: tiene que ser un número entero")
+        return int(n)
+    return round(n, 2)
+
+
+def _sinter_fecha(v, etiqueta: str):
+    v = ("" if v is None else str(v)).strip()
+    if not v:
+        return None
+    try:
+        datetime.strptime(v, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(400, f"{etiqueta}: fecha inválida")
+    return v
+
+
+def _sinter_campos_validar(body: dict) -> dict:
+    """Solo valida los campos que VINIERON (un PUT puede mandar un subconjunto)."""
+    out = {}
+    for campo, (tipo, extra, etiqueta) in _SINTER_CAMPOS.items():
+        if campo not in body:
+            continue
+        v = body[campo]
+        if tipo == "fecha":
+            out[campo] = _sinter_fecha(v, etiqueta)
+        elif tipo == "numero":
+            out[campo] = _sinter_numero(v, etiqueta, extra)
+        elif tipo == "entero":
+            out[campo] = _sinter_numero(v, etiqueta, extra, entero=True)
+        elif tipo == "bool":
+            out[campo] = 1 if v in (True, 1, "1") else 0
+        elif tipo == "sino":
+            v = ("" if v is None else str(v)).strip().upper()
+            if v not in ("", "SI", "NO"):
+                raise HTTPException(400, f"{etiqueta}: tiene que ser SI o NO")
+            out[campo] = v or None
+        else:
+            v = ("" if v is None else str(v)).strip()
+            if len(v) > extra:
+                raise HTTPException(400, f"{etiqueta}: máximo {extra} caracteres")
+            out[campo] = v or None
+    return out
+
+
+def _sinter_lecturas_validar(v) -> list:
+    import re
+    if v is None:
+        return []
+    if not isinstance(v, list) or len(v) > 300:
+        raise HTTPException(400, "Registro de temperatura: lista inválida (máximo 300 lecturas)")
+    out = []
+    for i, it in enumerate(v, 1):
+        if not isinstance(it, dict):
+            raise HTTPException(400, f"Lectura {i}: formato inválido")
+        hora = str(it.get("hora") or "").strip()
+        if hora and not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", hora):
+            raise HTTPException(400, f"Lectura {i}: la hora tiene que ser HH:MM")
+        pot = str(it.get("pot") or "").strip()
+        if len(pot) > 20:
+            raise HTTPException(400, f"Lectura {i}: potencia demasiado larga")
+        temp = _sinter_numero(it.get("temp"), f"Lectura {i}: temperatura", 3000)
+        obs = str(it.get("obs") or "").strip()
+        if len(obs) > 300:
+            raise HTTPException(400, f"Lectura {i}: observaciones demasiado largas (máximo 300)")
+        if not (hora or pot or temp is not None or obs):
+            continue
+        out.append({"hora": hora, "pot": pot, "temp": temp, "obs": obs})
+    return out
+
+
+_SINTER_CURVA_MAX_PUNTOS = 100
+
+
+def _sinter_curva_validar(v) -> list:
+    """Lista de puntos [{'minuto', 'temp'}] de la curva de referencia del paso
+    Sinterizado, ordenada por minuto. 'minuto' es tiempo TRANSCURRIDO desde el
+    arranque (no hora de reloj: cada colada empieza a una hora distinta, y esto
+    es un ejemplo a seguir, no el registro de ninguna colada en particular)."""
+    if not isinstance(v, list) or len(v) > _SINTER_CURVA_MAX_PUNTOS:
+        raise HTTPException(400, f"Curva de referencia: lista inválida (máximo {_SINTER_CURVA_MAX_PUNTOS} puntos)")
+    out = []
+    for i, it in enumerate(v, 1):
+        if not isinstance(it, dict):
+            raise HTTPException(400, f"Curva de referencia, punto {i}: formato inválido")
+        minuto = _sinter_numero(it.get("minuto"), f"Curva de referencia, punto {i}: minuto", 10000)
+        if minuto is None:
+            raise HTTPException(400, f"Curva de referencia, punto {i}: falta el minuto")
+        temp = _sinter_numero(it.get("temp"), f"Curva de referencia, punto {i}: temperatura", 3000)
+        if temp is None:
+            raise HTTPException(400, f"Curva de referencia, punto {i}: falta la temperatura")
+        out.append({"minuto": minuto, "temp": temp})
+    out.sort(key=lambda p: p["minuto"])
+    return out
+
+
+_SINTER_CURVA_RANGO_DEFECTO = 10.0  # °C de ancho de la banda de tolerancia alrededor de la curva
+
+
+def _sinter_rango_validar(v) -> float:
+    """Ancho (°C) de la banda de tolerancia dibujada alrededor de la curva de
+    referencia. No viene o viene vacío -> el valor por defecto (no es un error:
+    el rango es opcional, a diferencia de cada punto de la curva)."""
+    rango = _sinter_numero(v, "Rango de la curva de referencia", 200)
+    return rango if rango is not None else _SINTER_CURVA_RANGO_DEFECTO
+
+
+def _sinter_flechas_validar(flechas, donde_prefijo) -> dict:
+    """{'0'..'7': {'r': refractario_mm, 'p': polvo_mm}} de UNA medición. Reusado
+    por el validador de PUT y por la migración de planillas del formato viejo."""
+    if not isinstance(flechas, dict):
+        raise HTTPException(400, "Mediciones: espesores inválidos")
+    medidas = {}
+    for k, par in flechas.items():
+        if not str(k).isdigit() or int(k) >= _SINTER_SECTORES:
+            raise HTTPException(400, "Mediciones: flecha inválida")
+        if not isinstance(par, dict):
+            par = {"r": par}  # formato antiguo (previo a refractario/polvo): un numero suelto = refractario
+        if set(par) - {"r", "p"}:
+            raise HTTPException(400, "Mediciones: cada flecha lleva solo refractario (r) y polvo (p)")
+        donde = f"({donde_prefijo}, flecha {int(k) + 1})"
+        r = _sinter_numero(par.get("r"), f"Espesor de refractario {donde}", 10000)
+        p = _sinter_numero(par.get("p"), f"Espesor de polvo {donde}", 10000)
+        entrada = {c: n for c, n in (("r", r), ("p", p)) if n is not None}
+        if entrada:
+            medidas[str(int(k))] = entrada
+    return medidas
+
+
+# Antes de "Nueva medición" había 5 alturas fijas (arriba/medio_alto/medio/
+# medio_bajo/abajo) guardadas como marcas.medidas = {nivel: {flecha: {...}}}.
+# Una planilla vieja que todavía tenga ese formato (no manda "alturas") se
+# migra UNA vez, repartiendo esas 5 vistas en las alturas de referencia que
+# usa el dibujo del crisol (_SN_CRISOL en sinterizado.js: 0 a 1100mm).
+_SINTER_ALTURAS_LEGADO = {"arriba": 0, "medio_alto": 275, "medio": 550, "medio_bajo": 825, "abajo": 1100}
+
+
+def _sinter_alturas_migrar_legado(medidas_viejas) -> list:
+    if not isinstance(medidas_viejas, dict):
+        return []
+    out = []
+    for nivel, mm in _SINTER_ALTURAS_LEGADO.items():
+        flechas = medidas_viejas.get(nivel)
+        if isinstance(flechas, dict) and flechas:
+            out.append({"mm": mm, "medidas": _sinter_flechas_validar(flechas, f"altura {mm}mm")})
+    return out
+
+
+def _sinter_marcas_validar(v) -> dict:
+    """{'perfil': [{x, y, t, a}], 'alturas': [{'mm': .., 'medidas': {flecha: {'r':.., 'p':..}}}]}
+
+    `perfil` son los puntos de color sobre el dibujo del crisol (rojo = espesor
+    minimo, verde = filtraciones, azul = manta oscura), cada uno con el ángulo
+    (0 a 359) al que se lo marcó -- es lo que permite, al girar el perfil con el
+    slider, mostrar de frente los que caen cerca del ángulo actual y atenuar los
+    que están del otro lado. `alturas` son las mediciones ("óvalos") que la
+    persona va creando con "Nueva medición": cada una a una altura en mm desde
+    la boca, con el espesor medido (refractario y polvo, en mm) en cada una de
+    sus 8 flechas."""
+    import math
+    if v is None:
+        return {"perfil": [], "alturas": []}
+    if not isinstance(v, dict):
+        raise HTTPException(400, "Marcas del gráfico: formato inválido")
+    perfil = []
+    puntos = v.get("perfil") or []
+    if not isinstance(puntos, list) or len(puntos) > 300:
+        raise HTTPException(400, "Marcas del gráfico: demasiados puntos (máximo 300)")
+    for pt in puntos:
+        if not isinstance(pt, dict) or pt.get("t") not in _SINTER_TIPOS_MARCA:
+            raise HTTPException(400, "Marcas del gráfico: punto inválido")
+        try:
+            x, y = float(pt.get("x")), float(pt.get("y"))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Marcas del gráfico: coordenada inválida")
+        if not (math.isfinite(x) and math.isfinite(y)) or not (0 <= x <= 100 and 0 <= y <= 110):
+            raise HTTPException(400, "Marcas del gráfico: punto fuera del dibujo")
+        try:
+            angulo = float(pt.get("a", 0) or 0)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Marcas del gráfico: ángulo inválido")
+        if not math.isfinite(angulo) or not (0 <= angulo < 360):
+            raise HTTPException(400, "Marcas del gráfico: ángulo inválido (0 a 359)")
+        perfil.append({"x": round(x, 1), "y": round(y, 1), "t": pt["t"], "a": round(angulo)})
+    crudas = v.get("alturas")
+    if crudas is None:
+        crudas = _sinter_alturas_migrar_legado(v.get("medidas"))
+    if not isinstance(crudas, list) or len(crudas) > _SINTER_ALTURAS_MAX:
+        raise HTTPException(400, f"Mediciones: demasiadas alturas (máximo {_SINTER_ALTURAS_MAX})")
+    alturas = []
+    for entrada in crudas:
+        if not isinstance(entrada, dict):
+            raise HTTPException(400, "Mediciones: entrada inválida")
+        mm = _sinter_numero(entrada.get("mm"), "Altura de la medición (mm)", _SINTER_ALTURA_MAX_MM)
+        if mm is None:
+            raise HTTPException(400, "Mediciones: falta la altura (mm)")
+        medidas = _sinter_flechas_validar(entrada.get("medidas") or {}, f"altura {mm:g}mm")
+        alturas.append({"mm": mm, "medidas": medidas})
+    alturas.sort(key=lambda a: a["mm"])
+    return {"perfil": perfil, "alturas": alturas}
+
+
+def _sinter_pasos_aplicar(previos: dict, nuevos, user: dict, ahora: datetime) -> dict:
+    """`nuevos` = {clave: True} con los tildados. Los que ya estaban hechos
+    conservan su firma original; los recien tildados se firman con `user`."""
+    if not isinstance(nuevos, dict):
+        raise HTTPException(400, "Pasos del procedimiento: formato inválido")
+    for clave in nuevos:
+        if clave not in _SINTER_PASOS:
+            raise HTTPException(400, f"Paso desconocido: {clave}")
+    out = {}
+    for clave in _SINTER_PASOS:
+        if nuevos.get(clave) is True:
+            out[clave] = previos.get(clave) or {
+                "por_legajo": user["legajo"], "por_nombre": user["nombre"], "en": ahora.isoformat(),
+            }
+    return out
+
+
+def _sinter_json(txt, defecto):
+    try:
+        v = json.loads(txt) if txt else None
+    except (TypeError, ValueError):
+        v = None
+    return defecto if v is None else v
+
+
+def _sinter_alturas_normalizar(sid: int, m: dict) -> list:
+    """Para el GET: 'alturas' tal cual quedaron guardadas, o migradas al vuelo si
+    la planilla es de antes de "Nueva medición" (ver _sinter_alturas_migrar_legado).
+    No hace falta re-guardar para que se vean migradas -- el próximo PUT sí las
+    persiste ya en el formato nuevo. `foto` no se guarda en esta columna -- se
+    calcula mirando el disco (ver _sinter_foto_path), como el resto de esta
+    función: una proyección para mostrar, no un dato que el cliente mande."""
+    alturas = m.get("alturas")
+    if alturas is None:
+        alturas = _sinter_alturas_migrar_legado(m.get("medidas"))
+    if not isinstance(alturas, list):
+        return []
+    out = []
+    for entrada in alturas:
+        if not isinstance(entrada, dict) or not isinstance(entrada.get("mm"), (int, float)):
+            continue
+        flechas = entrada.get("medidas")
+        medidas = {k: (v if isinstance(v, dict) else {"r": v}) for k, v in flechas.items()} if isinstance(flechas, dict) else {}
+        mm = entrada["mm"]
+        out.append({"mm": mm, "medidas": medidas, "foto": _sinter_foto_path(sid, round(mm)).exists()})
+    out.sort(key=lambda a: a["mm"])
+    return out
+
+
+def _sinter_dict(r) -> dict:
+    d = dict(r)
+    d["lecturas"] = _sinter_json(d.get("lecturas"), [])
+    m = _sinter_json(d.get("marcas"), {})
+    if not isinstance(m, dict):
+        m = {}
+    perfil = [p if isinstance(p, dict) and "a" in p else {**p, "a": 0} for p in (m.get("perfil") or []) if isinstance(p, dict)]
+    d["marcas"] = {"perfil": perfil, "alturas": _sinter_alturas_normalizar(d["id"], m)}
+    d["pasos"] = _sinter_json(d.get("pasos"), {})
+    bolsas = _sinter_json(d.get("bolsas"), {})
+    d["bolsas"] = {s: (bolsas.get(s) if isinstance(bolsas, dict) and isinstance(bolsas.get(s), list) else []) for s in _SINTER_SECCIONES_BOLSA}
+    return d
+
+
+def _sinter_resumen(r) -> dict:
+    """Fila liviana para la lista y el indicador (sin lecturas, marcas ni bolsas)."""
+    d = _sinter_dict(r)
+    temps = [x["temp"] for x in d["lecturas"] if x.get("temp") is not None]
+    d["temp_max"] = max(temps) if temps else None
+    d["pasos_hechos"] = len(d["pasos"])
+    d["pasos_total"] = len(_SINTER_PASOS)
+    del d["lecturas"], d["marcas"], d["bolsas"]
+    return d
+
+
+def _sinter_get(conn, sid: int):
+    r = conn.execute("SELECT * FROM _sinterizado WHERE id=? AND estado<>'anulado'", (sid,)).fetchone()
+    if not r:
+        raise HTTPException(404, "Sinterizado no encontrado")
+    return r
+
+
+@app.get("/api/sinterizados/productos-refractarios")
+def get_sinter_productos_refractarios(user: dict = Depends(_require_sinterizado)):
+    """Catálogo de Proveedores filtrado a la categoría de refractarios, para
+    sugerir en las bolsas de piso (paso 4) y pared/corona (paso 6) -- solo id y
+    nombre, no el resto de los datos de Proveedores (evaluación, informes,
+    etc.), así no hace falta tener el permiso de ese módulo para elegir un
+    producto acá. Es una sugerencia (datalist en el frontend), no una lista
+    cerrada: el campo producto de cada bolsa admite texto libre si no está en
+    el catálogo."""
+    conn = get_db()
+    try:
+        grupo = conn.execute("SELECT id FROM _prov_grupos WHERE nombre LIKE '%efractari%' LIMIT 1").fetchone()
+        if not grupo:
+            return []
+        rows = conn.execute(
+            "SELECT id, nombre FROM _prov_productos WHERE grupo=? ORDER BY nombre", (grupo["id"],)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def _sinter_curva_ref_actual(conn) -> dict:
+    r = conn.execute(
+        "SELECT puntos, rango, cambiado_por_nombre, cambiado_en FROM _sinter_curva_ref ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if not r:
+        return {"puntos": [], "rango": _SINTER_CURVA_RANGO_DEFECTO, "cambiado_por_nombre": None, "cambiado_en": None}
+    return {"puntos": json.loads(r["puntos"] or "[]"), "rango": r["rango"] if r["rango"] is not None else _SINTER_CURVA_RANGO_DEFECTO,
+            "cambiado_por_nombre": r["cambiado_por_nombre"], "cambiado_en": r["cambiado_en"]}
+
+
+@app.get("/api/sinterizados/curva-referencia")
+def get_sinter_curva_referencia(user: dict = Depends(_require_sinterizado)):
+    """Curva de referencia del paso Sinterizado: UNA sola, compartida por
+    todas las planillas (ver _sinter_curva_ref_actual) -- se muestra como
+    ejemplo a seguir, superpuesta a la curva real de cada colada. Verla es
+    parte de ver la pestaña (mismo permiso 'sinterizado'); para EDITARLA hace
+    falta 'sinterizado_curva' (ver el PUT de acá abajo)."""
+    conn = get_db()
+    try:
+        return _sinter_curva_ref_actual(conn)
+    finally:
+        conn.close()
+
+
+@app.put("/api/sinterizados/curva-referencia")
+async def put_sinter_curva_referencia(req: Request, user: dict = Depends(_require_sinterizado_curva)):
+    body = await req.json()
+    puntos = _sinter_curva_validar(body.get("puntos"))
+    rango = _sinter_rango_validar(body.get("rango"))
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO _sinter_curva_ref (puntos, rango, cambiado_por_legajo, cambiado_por_nombre, cambiado_en) VALUES (?,?,?,?,?)",
+            (json.dumps(puntos, ensure_ascii=False), rango, user["legajo"], user["nombre"], datetime.now().isoformat())
+        )
+        conn.commit()
+        return _sinter_curva_ref_actual(conn)
+    finally:
+        conn.close()
+
+
+@app.get("/api/sinterizados")
+def get_sinterizados(user: dict = Depends(_require_sinterizado)):
+    conn = get_db()
+    try:
+        rows = conn.execute("SELECT * FROM _sinterizado WHERE estado<>'anulado' ORDER BY id DESC").fetchall()
+        return [_sinter_resumen(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@app.get("/api/sinterizados/{sid}")
+def get_sinterizado(sid: int, user: dict = Depends(_require_sinterizado)):
+    conn = get_db()
+    try:
+        return _sinter_dict(_sinter_get(conn, sid))
+    finally:
+        conn.close()
+
+
+@app.post("/api/sinterizados")
+def post_sinterizado(user: dict = Depends(_require_sinterizado)):
+    ahora = datetime.now()
+    conn = get_db()
+    try:
+        cur = conn.execute(
+            "INSERT INTO _sinterizado (estado, desarme_fecha, creado_por_legajo, creado_por_nombre, creado_en, "
+            "modificado_por_legajo, modificado_por_nombre, modificado_en) VALUES ('en_curso',?,?,?,?,?,?,?)",
+            (ahora.strftime("%Y-%m-%d"), user["legajo"], user["nombre"], ahora.isoformat(),
+             user["legajo"], user["nombre"], ahora.isoformat())
+        )
+        conn.commit()
+        return _sinter_dict(_sinter_get(conn, cur.lastrowid))
+    finally:
+        conn.close()
+
+
+@app.put("/api/sinterizados/{sid}")
+async def put_sinterizado(sid: int, req: Request, user: dict = Depends(_require_sinterizado)):
+    body = await req.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Cuerpo inválido")
+    base = body.get("modificado_en")
+    if not base or not isinstance(base, str):
+        raise HTTPException(400, "Falta modificado_en (la marca de la versión que se está editando)")
+    campos = _sinter_campos_validar(body)
+    if "lecturas" in body:
+        campos["lecturas"] = json.dumps(_sinter_lecturas_validar(body["lecturas"]), ensure_ascii=False)
+    if "marcas" in body:
+        campos["marcas"] = json.dumps(_sinter_marcas_validar(body["marcas"]), ensure_ascii=False)
+    if "bolsas" in body:
+        campos["bolsas"] = json.dumps(_sinter_bolsas_validar(body["bolsas"]), ensure_ascii=False)
+    estado_nuevo = body.get("estado")
+    if estado_nuevo is not None and estado_nuevo not in ("en_curso", "finalizado"):
+        raise HTTPException(400, "Estado inválido")
+    ahora = datetime.now()
+    conn = get_db()
+    try:
+        actual = _sinter_get(conn, sid)
+        reabre = actual["estado"] == "finalizado" and estado_nuevo == "en_curso"
+        if reabre and not user["is_admin"]:
+            raise HTTPException(403, "Solo un administrador puede reabrir una planilla finalizada")
+        if actual["estado"] == "finalizado" and not reabre:
+            raise HTTPException(409, "FINALIZADA: la planilla está finalizada; reabrila para editarla")
+        if "pasos" in body:
+            campos["pasos"] = json.dumps(
+                _sinter_pasos_aplicar(_sinter_json(actual["pasos"], {}), body["pasos"], user, ahora),
+                ensure_ascii=False)
+        if estado_nuevo:
+            campos["estado"] = estado_nuevo
+            if estado_nuevo == "finalizado":
+                campos["finalizado_por_nombre"] = user["nombre"]
+                campos["finalizado_en"] = ahora.isoformat()
+            else:
+                campos["finalizado_por_nombre"] = None
+                campos["finalizado_en"] = None
+        campos["modificado_por_legajo"] = user["legajo"]
+        campos["modificado_por_nombre"] = user["nombre"]
+        campos["modificado_en"] = ahora.isoformat()
+        sets = ", ".join(f"{c}=?" for c in campos)
+        # compare-and-swap: solo pisa si nadie guardo desde que este cliente leyo
+        cur = conn.execute(
+            f"UPDATE _sinterizado SET {sets} WHERE id=? AND modificado_en=?",
+            (*campos.values(), sid, base)
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            raise HTTPException(409, "CONFLICTO: otra persona modificó esta planilla mientras la editabas")
+        conn.commit()
+        return _sinter_dict(_sinter_get(conn, sid))
+    finally:
+        conn.close()
+
+
+@app.delete("/api/sinterizados/{sid}")
+def delete_sinterizado(sid: int, user: dict = Depends(_require_sinterizado)):
+    """Anula (no borra: es un registro de calidad). Solo una planilla en curso."""
+    ahora = datetime.now()
+    conn = get_db()
+    try:
+        actual = _sinter_get(conn, sid)
+        if actual["estado"] != "en_curso":
+            raise HTTPException(409, "Solo se puede anular una planilla en curso; reabrila primero")
+        conn.execute(
+            "UPDATE _sinterizado SET estado='anulado', modificado_por_legajo=?, modificado_por_nombre=?, modificado_en=? WHERE id=?",
+            (user["legajo"], user["nombre"], ahora.isoformat(), sid)
+        )
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+# ── Fotos de las mediciones de sinterizado ────────────────────────────────────
+# Una foto por medición (identificada por su mm, ya único dentro de la
+# planilla), en disco -- no en la fila de _sinterizado ni en el JSON de
+# marcas, mismo patrón que INFORMES_PSP. No tocan modificado_en: son un canal
+# aparte del guardado automático de la planilla, así que no compiten por su
+# marca de versión ni necesitan choque de ediciones propio.
+def _sinter_no_congelada_exigir(conn, sid: int) -> None:
+    """La planilla no puede estar finalizada -- mismo criterio que cualquier
+    otra edición. A propósito NO exige que la medición (mm) ya exista en
+    'alturas': el guardado automático de la planilla es asíncrono (ver
+    sinterizado.js), y crear la medición y subirle la foto casi seguido no
+    tiene por qué esperar a que ese PUT haya terminado. Una foto para un mm
+    que después nunca se guarda queda huérfana (ver _snQuitarAltura en el
+    frontend, que borra la foto al borrar la medición)."""
+    actual = _sinter_get(conn, sid)
+    if actual["estado"] == "finalizado":
+        raise HTTPException(409, "FINALIZADA: la planilla está finalizada; reabrila para editar sus fotos")
+
+
+@app.post("/api/sinterizados/{sid}/alturas/{mm}/foto")
+async def post_sinter_foto(sid: int, mm: int, file: UploadFile = File(...), user: dict = Depends(_require_sinterizado)):
+    conn = get_db()
+    try:
+        _sinter_no_congelada_exigir(conn, sid)
+    finally:
+        conn.close()
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, "Archivo vacío")
+    if len(content) > 15 * 1024 * 1024:
+        raise HTTPException(413, "Foto demasiado grande (máximo 15 MB)")
+    path = _sinter_foto_path(sid, mm)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    return {"ok": True}
+
+
+@app.get("/api/sinterizados/{sid}/alturas/{mm}/foto")
+def get_sinter_foto(sid: int, mm: int, user: dict = Depends(_require_sinterizado)):
+    conn = get_db()
+    try:
+        _sinter_get(conn, sid)  # 404 si la planilla no existe (no anulada)
+    finally:
+        conn.close()
+    path = _sinter_foto_path(sid, mm)
+    if not path.exists():
+        raise HTTPException(404, "Sin foto para esta medición")
+    return FileResponse(str(path), media_type="image/jpeg")
+
+
+@app.delete("/api/sinterizados/{sid}/alturas/{mm}/foto")
+def delete_sinter_foto(sid: int, mm: int, user: dict = Depends(_require_sinterizado)):
+    conn = get_db()
+    try:
+        _sinter_no_congelada_exigir(conn, sid)
+    finally:
+        conn.close()
+    _sinter_foto_path(sid, mm).unlink(missing_ok=True)
+    return {"ok": True}
+
+
+# ── Procedimientos (módulo general: contenido editable tipo blog, por bloques)
+# Fase 1 del plan: solo backend (tablas + endpoints). El contenido es JSON
+# {blocks:[{type,data},...]} tipo Editor.js -- el backend valida la FORMA
+# (lista blanca de tipos, tamaño), nunca el detalle interno de cada bloque
+# (eso es responsabilidad del Tool del frontend que lo arma). "Ver" un
+# procedimiento se resuelve por 'seccion_ver' (independiente del permiso
+# 'procedimientos_editar', que es transversal para EDITAR cualquiera) -- así
+# un módulo nuevo puede enganchar su propio procedimiento sin pedir un
+# permiso nuevo ni un endpoint nuevo, solo guardando su sección en esa columna.
+_PROC_TIPOS_BLOQUE = {
+    "header", "paragraph", "list", "table", "ficha", "pasos", "callout", "imagen", "grafico", "diagrama",
+    # 'anexo': como 'ficha' (clave/valor), pero con 'nombre' -- ese nombre es a
+    # la vez el título de la tarjeta Y la palabra clave que el frontend busca
+    # en el resto del texto del procedimiento para ofrecer un link que abre
+    # su ficha en una ventana chica (ver _procEnlazarTexto en procedimientos.js).
+    "anexo",
+}
+_PROC_MAX_BLOQUES = 500
+_PROC_MAX_BYTES = 3_000_000
+
+# Extensiones admitidas para el bloque 'imagen' (que a pesar del nombre
+# también cubre PDF y otros adjuntos -- el frontend decide cómo mostrar cada
+# uno según esta misma extensión: <img> para los de imagen, un link de
+# descarga para el resto). El file_id (uuid4/hex) no lleva la extensión, así
+# que el GET la busca con un glob (PROC_IMG_DIR/{pid}/{file_id}.*) en vez de
+# asumir '.jpg' como antes de que este bloque aceptara más que fotos.
+_PROC_ARCHIVO_TIPOS = {
+    "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+    "gif": "image/gif", "webp": "image/webp", "pdf": "application/pdf",
+}
+
+
+def _proc_get(conn, pid: int):
+    r = conn.execute("SELECT * FROM _procedimientos WHERE id=? AND estado<>'archivado'", (pid,)).fetchone()
+    if not r:
+        raise HTTPException(404, "Procedimiento no encontrado")
+    return r
+
+
+def _proc_get_by_codigo(conn, codigo: str):
+    r = conn.execute("SELECT * FROM _procedimientos WHERE codigo=? AND estado<>'archivado'", (codigo,)).fetchone()
+    if not r:
+        raise HTTPException(404, "Procedimiento no encontrado")
+    return r
+
+
+def _proc_dict(r, incluir_borrador: bool = True) -> dict:
+    """incluir_borrador=False (quien solo puede VER, no editar) saca el
+    CONTENIDO del borrador en curso -- son cambios todavía no aprobados, no
+    es para cualquiera. El resto de los campos de borrador (estado, motivo,
+    quién, cuándo) sí quedan visibles para todo el que puede ver el
+    documento: no es un secreto que haya un cambio pendiente, solo el
+    contenido de ese cambio."""
+    d = dict(r)
+    d["contenido"] = json.loads(d["contenido"] or "{}")
+    d["metadatos"] = json.loads(d["metadatos"]) if d.get("metadatos") else None
+    d["borrador_contenido"] = json.loads(d["borrador_contenido"]) if d.get("borrador_contenido") else None
+    if not incluir_borrador:
+        d["borrador_contenido"] = None
+        d["borrador_titulo"] = None
+    return d
+
+
+def _proc_actualizar_referencias_codigo(conn, codigo_viejo: str, codigo_nuevo: str):
+    """Un anexo tipo 'procedimiento' guarda el código del procedimiento al
+    que apunta (procedimientoCodigo) -- si ese código cambia, los anexos de
+    TODOS los demás procedimientos que lo referenciaban quedarían mirando a
+    nada. Recorre contenido Y borrador_contenido de cada fila (el vínculo
+    puede estar en cualquiera de los dos) y los corrige -- mismo patrón que
+    la migración única de arranque que convierte fichas viejas a anexo.
+    Mecánico, no cuenta como una edición propia de ESOS procedimientos: no
+    toca modificado_por/en ni genera una versión en su historial, para no
+    romperle el optimistic lock a quien los esté editando en este momento."""
+    for _r in conn.execute("SELECT id, contenido, borrador_contenido FROM _procedimientos").fetchall():
+        for _col in ("contenido", "borrador_contenido"):
+            _raw = _r[_col]
+            if not _raw:
+                continue
+            _cont = json.loads(_raw)
+            _cambio = False
+            for _b in _cont.get("blocks") or []:
+                _d = _b.get("data")
+                if _b.get("type") == "anexo" and isinstance(_d, dict) and _d.get("tipo") == "procedimiento" and _d.get("procedimientoCodigo") == codigo_viejo:
+                    _d["procedimientoCodigo"] = codigo_nuevo
+                    _cambio = True
+            if _cambio:
+                conn.execute(f"UPDATE _procedimientos SET {_col}=? WHERE id=?", (json.dumps(_cont, ensure_ascii=False), _r["id"]))
+
+
+def _proc_tiene_seccion(conn, legajo: int, seccion: str) -> bool:
+    return bool(conn.execute("SELECT 1 FROM _permisos WHERE legajo=? AND seccion=?", (legajo, seccion)).fetchone())
+
+
+def _proc_puede_editar(conn, user: dict) -> bool:
+    return bool(user["is_admin"] or _proc_tiene_seccion(conn, user["legajo"], "procedimientos_editar"))
+
+
+def _proc_puede_ver(conn, row, user: dict) -> bool:
+    """Admin o 'procedimientos_editar' siempre puede ver (tiene que poder ver
+    lo que edita). Si no, hace falta tener la sección de 'seccion_ver' (y si
+    esa columna es NULL, nadie sin esos dos permisos puede ver el documento
+    -- un procedimiento sin sección asignada todavía es, en los hechos, un
+    borrador). Recibe la conexión ya abierta -- la usan tanto el chequeo de
+    UN procedimiento (_proc_chequear_ver) como el listado de TODOS
+    (get_procedimientos), que la necesitan por fila sin abrir una conexión
+    nueva cada vez."""
+    if _proc_puede_editar(conn, user):
+        return True
+    sec = row["seccion_ver"]
+    return bool(sec and _proc_tiene_seccion(conn, user["legajo"], sec))
+
+
+def _proc_chequear_ver(row, user: dict) -> None:
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        ok = _proc_puede_ver(conn, row, user)
+    finally:
+        conn.close()
+    if not ok:
+        raise HTTPException(403, "No tenés permiso para ver este procedimiento")
+
+
+def _proc_contenido_validar(v) -> dict:
+    if not isinstance(v, dict):
+        raise HTTPException(400, "Contenido: formato inválido")
+    bloques = v.get("blocks")
+    if not isinstance(bloques, list) or len(bloques) > _PROC_MAX_BLOQUES:
+        raise HTTPException(400, f"Contenido: lista de bloques inválida (máximo {_PROC_MAX_BLOQUES})")
+    for i, b in enumerate(bloques, 1):
+        if not isinstance(b, dict) or not isinstance(b.get("type"), str) or not isinstance(b.get("data"), dict):
+            raise HTTPException(400, f"Bloque {i}: formato inválido")
+        if b["type"] not in _PROC_TIPOS_BLOQUE:
+            raise HTTPException(400, f"Bloque {i}: tipo '{b['type']}' desconocido")
+    if len(json.dumps(v, ensure_ascii=False).encode("utf-8")) > _PROC_MAX_BYTES:
+        raise HTTPException(400, "El contenido es demasiado grande (máximo 3 MB)")
+    return v
+
+
+def _proc_seccion_validar(v):
+    """None (sin sección -- solo ve admin/editor) o una de _ALL_SECCIONES."""
+    if v is None:
+        return None
+    sec = str(v).strip()
+    if not sec:
+        return None
+    if sec not in _ALL_SECCIONES:
+        raise HTTPException(400, f"Sección '{sec}' inválida")
+    return sec
+
+
+def _proc_metadatos_validar(v):
+    if v is None:
+        return None
+    if not isinstance(v, dict):
+        raise HTTPException(400, "Metadatos: formato inválido")
+    return v
+
+
+def _proc_tipo_validar(conn, v):
+    """None (sin tipo asignado -- válido, ver _procedimientos_tipos) o el id
+    de un tipo que exista de verdad en el catálogo."""
+    if v is None:
+        return None
+    try:
+        tid = int(v)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "tipo_id inválido")
+    if not conn.execute("SELECT 1 FROM _procedimientos_tipos WHERE id=?", (tid,)).fetchone():
+        raise HTTPException(400, f"No existe ningún tipo de documento con id {tid}")
+    return tid
+
+
+def _proc_tipo_dict(r) -> dict:
+    return {"id": r["id"], "sigla": r["sigla"], "nombre": r["nombre"],
+            "modificado_por_nombre": r["modificado_por_nombre"], "modificado_en": r["modificado_en"]}
+
+
+def _proc_limpiar_huerfanos(proc_id: int, contenido: dict) -> None:
+    """Housekeeping, nunca puede hacer fallar un guardado: borra imágenes en
+    disco que ya no están referenciadas en el contenido nuevo, con un margen
+    de 10 minutos para no pisar un upload recién hecho que todavía no se
+    guardó en el cuerpo del documento. Un fileId puede vivir en 'imagen'
+    (reemplaza el data entero), en un anexo (genérico: lista 'archivos'; tipo
+    'archivo': uno solo en 'archivo') o en cada paso de un bloque 'pasos'
+    (lista 'archivos') -- si esto no barre los tres, un archivo en uso se
+    borra solo a los 10 minutos."""
+    try:
+        referenciadas = set()
+        for b in (contenido.get("blocks") or []):
+            if not isinstance(b, dict):
+                continue
+            d = b.get("data") or {}
+            tipo = b.get("type")
+            if tipo == "imagen":
+                referenciadas.add(d.get("fileId"))
+            elif tipo == "anexo":
+                archivo_unico = d.get("archivo") or {}
+                referenciadas.add(archivo_unico.get("fileId"))
+                for a in (d.get("archivos") or []):
+                    if isinstance(a, dict):
+                        referenciadas.add(a.get("fileId"))
+            elif tipo == "pasos":
+                for p in (d.get("pasos") or []):
+                    if not isinstance(p, dict):
+                        continue
+                    for a in (p.get("archivos") or []):
+                        if isinstance(a, dict):
+                            referenciadas.add(a.get("fileId"))
+        referenciadas.discard(None)
+        carpeta = PROC_IMG_DIR / str(proc_id)
+        if not carpeta.exists():
+            return
+        margen = _time.time() - 600
+        for f in carpeta.iterdir():
+            if f.stem not in referenciadas and f.stat().st_mtime < margen:
+                f.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+@app.get("/api/procedimientos")
+def get_procedimientos(user: dict = Depends(_get_auth_user)):
+    """Listado liviano para la pestaña principal «Procedimientos» (ver el
+    permiso de página 'procedimientos' en _ALL_SECCIONES -- eso gatea que el
+    ÍTEM DEL MENÚ aparezca; una vez adentro, CADA fila se filtra sola por su
+    propio seccion_ver, así que no hace falta ningún otro chequeo acá: ya es
+    el mismo criterio que el GET de un procedimiento individual)."""
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT p.id, p.codigo, p.titulo, p.seccion_ver, p.modificado_por_nombre, p.modificado_en, "
+            "p.tipo_id, t.sigla AS tipo_sigla, t.nombre AS tipo_nombre "
+            "FROM _procedimientos p LEFT JOIN _procedimientos_tipos t ON t.id = p.tipo_id "
+            "WHERE p.estado<>'archivado' ORDER BY p.titulo"
+        ).fetchall()
+        return [dict(r) for r in rows if _proc_puede_ver(conn, r, user)]
+    finally:
+        conn.close()
+
+
+@app.get("/api/procedimientos/tipos")
+def get_procedimientos_tipos(user: dict = Depends(_get_auth_user)):
+    """Catálogo de tipos de documento (PE/PG + lo que se vaya cargando a
+    mano) -- solo requiere login, igual que el resto de lo que hace falta
+    para simplemente MOSTRAR un documento (ver get_procedimientos). Declarado
+    ANTES de /api/procedimientos/{pid} a propósito: si quedara después, esa
+    ruta con 'pid' le ganaría el matching a 'tipos' y esto nunca se
+    alcanzaría (mismo motivo por el que /por-codigo/{codigo} también va
+    antes)."""
+    conn = get_db()
+    try:
+        rows = conn.execute("SELECT * FROM _procedimientos_tipos ORDER BY sigla").fetchall()
+        return [_proc_tipo_dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@app.post("/api/procedimientos/tipos")
+async def post_procedimiento_tipo(req: Request, user: dict = Depends(_require_procedimientos_editar)):
+    body = await req.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Cuerpo inválido")
+    sigla = str(body.get("sigla") or "").strip()
+    if not sigla or len(sigla) > 20:
+        raise HTTPException(400, "Sigla obligatoria (máximo 20 caracteres)")
+    nombre = str(body.get("nombre") or "").strip()
+    if not nombre or len(nombre) > 200:
+        raise HTTPException(400, "Nombre obligatorio (máximo 200 caracteres)")
+    ahora = datetime.now().isoformat()
+    conn = get_db()
+    try:
+        try:
+            cur = conn.execute(
+                "INSERT INTO _procedimientos_tipos (sigla, nombre, creado_por_legajo, creado_por_nombre, creado_en, "
+                "modificado_por_legajo, modificado_por_nombre, modificado_en) VALUES (?,?,?,?,?,?,?,?)",
+                (sigla, nombre, user["legajo"], user["nombre"], ahora, user["legajo"], user["nombre"], ahora)
+            )
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, f"Ya existe un tipo de documento con la sigla '{sigla}'")
+        conn.commit()
+        return _proc_tipo_dict(conn.execute("SELECT * FROM _procedimientos_tipos WHERE id=?", (cur.lastrowid,)).fetchone())
+    finally:
+        conn.close()
+
+
+@app.put("/api/procedimientos/tipos/{tid}")
+async def put_procedimiento_tipo(tid: int, req: Request, user: dict = Depends(_require_procedimientos_editar)):
+    body = await req.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Cuerpo inválido")
+    sigla = str(body.get("sigla") or "").strip()
+    if not sigla or len(sigla) > 20:
+        raise HTTPException(400, "Sigla obligatoria (máximo 20 caracteres)")
+    nombre = str(body.get("nombre") or "").strip()
+    if not nombre or len(nombre) > 200:
+        raise HTTPException(400, "Nombre obligatorio (máximo 200 caracteres)")
+    conn = get_db()
+    try:
+        if not conn.execute("SELECT 1 FROM _procedimientos_tipos WHERE id=?", (tid,)).fetchone():
+            raise HTTPException(404, "Tipo de documento no encontrado")
+        ahora = datetime.now().isoformat()
+        try:
+            conn.execute(
+                "UPDATE _procedimientos_tipos SET sigla=?, nombre=?, modificado_por_legajo=?, modificado_por_nombre=?, modificado_en=? WHERE id=?",
+                (sigla, nombre, user["legajo"], user["nombre"], ahora, tid)
+            )
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            raise HTTPException(409, f"Ya existe un tipo de documento con la sigla '{sigla}'")
+        conn.commit()
+        return _proc_tipo_dict(conn.execute("SELECT * FROM _procedimientos_tipos WHERE id=?", (tid,)).fetchone())
+    finally:
+        conn.close()
+
+
+@app.delete("/api/procedimientos/tipos/{tid}")
+def delete_procedimiento_tipo(tid: int, user: dict = Depends(_require_procedimientos_editar)):
+    """Bloquea la eliminación si algún documento (archivado o no -- da igual,
+    sigue siendo una referencia) todavía lo tiene asignado (confirmado con
+    el usuario): hay que reasignarles otro tipo primero, nunca queda un
+    documento con un tipo "fantasma"."""
+    conn = get_db()
+    try:
+        if not conn.execute("SELECT 1 FROM _procedimientos_tipos WHERE id=?", (tid,)).fetchone():
+            raise HTTPException(404, "Tipo de documento no encontrado")
+        en_uso = conn.execute("SELECT COUNT(*) AS n FROM _procedimientos WHERE tipo_id=?", (tid,)).fetchone()["n"]
+        if en_uso:
+            raise HTTPException(409, f"No se puede eliminar: hay {en_uso} documento(s) con este tipo asignado")
+        conn.execute("DELETE FROM _procedimientos_tipos WHERE id=?", (tid,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@app.get("/api/procedimientos/por-codigo/{codigo}")
+def get_procedimiento_por_codigo(codigo: str, user: dict = Depends(_get_auth_user)):
+    conn = get_db()
+    try:
+        r = _proc_get_by_codigo(conn, codigo)
+        _proc_chequear_ver(r, user)
+        return _proc_dict(r, incluir_borrador=_proc_puede_editar(conn, user))
+    finally:
+        conn.close()
+
+
+@app.get("/api/procedimientos/{pid}")
+def get_procedimiento(pid: int, user: dict = Depends(_get_auth_user)):
+    conn = get_db()
+    try:
+        r = _proc_get(conn, pid)
+        _proc_chequear_ver(r, user)
+        return _proc_dict(r, incluir_borrador=_proc_puede_editar(conn, user))
+    finally:
+        conn.close()
+
+
+@app.post("/api/procedimientos")
+async def post_procedimiento(req: Request, user: dict = Depends(_require_procedimientos_editar)):
+    body = await req.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Cuerpo inválido")
+    codigo = str(body.get("codigo") or "").strip()
+    if not codigo or len(codigo) > 100:
+        raise HTTPException(400, "Código obligatorio (máximo 100 caracteres)")
+    titulo = str(body.get("titulo") or "").strip()
+    if not titulo or len(titulo) > 300:
+        raise HTTPException(400, "Título obligatorio (máximo 300 caracteres)")
+    seccion_ver = _proc_seccion_validar(body.get("seccion_ver"))
+    metadatos = _proc_metadatos_validar(body.get("metadatos"))
+    _contenido_crudo = body.get("contenido")
+    contenido = _proc_contenido_validar(_contenido_crudo if _contenido_crudo is not None else {"blocks": []})
+    # Revisión inicial (pedido explícito del usuario: "Rev.000" al crear) --
+    # 0 si no se manda, para no romper a quien todavía no la conoce.
+    _revision_cruda = body.get("revision")
+    if _revision_cruda is None:
+        _revision_cruda = 0
+    try:
+        revision = int(_revision_cruda)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Revisión inválida (tiene que ser un número entero)")
+    if revision < 0 or revision > 999:
+        raise HTTPException(400, "Revisión inválida (entre 0 y 999)")
+    ahora = datetime.now().isoformat()
+    conn = get_db()
+    try:
+        tipo_id = _proc_tipo_validar(conn, body.get("tipo_id"))
+        try:
+            cur = conn.execute(
+                "INSERT INTO _procedimientos (codigo, titulo, seccion_ver, metadatos, contenido, revision, tipo_id, "
+                "creado_por_legajo, creado_por_nombre, creado_en, modificado_por_legajo, modificado_por_nombre, modificado_en) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (codigo, titulo, seccion_ver, json.dumps(metadatos, ensure_ascii=False) if metadatos else None,
+                 json.dumps(contenido, ensure_ascii=False), revision, tipo_id, user["legajo"], user["nombre"], ahora,
+                 user["legajo"], user["nombre"], ahora)
+            )
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, f"Ya existe un procedimiento con el código '{codigo}'")
+        conn.commit()
+        return _proc_dict(_proc_get(conn, cur.lastrowid))
+    finally:
+        conn.close()
+
+
+@app.put("/api/procedimientos/{pid}")
+async def put_procedimiento(pid: int, req: Request, user: dict = Depends(_require_procedimientos_editar)):
+    """Solo campos ADMINISTRATIVOS (seccion_ver/metadatos/codigo/tipo_id) --
+    'titulo' y 'contenido' ya NO se aceptan acá: todo cambio de contenido
+    pasa por el flujo de borrador + aprobación (ver post_procedimiento_borrador
+    y compañía), pedido explícito del usuario para que la aprobación de otro
+    editor sea un control real y no algo que cualquiera pueda saltear
+    pegándole directo a este endpoint. 'codigo' es el identificador estable
+    que otros módulos (y los anexos tipo 'procedimiento' de otros
+    documentos) guardan como string -- al cambiarlo,
+    _proc_actualizar_referencias_codigo corrige esas referencias en la misma
+    transacción, para que no quede ningún vínculo mirando a un código que ya
+    no existe. 'tipo_id' acepta null explícito (sacarle el tipo asignado)."""
+    body = await req.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Cuerpo inválido")
+    if "titulo" in body or "contenido" in body:
+        raise HTTPException(400, "El título y el contenido se editan por el flujo de borrador (POST .../borrador), no por acá")
+    base = body.get("modificado_en")
+    if not base or not isinstance(base, str):
+        raise HTTPException(400, "Falta modificado_en (la marca de la versión que se está editando)")
+    conn = get_db()
+    try:
+        actual = _proc_get(conn, pid)  # 404 si no existe / está archivado
+        campos = {}
+        if "seccion_ver" in body:
+            campos["seccion_ver"] = _proc_seccion_validar(body["seccion_ver"])
+        if "metadatos" in body:
+            md = _proc_metadatos_validar(body["metadatos"])
+            campos["metadatos"] = json.dumps(md, ensure_ascii=False) if md else None
+        if "tipo_id" in body:
+            campos["tipo_id"] = _proc_tipo_validar(conn, body["tipo_id"])
+        codigo_viejo = actual["codigo"]
+        codigo_nuevo = None
+        if "codigo" in body:
+            codigo_nuevo = str(body["codigo"] or "").strip()
+            if not codigo_nuevo or len(codigo_nuevo) > 100:
+                raise HTTPException(400, "Código obligatorio (máximo 100 caracteres)")
+            if codigo_nuevo != codigo_viejo:
+                campos["codigo"] = codigo_nuevo
+        if not campos:
+            raise HTTPException(400, "Nada para actualizar (seccion_ver, metadatos, tipo_id y/o codigo)")
+        ahora = datetime.now().isoformat()
+        campos["modificado_por_legajo"] = user["legajo"]
+        campos["modificado_por_nombre"] = user["nombre"]
+        campos["modificado_en"] = ahora
+        sets = ", ".join(f"{c}=?" for c in campos)
+        try:
+            cur = conn.execute(
+                f"UPDATE _procedimientos SET {sets} WHERE id=? AND modificado_en=? AND estado<>'archivado'",
+                (*campos.values(), pid, base)
+            )
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            raise HTTPException(409, f"Ya existe un procedimiento con el código '{codigo_nuevo}'")
+        if cur.rowcount != 1:
+            conn.rollback()
+            raise HTTPException(409, "CONFLICTO: otra persona modificó este procedimiento mientras lo editabas")
+        if "codigo" in campos:
+            _proc_actualizar_referencias_codigo(conn, codigo_viejo, codigo_nuevo)
+        conn.commit()
+        return _proc_dict(_proc_get(conn, pid))
+    finally:
+        conn.close()
+
+
+@app.post("/api/procedimientos/{pid}/borrador")
+def post_procedimiento_borrador(pid: int, user: dict = Depends(_require_procedimientos_editar)):
+    """"Modificar": arranca un borrador copiando el título/contenido
+    PUBLICADOS. Si ya hay uno 'editando', lo retoma tal cual (no lo pisa
+    con una copia nueva -- perdería lo que ya se escribió). Si ya está
+    'pendiente_aprobacion', el propio autor lo puede retomar igual --
+    "Seguir editando" (pedido explícito: mandarlo a revisión y recién ahí
+    notar algo para corregir no tenía otra salida que descartarlo entero) --
+    sin perder lo que ya había escrito, solo vuelve a 'editando' y limpia lo
+    que era específico del envío (motivo, fecha). Para cualquier otra
+    persona sigue siendo 409: hay que aprobarlo o rechazarlo antes."""
+    conn = get_db()
+    try:
+        r = _proc_get(conn, pid)
+        estado = r["borrador_estado"]
+        if estado == "pendiente_aprobacion":
+            if r["borrador_por_legajo"] != user["legajo"]:
+                raise HTTPException(409, "Ya hay un borrador pendiente de aprobación -- hay que aprobarlo o rechazarlo antes de modificar de nuevo")
+            ahora = datetime.now().isoformat()
+            conn.execute(
+                "UPDATE _procedimientos SET borrador_estado='editando', borrador_motivo=NULL, "
+                "borrador_motivo_rechazo=NULL, borrador_enviado_en=NULL, borrador_modificado_en=? WHERE id=?",
+                (ahora, pid)
+            )
+            conn.commit()
+            return _proc_dict(_proc_get(conn, pid))
+        if estado != "editando":
+            ahora = datetime.now().isoformat()
+            conn.execute(
+                "UPDATE _procedimientos SET borrador_estado='editando', borrador_titulo=?, borrador_contenido=?, "
+                "borrador_motivo=NULL, borrador_motivo_rechazo=NULL, borrador_por_legajo=?, borrador_por_nombre=?, "
+                "borrador_creado_en=?, borrador_enviado_en=NULL, borrador_modificado_en=? WHERE id=?",
+                (r["titulo"], r["contenido"], user["legajo"], user["nombre"], ahora, ahora, pid)
+            )
+            conn.commit()
+        return _proc_dict(_proc_get(conn, pid))
+    finally:
+        conn.close()
+
+
+@app.put("/api/procedimientos/{pid}/borrador")
+async def put_procedimiento_borrador(pid: int, req: Request, user: dict = Depends(_require_procedimientos_editar)):
+    """Autoguardado del borrador -- mismo patrón de optimistic lock que el
+    resto (acá con borrador_modificado_en), pero solo mientras el borrador
+    sigue 'editando' (ya enviado a aprobación, se congela)."""
+    body = await req.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Cuerpo inválido")
+    base = body.get("borrador_modificado_en")
+    if not base or not isinstance(base, str):
+        raise HTTPException(400, "Falta borrador_modificado_en (la marca de la versión del borrador que se está editando)")
+    conn = get_db()
+    try:
+        r = _proc_get(conn, pid)
+        if r["borrador_estado"] != "editando":
+            raise HTTPException(409, "No hay un borrador en edición para guardar (¿ya se envió a aprobación?)")
+        campos = {}
+        if "titulo" in body:
+            titulo = str(body["titulo"] or "").strip()
+            if not titulo or len(titulo) > 300:
+                raise HTTPException(400, "Título obligatorio (máximo 300 caracteres)")
+            campos["borrador_titulo"] = titulo
+        contenido_nuevo = None
+        if "contenido" in body:
+            contenido_nuevo = _proc_contenido_validar(body["contenido"])
+            campos["borrador_contenido"] = json.dumps(contenido_nuevo, ensure_ascii=False)
+        if not campos:
+            raise HTTPException(400, "Nada para guardar (título y/o contenido)")
+        ahora = datetime.now().isoformat()
+        campos["borrador_modificado_en"] = ahora
+        sets = ", ".join(f"{c}=?" for c in campos)
+        cur = conn.execute(
+            f"UPDATE _procedimientos SET {sets} WHERE id=? AND borrador_modificado_en=? AND borrador_estado='editando'",
+            (*campos.values(), pid, base)
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            raise HTTPException(409, "CONFLICTO: el borrador cambió mientras lo editabas (¿dos pestañas abiertas?)")
+        conn.commit()
+        if contenido_nuevo is not None:
+            _proc_limpiar_huerfanos(pid, contenido_nuevo)
+        return _proc_dict(_proc_get(conn, pid))
+    finally:
+        conn.close()
+
+
+@app.post("/api/procedimientos/{pid}/borrador/enviar")
+async def post_procedimiento_borrador_enviar(pid: int, req: Request, user: dict = Depends(_require_procedimientos_editar)):
+    """"Guardar" en el editor: pasa el borrador a pendiente de aprobación.
+    Pide el motivo (qué se cambió) -- es lo que lee quien lo tenga que
+    aprobar, no un checkpoint más del historial de autoguardados."""
+    body = await req.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Cuerpo inválido")
+    motivo = str(body.get("motivo") or "").strip()
+    if not motivo:
+        raise HTTPException(400, "Hace falta explicar qué se cambió")
+    if len(motivo) > 1000:
+        raise HTTPException(400, "La explicación es demasiado larga (máximo 1000 caracteres)")
+    conn = get_db()
+    try:
+        r = _proc_get(conn, pid)
+        if r["borrador_estado"] != "editando":
+            raise HTTPException(409, "No hay un borrador en edición para enviar")
+        ahora = datetime.now().isoformat()
+        conn.execute(
+            "UPDATE _procedimientos SET borrador_estado='pendiente_aprobacion', borrador_motivo=?, "
+            "borrador_enviado_en=?, borrador_modificado_en=? WHERE id=?",
+            (motivo, ahora, ahora, pid)
+        )
+        conn.commit()
+        return _proc_dict(_proc_get(conn, pid))
+    finally:
+        conn.close()
+
+
+@app.post("/api/procedimientos/{pid}/borrador/aprobar")
+def post_procedimiento_borrador_aprobar(pid: int, user: dict = Depends(_require_procedimientos_editar)):
+    """Control de 4 ojos (pedido explícito del usuario): quien aprueba NO
+    puede ser quien redactó el borrador, ni siquiera un admin -- no hay
+    bypass para esto, si hace falta que la misma persona redacte y apruebe
+    hay que pedírselo a otro editor. Aprobar archiva la versión VIEJA en
+    _procedimientos_versiones (motivo='reemplazo', con el motivo del cambio
+    como nota) y sube la revisión +1."""
+    conn = get_db()
+    try:
+        r = _proc_get(conn, pid)
+        if r["borrador_estado"] != "pendiente_aprobacion":
+            raise HTTPException(409, "No hay un borrador pendiente de aprobación")
+        if r["borrador_por_legajo"] == user["legajo"]:
+            raise HTTPException(403, "No podés aprobar tu propio borrador -- hace falta otra persona con permiso de editar procedimientos")
+        ahora = datetime.now().isoformat()
+        conn.execute(
+            "INSERT INTO _procedimientos_versiones (procedimiento_id, titulo, contenido, metadatos, motivo, nota, creado_por_legajo, creado_por_nombre, creado_en) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (pid, r["titulo"], r["contenido"], r["metadatos"], "reemplazo", r["borrador_motivo"], user["legajo"], user["nombre"], ahora)
+        )
+        conn.execute(
+            "UPDATE _procedimientos SET titulo=?, contenido=?, revision=revision+1, "
+            "borrador_estado=NULL, borrador_titulo=NULL, borrador_contenido=NULL, borrador_motivo=NULL, "
+            "borrador_motivo_rechazo=NULL, borrador_por_legajo=NULL, borrador_por_nombre=NULL, "
+            "borrador_creado_en=NULL, borrador_enviado_en=NULL, borrador_modificado_en=NULL, "
+            "modificado_por_legajo=?, modificado_por_nombre=?, modificado_en=? WHERE id=?",
+            (r["borrador_titulo"], r["borrador_contenido"], user["legajo"], user["nombre"], ahora, pid)
+        )
+        conn.commit()
+        _proc_limpiar_huerfanos(pid, json.loads(r["borrador_contenido"]))
+        return _proc_dict(_proc_get(conn, pid))
+    finally:
+        conn.close()
+
+
+@app.post("/api/procedimientos/{pid}/borrador/rechazar")
+async def post_procedimiento_borrador_rechazar(pid: int, req: Request, user: dict = Depends(_require_procedimientos_editar)):
+    """Mismo control de 4 ojos que aprobar. Devuelve el borrador a
+    'editando' (no lo descarta) para que el autor corrija y reenvíe, con un
+    motivo de rechazo opcional."""
+    body = await req.json()
+    if not isinstance(body, dict):
+        body = {}
+    motivo_rechazo = str(body.get("motivo") or "").strip()
+    if len(motivo_rechazo) > 1000:
+        raise HTTPException(400, "El motivo del rechazo es demasiado largo (máximo 1000 caracteres)")
+    conn = get_db()
+    try:
+        r = _proc_get(conn, pid)
+        if r["borrador_estado"] != "pendiente_aprobacion":
+            raise HTTPException(409, "No hay un borrador pendiente de aprobación")
+        if r["borrador_por_legajo"] == user["legajo"]:
+            raise HTTPException(403, "No podés rechazar tu propio borrador -- hace falta otra persona con permiso de editar procedimientos")
+        ahora = datetime.now().isoformat()
+        conn.execute(
+            "UPDATE _procedimientos SET borrador_estado='editando', borrador_motivo_rechazo=?, "
+            "borrador_enviado_en=NULL, borrador_modificado_en=? WHERE id=?",
+            (motivo_rechazo or None, ahora, pid)
+        )
+        conn.commit()
+        return _proc_dict(_proc_get(conn, pid))
+    finally:
+        conn.close()
+
+
+@app.delete("/api/procedimientos/{pid}/borrador")
+def delete_procedimiento_borrador(pid: int, user: dict = Depends(_require_procedimientos_editar)):
+    """Descarta el borrador entero (en cualquier estado) -- mismo permiso
+    transversal que el resto, no hace falta ser el autor: 'procedimientos_editar'
+    ya es un permiso amplio sobre CUALQUIER procedimiento en todo este
+    módulo (ver _require_procedimientos_editar), esto no es una excepción."""
+    conn = get_db()
+    try:
+        r = _proc_get(conn, pid)
+        if not r["borrador_estado"]:
+            raise HTTPException(404, "No hay ningún borrador para descartar")
+        conn.execute(
+            "UPDATE _procedimientos SET borrador_estado=NULL, borrador_titulo=NULL, borrador_contenido=NULL, "
+            "borrador_motivo=NULL, borrador_motivo_rechazo=NULL, borrador_por_legajo=NULL, borrador_por_nombre=NULL, "
+            "borrador_creado_en=NULL, borrador_enviado_en=NULL, borrador_modificado_en=NULL WHERE id=?",
+            (pid,)
+        )
+        conn.commit()
+        _proc_limpiar_huerfanos(pid, json.loads(r["contenido"]))
+        return _proc_dict(_proc_get(conn, pid))
+    finally:
+        conn.close()
+
+
+@app.delete("/api/procedimientos/{pid}")
+def delete_procedimiento(pid: int, user: dict = Depends(_require_procedimientos_editar)):
+    conn = get_db()
+    try:
+        _proc_get(conn, pid)
+        conn.execute(
+            "UPDATE _procedimientos SET estado='archivado', modificado_por_legajo=?, modificado_por_nombre=?, modificado_en=? WHERE id=?",
+            (user["legajo"], user["nombre"], datetime.now().isoformat(), pid)
+        )
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@app.post("/api/procedimientos/{pid}/versiones")
+async def post_procedimiento_version(pid: int, req: Request, user: dict = Depends(_require_procedimientos_editar)):
+    body = await req.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Cuerpo inválido")
+    motivo = str(body.get("motivo") or "").strip()
+    if motivo not in ("apertura", "cierre", "periodico", "manual"):
+        raise HTTPException(400, "Motivo inválido (apertura/cierre/periodico/manual)")
+    nota = str(body.get("nota") or "").strip()
+    if len(nota) > 500:
+        raise HTTPException(400, "Nota demasiado larga (máximo 500 caracteres)")
+    conn = get_db()
+    try:
+        actual = _proc_get(conn, pid)
+        conn.execute(
+            "INSERT INTO _procedimientos_versiones (procedimiento_id, titulo, contenido, metadatos, motivo, nota, creado_por_legajo, creado_por_nombre, creado_en) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (pid, actual["titulo"], actual["contenido"], actual["metadatos"], motivo, nota or None,
+             user["legajo"], user["nombre"], datetime.now().isoformat())
+        )
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@app.get("/api/procedimientos/{pid}/versiones")
+def get_procedimiento_versiones(pid: int, user: dict = Depends(_require_procedimientos_editar)):
+    conn = get_db()
+    try:
+        _proc_get(conn, pid)
+        rows = conn.execute(
+            "SELECT id, motivo, nota, creado_por_nombre, creado_en FROM _procedimientos_versiones "
+            "WHERE procedimiento_id=? ORDER BY id DESC", (pid,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@app.get("/api/procedimientos/{pid}/versiones/{vid}")
+def get_procedimiento_version(pid: int, vid: int, user: dict = Depends(_require_procedimientos_editar)):
+    conn = get_db()
+    try:
+        _proc_get(conn, pid)
+        r = conn.execute(
+            "SELECT * FROM _procedimientos_versiones WHERE id=? AND procedimiento_id=?", (vid, pid)
+        ).fetchone()
+        if not r:
+            raise HTTPException(404, "Versión no encontrada")
+        d = dict(r)
+        d["contenido"] = json.loads(d["contenido"] or "{}")
+        d["metadatos"] = json.loads(d["metadatos"]) if d.get("metadatos") else None
+        return d
+    finally:
+        conn.close()
+
+
+@app.post("/api/procedimientos/{pid}/imagenes")
+async def post_procedimiento_imagen(pid: int, file: UploadFile = File(...), user: dict = Depends(_require_procedimientos_editar)):
+    conn = get_db()
+    try:
+        _proc_get(conn, pid)
+    finally:
+        conn.close()
+    nombre = file.filename or ""
+    ext = nombre.rsplit(".", 1)[-1].lower() if "." in nombre else ""
+    if ext not in _PROC_ARCHIVO_TIPOS:
+        raise HTTPException(400, "Tipo de archivo no admitido (jpg, png, gif, webp o pdf)")
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, "Archivo vacío")
+    if len(content) > 15 * 1024 * 1024:
+        raise HTTPException(413, "Archivo demasiado grande (máximo 15 MB)")
+    file_id = secrets.token_hex(16)
+    path = PROC_IMG_DIR / str(pid) / f"{file_id}.{ext}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    return {"fileId": file_id, "ext": ext, "nombre": nombre}
+
+
+@app.get("/api/procedimientos/{pid}/imagenes/{file_id}")
+def get_procedimiento_imagen(pid: int, file_id: str, user: dict = Depends(_get_auth_user)):
+    conn = get_db()
+    try:
+        r = _proc_get(conn, pid)
+        _proc_chequear_ver(r, user)
+    finally:
+        conn.close()
+    carpeta = PROC_IMG_DIR / str(pid)
+    coincidencias = list(carpeta.glob(f"{file_id}.*")) if carpeta.exists() else []
+    if not coincidencias:
+        raise HTTPException(404, "Archivo no encontrado")
+    path = coincidencias[0]
+    tipo = _PROC_ARCHIVO_TIPOS.get(path.suffix.lstrip(".").lower(), "application/octet-stream")
+    return FileResponse(str(path), media_type=tipo)
 
 
 if __name__ == "__main__":

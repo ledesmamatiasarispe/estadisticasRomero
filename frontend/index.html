@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>piezas.fundicionjoseromero.com</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="/js/vendor/chart.min.js"></script>
 <link rel="stylesheet" href="/css/pend_fundir.css">
 <style>
 :root {
@@ -21,6 +21,8 @@
   --yellow: #ffa726;
   --text: #e6edf3;
   --muted: #8b949e;
+  --campana-0: rgba(120,120,120,.10);
+  --campana-1: rgba(0,172,193,.16);
   --sidebar-w: 200px;
   --header-h: 52px;
 }
@@ -231,6 +233,12 @@ body.kiosk.has-kiosk-alerts #main { padding-top: 70px; }
 .kg-miss    { background-image: repeating-linear-gradient(45deg, transparent, transparent 7px, rgba(255,167,38,.35) 7px, rgba(255,167,38,.35) 14px); }
 .ent-completo { background-color: rgba(60,200,60,.18); }
 .ent-parcial  { background-color: rgba(255,167,38,.18); }
+.campana-band-0 { background-color: var(--campana-0); }
+.campana-band-1 { background-color: var(--campana-1); }
+.campana-split-0 { background: linear-gradient(to bottom, var(--campana-0) 50%, var(--campana-1) 50%); }
+.campana-split-1 { background: linear-gradient(to bottom, var(--campana-1) 50%, var(--campana-0) 50%); }
+.campana-divisor > td { border-top: 4px solid var(--accent) !important; }
+.matdiv-inicio > td { border-top: 8px solid var(--linea-div, var(--accent)) !important; }
 .tr-sub > td  { padding: 0 0 6px 0 !important; border: none !important; }
 @media (prefers-color-scheme: light) {
   .venc-30 { background-color: rgba(30,90,200,.08); }
@@ -239,6 +247,7 @@ body.kiosk.has-kiosk-alerts #main { padding-top: 70px; }
   .venc-2  { background-color: rgba(0,0,0,.07); font-weight:700; }
   .ent-completo { background-color: rgba(30,150,30,.12); }
   .ent-parcial  { background-color: rgba(200,120,0,.12); }
+  :root { --campana-0: rgba(0,0,0,.05); --campana-1: rgba(0,150,170,.12); }
 }
 
 /* OT form */
@@ -334,6 +343,12 @@ tr:last-child td { border-bottom: none; }
 .inp { background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 7px 12px; border-radius: 6px; font-size: 13px; outline: none; }
 .inp:focus { border-color: var(--accent); }
 .inp-grow { flex: 1; }
+/* Casilla de piezas del conjunto + sus botones − / +: los tres del mismo
+   tamaño exacto (los botones reemplazan a las flechitas del input, por eso
+   se las saca). */
+.moldeo-paso { box-sizing: border-box; width: 42px; height: 34px; padding: 0; text-align: center; font-size: 15px; font-weight: 700; line-height: 1; }
+input.moldeo-paso { -moz-appearance: textfield; appearance: textfield; font-weight: 600; }
+input.moldeo-paso::-webkit-outer-spin-button, input.moldeo-paso::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 
 /* Pagination */
 .page-bar { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
@@ -467,6 +482,11 @@ tr:last-child td { border-bottom: none; }
   background: rgba(0,0,0,.7); align-items: flex-start; justify-content: center; padding-top: 100px;
 }
 #moldeo-sinot-modal.open { display: flex; }
+#moldeo-conjunto-modal {
+  display: none; position: fixed; inset: 0; z-index: 2100;
+  background: rgba(0,0,0,.7); align-items: flex-start; justify-content: center; padding-top: 80px;
+}
+#moldeo-conjunto-modal.open { display: flex; }
 /* Estos tres se pueden abrir DESDE ADENTRO de #moldeo-sinot-modal (el modo
    "con OT" de "Agregar sin OT" usa los mismos botones "+ Responsable"/
    "+ Ayudante" que la tabla principal) -- necesitan un z-index mas alto que
@@ -487,23 +507,23 @@ tr:last-child td { border-bottom: none; }
   background: rgba(0,0,0,.7); align-items: flex-start; justify-content: center; padding-top: 100px;
 }
 #moldeo-respnoyos-modal.open { display: flex; }
-/* Recorrido guiado de Cargar moldeo -- overlay semitransparente con un
-   "agujero" (spotlight) sobre el control que se esta explicando en cada
-   paso. #moldeo-tour-overlay es el contenedor (transparente, solo bloquea
-   clics de fondo); #moldeo-tour-spot es el que oscurece TODO menos su propio
-   rectangulo via un box-shadow gigante -- no hace falta que el overlay
-   tenga su propio fondo. */
-#moldeo-tour-overlay {
+/* Recorrido guiado (motor genérico, usado por Cargar moldeo y por Trabajos)
+   -- overlay semitransparente con un "agujero" (spotlight) sobre el control
+   que se esta explicando en cada paso. #tour-overlay es el contenedor
+   (transparente, solo bloquea clics de fondo); #tour-spot es el que oscurece
+   TODO menos su propio rectangulo via un box-shadow gigante -- no hace falta
+   que el overlay tenga su propio fondo. */
+#tour-overlay {
   display: none; position: fixed; inset: 0; z-index: 3000;
 }
-#moldeo-tour-overlay.open { display: block; }
-#moldeo-tour-spot {
+#tour-overlay.open { display: block; }
+#tour-spot {
   position: fixed; border-radius: 8px; pointer-events: none;
   box-shadow: 0 0 0 9999px rgba(0,0,0,.65);
   outline: 2px solid var(--accent); outline-offset: 3px;
   transition: top .22s ease, left .22s ease, width .22s ease, height .22s ease;
 }
-#moldeo-tour-tip {
+#tour-tip {
   position: fixed; z-index: 3002;
   background: var(--surface); border: 1px solid rgba(167,107,250,.5); border-radius: 10px;
   padding: 14px 16px; width: 300px; max-width: calc(100vw - 32px);
@@ -903,9 +923,9 @@ tr:last-child td { border-bottom: none; }
   </div>
 </div>
 
-<div id="moldeo-tour-overlay">
-  <div id="moldeo-tour-spot"></div>
-  <div id="moldeo-tour-tip"></div>
+<div id="tour-overlay">
+  <div id="tour-spot"></div>
+  <div id="tour-tip"></div>
 </div>
 
 <div id="moldeo-sinot-modal" onclick="if(event.target===this)_moldeoCerrarSinOT()">
@@ -1005,6 +1025,34 @@ tr:last-child td { border-bottom: none; }
   </div>
 </div>
 
+<div id="moldeo-conjunto-modal" onclick="if(event.target===this)_moldeoCerrarConjunto()">
+  <div class="probeta-mbox" style="width:640px">
+    <div class="probeta-mhdr">
+      <span style="font-size:18px">&#128279;</span>
+      <h3>Crear conjunto (caja compartida)</h3>
+      <button class="probeta-mclose" onclick="_moldeoCerrarConjunto()">&#10005;</button>
+    </div>
+    <div class="probeta-mbody">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Eleg&#237; las OT que comparten una misma caja f&#237;sica y cu&#225;ntas piezas de cada una entraron hoy. El conjunto queda guardado como plantilla: sigue apareciendo marcado en la tabla mientras sus OT sigan en Inicial o Programado, y sigue la cadena si alguna se reemplaza.</div>
+      <input id="moldeo-conjunto-filtro" class="inp" type="text" placeholder="Filtrar por OT, pieza o cliente&#8230;"
+        style="width:100%;box-sizing:border-box;margin-bottom:8px" autocomplete="off" oninput="_moldeoConjuntoAplicarFiltro()">
+      <div class="tbl-wrap" style="max-height:360px;overflow-y:auto;margin-bottom:12px">
+        <table>
+          <thead><tr>
+            <th style="width:28px"></th>
+            <th>OT</th><th>Pieza</th><th>F. Entrega</th><th>Cliente</th><th style="width:150px">Piezas en el conjunto</th>
+          </tr></thead>
+          <tbody id="moldeo-conjunto-tbody"></tbody>
+        </table>
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="page-btn" onclick="_moldeoCerrarConjunto()">Cancelar</button>
+        <button class="page-btn" id="moldeo-conjunto-guardar-btn" style="font-weight:600;background:var(--accent-dim);border-color:var(--accent);color:var(--accent)" onclick="_moldeoGuardarConjunto()">Crear conjunto</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="moldeo-prod-modal" onclick="if(event.target===this)closeMoldeoProductividadModal()">
   <div class="probeta-mbox" style="width:980px">
     <div class="probeta-mhdr">
@@ -1030,6 +1078,9 @@ tr:last-child td { border-bottom: none; }
   <nav id="sidebar">
     <div class="nav-item active" data-sec="dashboard" onclick="go('dashboard')">
       <span class="nav-icon">&#128202;</span> Dashboard
+    </div>
+    <div class="nav-item" data-sec="procedimientos" onclick="go('procedimientos')">
+      <span class="nav-icon">&#128214;</span> Procedimientos
     </div>
     <div class="nav-item" data-sec="clientes" onclick="go('clientes')">
       <span class="nav-icon">&#127981;</span> Clientes
@@ -1066,6 +1117,9 @@ tr:last-child td { border-bottom: none; }
     </div>
     <div class="nav-item" data-sec="proveedores" onclick="go('proveedores')">
       <span class="nav-icon">&#128203;</span> Proveedores
+    </div>
+    <div class="nav-item" data-sec="sinterizado" onclick="go('sinterizado')">
+      <span class="nav-icon">&#127777;</span> Sinterizado
     </div>
     <div style="flex:1"></div>
     <div class="nav-item perm-hidden" data-sec="admin" onclick="go('admin')"
@@ -1104,6 +1158,7 @@ const S = {
   scroll: {},
   _pendingScroll: 0,
   dashView: 'pedido',
+  dashModo: 'fecha', // ciclo: 'fecha' (orden/color por vencimiento) -> 'campana' (orden de tabla, banda de color cada 3000kg) -> 'material' (OT reagrupadas por grupo de materiales, banda cada 1000kg) -> 'fecha'
   dashMeses: 6,
   _dashRows: {},
   _probetaAlertas: [],
@@ -1139,6 +1194,17 @@ function _renderRaw(obj) {
     <div class="ficha-grid">${rows.join('')}</div>
   </div>`;
 }
+// "N° de colada" tal como lo pide el taller: códfundición se descompone en
+// número de colada (reinicia cada año) + año de 2 dígitos, separados por un
+// guion (ej. 3003 -> "30-03") + la posición de esta OT dentro de la lista de
+// OT fundidas ese día (iditemproducción, ej. 35) -- "30-03/35". Dos columnas
+// separadas en Trabajos, no un solo campo compuesto a parsear.
+function fmtColada(cod, pos) {
+  const n = parseInt(cod); if (!n || isNaN(n)) return '—';
+  const nro = Math.floor(n / 100) + '-' + String(n % 100).padStart(2, '0');
+  const p = (pos === null || pos === undefined || pos === '') ? '' : '/' + String(pos).padStart(2, '0');
+  return nro + p;
+}
 function fmtFund(cod) {
   const n = parseInt(cod); if (isNaN(n)) return cod;
   return 'Horno ' + Math.floor(n / 100) + '—' + (2000 + n % 100);
@@ -1162,6 +1228,7 @@ async function api(path, opts = {}) {
 // ── Auth ──────────────────────────────────────────────────────────────────────
 const SECCIONES = [
   { id:'dashboard',    label:'Dashboard',          grupo:'General'     },
+  { id:'procedimientos', label:'Procedimientos',   grupo:'General'     },
   { id:'clientes',     label:'Clientes',            grupo:'Comercial'   },
   { id:'analisis',     label:'Análisis / Calidad',  grupo:'Calidad'     },
   { id:'trabajos',     label:'Trabajos (OTs)',       grupo:'Producción'  },
@@ -1174,6 +1241,7 @@ const SECCIONES = [
   { id:'personal',     label:'Personal',             grupo:'RRHH'        },
   { id:'documentos',   label:'Documentos',           grupo:'Docs'        },
   { id:'proveedores',   label:'Proveedores ISO 9001',  grupo:'Calidad'     },
+  { id:'sinterizado',  label:'Sinterizado de horno',  grupo:'Producción'  },
   { id:'presentacion', label:'Presentación',         grupo:'Admin'       },
   { id:'admin',        label:'Admin / Sync / DB',    grupo:'Admin'       },
   // No es una pagina -- habilita ver montos en $ (modo pesos de Pendiente de
@@ -1182,6 +1250,14 @@ const SECCIONES = [
   // grupo para no mezclarse visualmente con el resto, aunque técnicamente
   // se maneja igual (mismo checkbox, misma tabla _permisos en el backend).
   { id:'precios',      label:'Ver montos en $',       grupo:'Datos sensibles' },
+  // Mismo criterio que 'precios': no es una pagina, es el permiso para EDITAR
+  // la curva de referencia del paso Sinterizado (verla es parte del permiso
+  // 'sinterizado' de arriba; esto solo habilita cambiarla).
+  { id:'sinterizado_curva', label:'Editar curva de referencia (Sinterizado)', grupo:'Datos sensibles' },
+  // Mismo criterio otra vez: permiso transversal para EDITAR cualquier
+  // procedimiento (módulo general). Verlos depende de la sección de cada uno
+  // (ej. 'sinterizado' para el de Sinterizado), no de este permiso.
+  { id:'procedimientos_editar', label:'Editar procedimientos (todas las secciones)', grupo:'Datos sensibles' },
 ];
 
 // Vistas de detalle → sección padre para chequeo de permisos
@@ -1190,6 +1266,7 @@ const _SEC_PARENT = {
   trabajo:'trabajos', moldeo:'trabajos', pedido:'pedidos', remito:'remitos',
   modelo:'modelos', fundicion:'fundiciones', documento:'documentos',
   personal_detalle:'personal', rechazos:'analisis', db:'admin',
+  procedimiento_detalle:'procedimientos',
 };
 
 let _AUTH = { user: null, token: null };
@@ -1212,6 +1289,26 @@ function _applyNavPerms() {
   if (badge && _AUTH.user) badge.textContent = _AUTH.user.nombre;
 }
 
+// Recuerda la última pestaña PRINCIPAL visitada (la del menú lateral, no la
+// pantalla de detalle: estar en una OT cuenta como "Trabajos") por
+// usuario, en este navegador -- mismo criterio que trabajos_dash_prefs. Al
+// iniciar sesión o abrir la página se vuelve a esa pestaña en vez de a la
+// primera de la lista. Si ya no tiene permiso para verla, cae a la primera
+// de siempre.
+function _recordarSeccion(sec) {
+  if (!_AUTH.user) return;
+  const tab = _SEC_PARENT[sec] || sec;
+  if (!document.querySelector('.nav-item[data-sec="' + tab + '"]')) return;
+  try { localStorage.setItem('ultima_seccion_' + _AUTH.user.legajo, tab); } catch(e) {}
+}
+
+function _seccionInicial() {
+  const primera = _AUTH.user.is_admin ? 'dashboard' : (_AUTH.user.secciones[0] || 'dashboard');
+  let ultima = null;
+  try { ultima = localStorage.getItem('ultima_seccion_' + _AUTH.user.legajo); } catch(e) {}
+  return (ultima && _canSee(ultima)) ? ultima : primera;
+}
+
 async function _authInit() {
   const token = localStorage.getItem('auth_token');
   if (!token) { _showLogin(); return; }
@@ -1226,9 +1323,7 @@ async function _authInit() {
     _applyNavPerms();
     _hideLogin();
     pollSync();
-    const firstSec = _AUTH.user.is_admin ? 'dashboard'
-      : (_AUTH.user.secciones[0] || 'dashboard');
-    go(firstSec);
+    go(_seccionInicial());
   } catch(e) {
     localStorage.removeItem('auth_token');
     _AUTH = { user: null, token: null };
@@ -1268,9 +1363,7 @@ async function _login() {
     _applyNavPerms();
     _hideLogin();
     pollSync();
-    const firstSec = _AUTH.user.is_admin ? 'dashboard'
-      : (_AUTH.user.secciones[0] || 'dashboard');
-    go(firstSec);
+    go(_seccionInicial());
   } catch(e) {
     errEl.textContent = 'Error de conexión';
   } finally {
@@ -1987,9 +2080,10 @@ function _kpisCelda(valor, meta, direccion, unidad) {
 
 let _kpisData = null;
 
-function _kpisFilaHtml(ind, idx) {
+function _kpisFilaHtml(ind, idx, avisoHoras) {
   const metaTxt = ind.meta == null ? '—' : `${ind.direccion} ${_kpisFmt(ind.meta, ind.unidad)}`;
   const infoBtn = `<button class="page-btn" style="font-size:10px;padding:1px 5px;margin-right:5px" onclick="openKpisInfoModal(${idx})" title="Ver política de calidad, frecuencia, planificación y responsable">&#8505;&#65039;</button>`;
+  const aviso = (ind.clave === 'productividad' && avisoHoras) ? avisoHoras : '';
   if (!ind.implementado) {
     const celdaVacia = '<td style="text-align:right;color:var(--muted)">—</td>';
     return `
@@ -2004,7 +2098,7 @@ function _kpisFilaHtml(ind, idx) {
   const mesesHtml = ind.valores.map(v => _kpisCelda(v, ind.meta, ind.direccion, ind.unidad)).join('');
   return `
     <tr>
-      <td>${infoBtn}${ind.nombre}</td>
+      <td>${infoBtn}${ind.nombre}${aviso}</td>
       <td style="text-align:right;color:var(--muted)">${metaTxt}</td>
       <td style="text-align:right">${_kpisFmt(ind.logro_anterior, ind.unidad)}</td>
       ${mesesHtml}
@@ -2038,6 +2132,7 @@ async function _renderKpisDashboard() {
     body.innerHTML = '<tr><td colspan="16" class="empty">Sin datos</td></tr>';
     return;
   }
+  const avisoHoras = _horasAvisoHtml(await _horasUltimaCarga());
   let html = '';
   let procesoAnterior = null;
   data.indicadores.forEach((ind, idx) => {
@@ -2045,7 +2140,7 @@ async function _renderKpisDashboard() {
       html += _kpisGrupoHtml(ind.proceso);
       procesoAnterior = ind.proceso;
     }
-    html += _kpisFilaHtml(ind, idx);
+    html += _kpisFilaHtml(ind, idx, avisoHoras);
   });
   body.innerHTML = html;
 }
@@ -2083,6 +2178,8 @@ function closeKpisInfoModal() {
 // fuente de esta funcionalidad (grafico, calendario, impresion, drill-down).
 </script>
 <script src="/js/pend_fundir.js?v=20260909-1"></script>
+<script src="/js/procedimientos.js?v=20261006-1"></script>
+<script src="/js/sinterizado.js?v=20261002-11"></script>
 <script>
 
 let _sinPesoRows = [];
@@ -2557,11 +2654,17 @@ document.addEventListener('keydown', e => {
 function _mobToggleNav() { document.body.classList.toggle('mob-open'); }
 
 function go(sec, data) {
+  // Sinterizado: una planilla a medio cargar no se pierde sin avisar (sinterizado.js)
+  if (S.sec === 'sinterizado' && sec !== 'sinterizado' && typeof _sinterPuedeSalir === 'function' && !_sinterPuedeSalir()) {
+    _navFromHist = false;
+    return;
+  }
   // Chequeo de permisos — redirige a primera sección permitida si no tiene acceso
   if (_AUTH.user && !_canSee(sec)) {
     const fallback = _AUTH.user.secciones.find(s => s !== 'admin') || 'dashboard';
     sec = fallback; data = undefined;
   }
+  _recordarSeccion(sec);
   document.body.classList.remove('mob-open');
   const _targetScroll = S.scroll[sec] || 0;
   if (!_navFromHist) {
@@ -2576,6 +2679,7 @@ function go(sec, data) {
     pedido: 'pedidos', remito: 'remitos',
     modelo: 'modelos', fundicion: 'fundiciones', documento: 'documentos',
     trabajo: 'trabajos', moldeo: 'trabajos',
+    procedimiento_detalle: 'procedimientos',
     db: 'dashboard'
   }[sec] || sec;
   document.querySelectorAll('.nav-item').forEach(el =>
@@ -2598,6 +2702,8 @@ function go(sec, data) {
     stock: showStock,
     personal: showPersonal, personal_detalle: ()=>showPersonalDetalle(data),
     proveedores: showProveedores,
+    sinterizado: showSinterizado,
+    procedimientos: showProcedimientos, procedimiento_detalle: ()=>_procAbrirDesdeLista(data),
     db: showExplorer,
     presentacion: showPresentacion,
     admin: showAdmin,
@@ -2761,6 +2867,469 @@ function _renderEntregadosTbl(rows, elId) {
   }
   el.innerHTML = '<div class="tbl-wrap"><table>'
     + '<thead><tr><th>&#218;lt. OT</th><th>Pedido / Cliente</th><th>Pieza</th>'
+    + '<th style="text-align:right">Entregadas / Pedidas</th>'
+    + '<th>Fecha</th>'
+    + '<th style="text-align:center">Probeta</th>'
+    + '</tr></thead><tbody>' + tbody + '</tbody></table></div>';
+}
+
+// Kg que todavía faltan de esa fila: (pedida - lo ya hecho) * peso de la pieza.
+// "Lo ya hecho" depende de la tabla -- en vencidos/próximos es lo neto producido
+// (lo que ya no hace falta fundir), en entregados es lo entregado (lo que falta
+// para completar el despacho). null si la pieza no tiene peso cargado (kg-miss).
+function _pendienteKg(r, key) {
+  if (!r.peso_kg) return null;
+  const ped = r.cantidadpedida || 0;
+  const hecho = key === 'entregados'
+    ? (r.tot_entregada || 0)
+    : Math.max(0, (r.tot_producida || 0) - (r.tot_rechazada || 0));
+  return Math.max(0, ped - hecho) * r.peso_kg;
+}
+
+// Agrupa las OTs (en el orden que trae la API) en divisiones de 3000kg. Una OT
+// que cae justo en el límite NO se duplica en dos filas -- se muestra una sola
+// vez, con mitad de cada color en la fila, con lo que le falta a la campaña
+// actual (kgCierra) y lo que abre la siguiente (kgAbre). La banda de una OT sin
+// partir es la que ya estaba abierta ANTES de sumar su kg -- no la que cierra
+// al sumarlo -- para que una OT que completa un múltiplo exacto de 3000 quede
+// adentro de esa campaña en vez de arrancar sola la siguiente.
+function _agruparEnCampanas(rows, key) {
+  const tam = _campanaKg(); // 3 x los kg que produce el horno (ver _hornoKg)
+  let acum = 0;
+  const filas = [];
+  for (const r of rows) {
+    const kgTotal = _pendienteKg(r, key);
+    const bandaInicio = Math.floor(acum / tam);
+    if (kgTotal == null || kgTotal <= 0) {
+      filas.push({ row: r, kg: kgTotal, banda: bandaInicio, banda2: null });
+      continue;
+    }
+    const acumDespues = acum + kgTotal;
+    const bandaFin = Math.floor((acumDespues - 0.005) / tam);
+    if (bandaFin > bandaInicio) {
+      const kgCierra = (bandaInicio + 1) * tam - acum;
+      filas.push({ row: r, kg: kgTotal, banda: bandaInicio, banda2: bandaFin, kgCierra, kgAbre: kgTotal - kgCierra });
+    } else {
+      filas.push({ row: r, kg: kgTotal, banda: bandaInicio, banda2: null });
+    }
+    acum = acumDespues;
+  }
+  // Columna "Campaña" (rowspan, el TOTAL de la división) separada de la columna
+  // "Kg" (por fila, sin merge -- lo que aporta CADA fila, siempre visible, para
+  // no depender de sumar a ojo lo que tapa el rowspan). Una fila partida cierra
+  // el grupo en curso con kgCierra (su rowspan la incluye) y kgAbre queda
+  // pendiente para sumarse al total del próximo grupo apenas arranca -- aunque
+  // el rowspan de esa celda no pueda empezar en la fila partida, ya usada por
+  // el grupo anterior.
+  const grupos = [];
+  let totalCampanas = 0;
+  let pendienteAbre = 0;
+  for (let i = 0; i < filas.length; i++) {
+    const f = filas[i];
+    totalCampanas = Math.max(totalCampanas, f.banda + 1, (f.banda2 != null ? f.banda2 : f.banda) + 1);
+    const g = grupos.length ? grupos[grupos.length - 1] : null;
+    const kgEstaFila = f.banda2 != null ? f.kgCierra : (f.kg || 0);
+    if (g && g.banda === f.banda) {
+      g.filas++;
+      g.kg += kgEstaFila;
+    } else {
+      grupos.push({ banda: f.banda, filas: 1, kg: kgEstaFila + pendienteAbre, inicio: i });
+      pendienteAbre = 0;
+    }
+    if (f.banda2 != null) pendienteAbre = f.kgAbre;
+  }
+  return { filas, grupos, totalCampanas };
+}
+
+// Vista "por materiales": las OT se agrupan en los mismos grupos de materiales
+// que el grafico "Pendiente de fundir por material" (_PEND_FUNDIR_GRUPOS, en
+// pend_fundir.js -- una sola definicion para las dos pantallas) y dentro de cada
+// grupo se arman divisiones de _hornoKg() kg contando en el orden de la API (fecha de
+// entrega). Cada grupo cuenta desde cero: una division nunca mezcla materiales
+// de dos grupos. Despues las DIVISIONES de todos los grupos se ordenan entre si
+// por la fecha de entrega mas urgente que tenga cada una, asi pueden quedar
+// alternadas (el nodular que vence hoy, el gris que tambien vence hoy, otro
+// nodular que vence en 7 dias). Los materiales que no estan en ningun grupo (y
+// las filas sin OT) forman un grupo mas, "Otros materiales", que compite igual.
+// Kg que produce el horno hoy: el campo de las vistas por campañas y por
+// materiales de Trabajos (se guarda en el servidor, ver guardarHornoKg) y el
+// tamaño de cada grupo. "Por materiales" arma divisiones de exactamente esto;
+// "por campañas" arma campañas de este valor x3. Hasta que alguien lo guarda
+// arranca en 1100 (mismo default que el backend, _HORNO_KG_DEFECTO).
+const _HORNO_KG_DEFECTO = 1100;
+function _hornoKg() { const v = Number(S.hornoKg); return v > 0 ? v : _HORNO_KG_DEFECTO; }
+function _campanaKg() { return _hornoKg() * 3; }
+
+function _dashGrupoMaterial(r) {
+  const cod = r.codigo_material == null ? '' : String(r.codigo_material).trim();
+  const gi = _PEND_FUNDIR_GRUPOS.findIndex(codigos => codigos.includes(cod));
+  return gi >= 0 ? gi : _PEND_FUNDIR_GRUPOS.length;
+}
+
+// Color de la celda de cada division en la vista "por materiales". Cada grupo
+// de materiales tiene un tono PRIMARIO propio (mismo orden que
+// _PEND_FUNDIR_GRUPOS, y uno mas para "Otros materiales") y adentro de ese tono
+// la variacion sale de CUALES de sus materiales estan presentes: el tono se
+// corre segun la posicion promedio de los presentes dentro del grupo y la
+// intensidad sube con la cantidad de materiales presentes (_tintaGrupoMaterial;
+// es una capa de color sobre --surface2, asi la celda sigue siendo opaca, ver
+// _campanaCellHtml). El grupo 2 · 1/2 es la excepcion: va en amarillos OSCUROS
+// (y letras blancas), uno para el 2, otro para el 1/2 y uno intermedio si estan
+// los dos (_estiloDivisionMaterial). Cada estilo trae tambien `linea`: el color
+// solido con el que se dibuja la linea gruesa que CIERRA esa division.
+const _GRUPO_AMARILLO = _PEND_FUNDIR_GRUPOS.findIndex(g => g.includes('2')); // el grupo 2 · 1/2
+const _MATERIAL_GRUPO_HUE = [135, 45, 280, 215]; // verde (5·1·3·7), amarillo (2·1/2), violeta, gris azulado (otros)
+
+function _tintaGrupoMaterial(gi, materiales) {
+  const codigos = _PEND_FUNDIR_GRUPOS[gi] || [];
+  const pos = materiales.map(m => codigos.indexOf(String(m))).filter(i => i >= 0);
+  const base = _MATERIAL_GRUPO_HUE[Math.min(gi, _MATERIAL_GRUPO_HUE.length - 1)];
+  const sat = gi >= _PEND_FUNDIR_GRUPOS.length ? 12 : 60;
+  const media = pos.length ? pos.reduce((a, c) => a + c, 0) / pos.length : 0;
+  const hue = Math.round(base + (media - (codigos.length - 1) / 2) * 16);
+  const alpha = Math.min(0.5, 0.2 + 0.07 * Math.max(0, pos.length - 1));
+  const c = 'hsla(' + hue + ',' + sat + '%,50%,' + alpha.toFixed(2) + ')';
+  return { fondo: 'linear-gradient(' + c + ',' + c + '),var(--surface2)', linea: 'hsl(' + hue + ',' + sat + '%,45%)' };
+}
+
+// Fondo, color de texto (null = el de siempre) y color de la linea de cierre de
+// la celda de una division. Amarillos con luminosidad 24%: dejan legible el
+// texto blanco (contraste > 5:1 en los tres tonos).
+function _estiloDivisionMaterial(gi, materiales) {
+  const tiene2 = materiales.includes('2');
+  const tiene12 = materiales.includes('1/2');
+  // Amarillo = la division es del grupo 2 · 1/2. Un 1/2 que se acomodo en una
+  // division de 5 · 1 · 3 · 7 (ver _MATERIAL_FLEXIBLE) no la vuelve amarilla.
+  if (gi === _GRUPO_AMARILLO) {
+    const hue = tiene2 && tiene12 ? 44 : tiene2 ? 50 : 38;
+    return { fondo: 'hsl(' + hue + ',100%,24%)', texto: '#fff', linea: 'hsl(' + hue + ',100%,38%)' };
+  }
+  const t = _tintaGrupoMaterial(gi, materiales);
+  return { fondo: t.fondo, texto: null, linea: t.linea };
+}
+
+// Material FLEXIBLE: el 1/2 se puede acomodar tanto con su grupo (2 · 1/2) como
+// con 5 · 1 · 3 · 7. Sus filas no van a un grupo fijo: cada una se pone en el
+// candidato (el primero de la lista es su grupo de siempre, y gana los empates)
+// donde quede en la division MAS urgente -- asi una OT que vence manana no queda
+// esperando en un grupo con poco kg, ni termina abajo de todo. El indice del
+// candidato es la posicion del grupo en _PEND_FUNDIR_GRUPOS.
+const _MATERIAL_FLEXIBLE = { '1/2': [1, 0] };
+
+// Fecha de entrega mas urgente de la division donde caeria la fila `r` si se
+// suma a `rs` (las filas del grupo, en orden de fecha), contando en el mismo
+// orden y con el mismo criterio que _partirEnDivisiones: la division que le toca
+// segun los kg acumulados de las filas con fecha anterior o igual, y de esa
+// division la fila mas antigua que la toque (incluso una que se derrama desde la
+// anterior). Si es la primera de su division, su propia fecha.
+function _urgenciaSiEntra(rs, r, key) {
+  const fechaR = r.fecha_entrega || '9999-12-31';
+  const previas = [];
+  let acum = 0;
+  for (const x of rs) {
+    const fx = x.fecha_entrega || '9999-12-31';
+    if (fx > fechaR) break;
+    const kg = _pendienteKg(x, key) || 0;
+    previas.push({ ini: acum, kg, fecha: fx });
+    acum += kg;
+  }
+  const tam = _hornoKg();
+  const div = Math.floor(acum / tam);
+  const desde = div * tam, hasta = (div + 1) * tam;
+  for (const x of previas) {
+    const toca = x.kg > 0 ? (x.ini < hasta && x.ini + x.kg > desde) : Math.floor(x.ini / tam) === div;
+    if (toca) return x.fecha;
+  }
+  return fechaR;
+}
+
+// Reparte lo que falta de cada fila entre divisiones de `tam` kg, en el orden
+// dado. Una fila que cruza un limite se parte en tantas partes como divisiones
+// toque (a diferencia de _agruparEnCampanas, que la deja en una sola fila de
+// dos colores): en esta vista las divisiones se reordenan y pueden terminar
+// lejos una de otra, asi que cada parte tiene que poder ir a su division. Sin
+// peso cargado (kg null) o ya cubierta (0): una sola parte, en la division donde
+// cae, sin sumar kg.
+function _partirEnDivisiones(rows, key, tam) {
+  const partes = [];
+  let acum = 0;
+  for (const r of rows) {
+    const kgTotal = _pendienteKg(r, key);
+    if (kgTotal == null || kgTotal <= 0) {
+      partes.push({ row: r, kg: kgTotal, div: Math.floor(acum / tam), i: 1, n: 1 });
+      continue;
+    }
+    const tramos = [];
+    let cursor = acum, restante = kgTotal;
+    while (restante > 0.005) {
+      const div = Math.floor(cursor / tam);
+      const cabe = (div + 1) * tam - cursor;
+      if (cabe < 0.005) { cursor = (div + 1) * tam; continue; }
+      const kg = Math.min(restante, cabe);
+      tramos.push({ div, kg });
+      cursor += kg;
+      restante -= kg;
+    }
+    if (!tramos.length) tramos.push({ div: Math.floor(acum / tam), kg: kgTotal }); // fila casi en cero
+    tramos.forEach((t, k) => partes.push({ row: r, kg: t.kg, div: t.div, i: k + 1, n: tramos.length }));
+    acum += kgTotal;
+  }
+  return partes;
+}
+
+function _agruparPorMaterial(rows, key) {
+  const nGrupos = _PEND_FUNDIR_GRUPOS.length;
+  const porGrupo = Array.from({ length: nGrupos + 1 }, () => []);
+  const flexibles = [];
+  for (const r of rows) {
+    if (_MATERIAL_FLEXIBLE[String(r.codigo_material == null ? '' : r.codigo_material).trim()]) flexibles.push(r);
+    else porGrupo[_dashGrupoMaterial(r)].push(r);
+  }
+  // Los flexibles, de la fecha mas cercana a la mas lejana: cada uno elige grupo
+  // viendo lo que ya se acomodo antes (la lista del grupo se mantiene por fecha).
+  flexibles.sort((a, b) => ((a.fecha_entrega || '9999') < (b.fecha_entrega || '9999') ? -1 : (a.fecha_entrega || '9999') > (b.fecha_entrega || '9999') ? 1 : 0));
+  for (const r of flexibles) {
+    const cands = _MATERIAL_FLEXIBLE[String(r.codigo_material).trim()];
+    let mejor = null;
+    for (const gi of cands) {
+      const urg = _urgenciaSiEntra(porGrupo[gi], r, key);
+      if (mejor === null || urg < mejor.urg) mejor = { gi, urg };
+    }
+    const lista = porGrupo[mejor.gi];
+    const fr = r.fecha_entrega || '9999-12-31';
+    let pos = lista.length;
+    while (pos > 0 && (lista[pos - 1].fecha_entrega || '9999-12-31') > fr) pos--;
+    lista.splice(pos, 0, r);
+  }
+
+  // 1) divisiones de cada grupo, con su fecha de entrega mas urgente
+  const divisiones = [];
+  porGrupo.forEach((rs, gi) => {
+    if (!rs.length) return;
+    const porDiv = new Map();
+    for (const p of _partirEnDivisiones(rs, key, _hornoKg())) {
+      if (!porDiv.has(p.div)) porDiv.set(p.div, []);
+      porDiv.get(p.div).push(p);
+    }
+    for (const [div, partes] of porDiv) {
+      const fechas = partes.map(p => p.row.fecha_entrega).filter(Boolean).sort();
+      divisiones.push({
+        gi, div, partes,
+        urg: fechas.length ? fechas[0] : '9999-12-31',
+        kg: partes.reduce((s, p) => s + (p.kg || 0), 0),
+      });
+    }
+  });
+  // 2) orden global por esa fecha (empate: orden de los grupos, y dentro de un
+  // grupo, el orden de sus divisiones)
+  divisiones.sort((a, b) => (a.urg < b.urg ? -1 : a.urg > b.urg ? 1 : (a.gi - b.gi) || (a.div - b.div)));
+
+  // 3) Una fila que cruza el limite de una division va SIEMPRE partida: una fila
+  // por parte, cada una en su division con su kg y la etiqueta "parte i/n" (no se
+  // junta en una sola fila de dos colores como en campañas -- aca las divisiones
+  // se reordenan y pueden quedar lejos una de otra).
+  const filas = [], grupos = [];
+  divisiones.forEach((d, k) => {
+    const inicio = filas.length;
+    for (const p of d.partes) {
+      filas.push({ row: p.row, kg: p.kg, banda: k, banda2: null, parte: p.n > 1 ? p.i + '/' + p.n : null });
+    }
+    // Materiales que tiene la division (los de la columna Material de sus
+    // filas), en orden numerico: se ve en la propia celda de la division, ver
+    // _campanaCellHtml.
+    const materiales = [...new Set(d.partes.map(p => p.row.codigo_material).filter(c => c != null && c !== '').map(String))]
+      .sort((a, b) => (parseFloat(a) || 0) - (parseFloat(b) || 0) || (a < b ? -1 : a > b ? 1 : 0));
+    const estilo = _estiloDivisionMaterial(d.gi, materiales);
+    grupos.push({ banda: k, filas: filas.length - inicio, kg: d.kg, inicio, materiales, fondo: estilo.fondo, colorTexto: estilo.texto, linea: estilo.linea });
+  });
+  return { filas, grupos, totalCampanas: divisiones.length };
+}
+
+function _campanaCellHtml(grupos, i) {
+  const g = grupos.find(g => g.inicio === i);
+  if (!g) return '';
+  // Fondo propio y opaco (no hereda el de la fila) -- si no, la franja verde de
+  // "aporta cero" o el rayado de "sin peso" de la fila que arranca el grupo se
+  // filtraba en esta celda fusionada, aunque el total que muestra sea de TODO
+  // el grupo, no el estado de esa fila puntual. En la vista por materiales g.fondo
+  // (ver _estiloDivisionMaterial) es una capa de color SOBRE --surface2 (o un amarillo solido oscuro, con letras blancas), o sea que
+  // sigue siendo opaco.
+  return '<td rowspan="' + g.filas + '" style="background:' + (g.fondo || 'var(--surface2)') + ';' + (g.colorTexto ? 'color:' + g.colorTexto + ';' : '') + 'text-align:center;font-weight:700;white-space:nowrap;border-right:2px solid var(--border);vertical-align:middle">'
+    // En la vista "por materiales" (g.materiales lo arma _agruparPorMaterial) los kg
+    // totales llevan el MISMO formato que la linea de materiales de abajo.
+    + (g.materiales
+      ? '<div style="font-size:18px;font-weight:700;line-height:1.2;color:' + (g.colorTexto || 'var(--text)') + '">' + fmt(Math.round(g.kg)) + ' kg</div>'
+      : fmt(Math.round(g.kg)) + ' kg')
+    // Solo en esa vista:
+    // los materiales de esa division, ej. "(1, 3, 5)".
+    + (g.materiales && g.materiales.length
+      ? '<div style="font-size:18px;font-weight:700;line-height:1.2;color:' + (g.colorTexto || 'var(--text)') + ';margin-top:3px" title="Materiales de esta divisi&oacute;n">(' + g.materiales.join(', ') + ')</div>'
+      : '')
+    + '</td>';
+}
+
+// Columna "Kg" (segunda, siempre una celda por fila, nunca fusionada): lo que
+// ESA fila aporta a la campaña en curso. Una fila partida muestra sus dos
+// aportes apilados, con el mismo color que la mitad de la fila a la que
+// corresponde cada uno.
+function _aporteCellHtml(f) {
+  if (f.banda2 != null) {
+    return '<td style="padding:0;text-align:right;font-weight:700;white-space:nowrap;border-right:1px solid var(--border)">'
+      + '<div style="display:flex;flex-direction:column;font-size:10px">'
+      + '<div style="padding:2px 6px;background:var(--campana-' + (f.banda % 2) + ')">' + fmt(Math.round(f.kgCierra)) + ' kg</div>'
+      + '<div style="padding:2px 6px;background:var(--campana-' + (f.banda2 % 2) + ')">' + fmt(Math.round(f.kgAbre)) + ' kg</div>'
+      + '</div></td>';
+  }
+  const kgLabel = f.kg != null ? fmt(Math.round(f.kg)) : '&#8212;';
+  const parte = f.parte ? '<div style="font-size:9px;font-weight:400;color:var(--muted)">parte ' + f.parte + '</div>' : '';
+  return '<td style="text-align:right;font-weight:600;white-space:nowrap;border-right:1px solid var(--border)">' + kgLabel + parte + '</td>';
+}
+
+function _setCampanasTitulo(tituloElId, totalCampanas, modo) {
+  if (!tituloElId) return;
+  const t = $id(tituloElId);
+  if (!t) return;
+  const [uno, varios] = modo === 'material' ? ['división', 'divisiones'] : ['campaña', 'campañas'];
+  t.textContent = totalCampanas ? ' — ' + totalCampanas + ' ' + (totalCampanas === 1 ? uno : varios) : '';
+}
+
+// Vista "por campañas": mismo orden que trae la API (por fecha de entrega),
+// sin reagrupar por pedido -- la banda de color es una franja continua de 3000kg
+// acumulados fila a fila, así que reordenar rompería la lectura de "lo que sigue
+// fundiendo después de esto".
+function _renderVencTblCampana(rows, elId, emptyMsg, tituloElId, modo) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  if (!rows || !rows.length) {
+    el.innerHTML = '<div class="empty">' + emptyMsg + '</div>';
+    _setCampanasTitulo(tituloElId, 0, modo);
+    return;
+  }
+  // modo 'material' (vista por materiales): mismas bandas pero de _hornoKg() kg y con
+  // las OT reagrupadas por grupo de materiales (ver _agruparPorMaterial); trae
+  // una columna Material.
+  const porMaterial = modo === 'material';
+  const { filas, grupos, totalCampanas } = porMaterial
+    ? _agruparPorMaterial(rows, 'vencidos')
+    : _agruparEnCampanas(rows, 'vencidos');
+  _setCampanasTitulo(tituloElId, totalCampanas, modo);
+  const inicios = new Set(grupos.map(g => g.inicio));
+  let tbody = '';
+  for (let i = 0; i < filas.length; i++) {
+    const f = filas[i];
+    const r = f.row;
+    const kg = f.kg;
+    const banda = f.banda;
+    let cls = (f.banda2 != null
+      ? 'campana-split-' + (banda % 2)
+      : 'campana-band-' + (banda % 2) + (kg == null ? ' kg-miss' : kg === 0 ? ' prod-ok' : ''))
+      + (inicios.has(i) && i > 0 ? ' campana-divisor' : '');
+    // Vista por materiales: sin franjas alternadas por division -- la division se
+    // marca con una linea gruesa arriba de su primera fila, del color de la
+    // division de ARRIBA (la que cierra), ver .matdiv-inicio.
+    let rowStyle = '';
+    if (porMaterial) {
+      cls = (kg == null ? 'kg-miss' : kg === 0 ? 'prod-ok' : '') + (inicios.has(i) && i > 0 ? ' matdiv-inicio' : '');
+      const gi = grupos.findIndex(g => g.inicio === i);
+      if (gi > 0 && grupos[gi - 1].linea) rowStyle = ' style="--linea-div:' + grupos[gi - 1].linea + '"';
+    }
+    const dias = (r.dias != null) ? r.dias : 0;
+    const diasLabel = dias === 0
+      ? '<strong style="color:var(--red)">HOY</strong>'
+      : dias < 0
+        ? '<strong style="color:var(--red)">&#8722;' + Math.abs(dias) + 'd</strong>'
+        : '+' + dias + 'd';
+    const codPieza = r.codigo_pieza
+      ? '<div style="font-size:10px;color:var(--muted)">' + r.codigo_pieza + '</div>'
+      : '';
+    const otMain = r.ot_id
+      ? '<code style="color:var(--accent);font-size:13px">&#35;' + r.ot_id + '</code>'
+        + (r.ot_estado ? '<div style="font-size:10px;color:var(--muted)">' + r.ot_estado + '</div>' : '')
+      : '<span style="color:var(--muted);font-size:11px">sin OT</span>';
+    const pedLink = '<code style="color:var(--muted);font-size:11px;cursor:pointer;text-decoration:underline;text-underline-offset:2px" onclick="event.stopPropagation();go(\'pedido\',' + r.idpedido + ')">'
+      + (r.nropedido || r.idpedido) + '</code>';
+    const prod = r.tot_producida || 0;
+    const rech = r.tot_rechazada || 0;
+    const netas = prod - rech;
+    const ped = r.cantidadpedida || 0;
+    const netaColor = (netas >= ped || prod >= ped) ? 'var(--green)' : 'var(--accent)';
+    const cantCell = ped
+      + (prod > 0
+          ? ' / <span style="color:' + netaColor + '">' + netas + '</span>'
+          : '')
+      + (rech > 0 ? '<span style="font-size:10px;color:var(--red)"> &#8722;' + rech + '</span>' : '')
+    const rowClick = r.ot_id ? 'go(\'trabajo\',' + r.ot_id + ')' : 'go(\'pedido\',' + r.idpedido + ')';
+    const probTag = r.pide_probeta_traccion ? '<span class="prob-tag">&#128300; Probeta</span>' : '';
+    tbody += '<tr class="tr-link ' + cls + '"' + rowStyle + ' data-ot-estado="' + (r.ot_estado || '') + '" onclick="' + rowClick + '">'
+      + _campanaCellHtml(grupos, i)
+      + _aporteCellHtml(f)
+      + (porMaterial ? '<td style="font-size:12px;white-space:nowrap;font-weight:600">' + (r.codigo_material != null && r.codigo_material !== '' ? r.codigo_material : '—') + '</td>' : '')
+      + '<td>' + otMain + '</td>'
+      + '<td>' + pedLink + '<div style="font-size:11px;color:var(--muted)">' + (r.cliente_nombre || '—') + '</div></td>'
+      + '<td style="font-size:12px">' + (r.nombrepieza || '—') + codPieza + '</td>'
+      + '<td style="text-align:right;font-weight:600;white-space:nowrap">' + cantCell + '</td>'
+      + '<td style="white-space:nowrap;font-size:12px">' + (r.fecha_entrega || '—') + '</td>'
+      + '<td style="text-align:right">' + diasLabel + '</td>'
+      + '<td style="text-align:center">' + probTag + '</td>'
+      + '</tr>';
+  }
+  el.innerHTML = '<div class="tbl-wrap"><table>'
+    + '<thead><tr><th>' + (porMaterial ? 'Divisi&oacute;n' : 'Campa&ntilde;a') + '</th><th style="text-align:right">Kg</th>'
+    + (porMaterial ? '<th>Material</th>' : '')
+    + '<th>&#218;lt. OT</th><th>Pedido / Cliente</th><th>Pieza</th>'
+    + '<th style="text-align:right">Cantidad pedida / neta</th><th>Fecha</th>'
+    + '<th style="text-align:right">D&#237;as</th>'
+    + '<th style="text-align:center">Probeta</th>'
+    + '</tr></thead><tbody>' + tbody + '</tbody></table></div>';
+}
+
+function _renderEntregadosTblCampana(rows, elId, tituloElId) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  if (!rows || !rows.length) {
+    el.innerHTML = '<div class="empty">Sin entregas en los últimos 90 días</div>';
+    _setCampanasTitulo(tituloElId, 0);
+    return;
+  }
+  const { filas, grupos, totalCampanas } = _agruparEnCampanas(rows, 'entregados');
+  _setCampanasTitulo(tituloElId, totalCampanas);
+  const inicios = new Set(grupos.map(g => g.inicio));
+  let tbody = '';
+  for (let i = 0; i < filas.length; i++) {
+    const f = filas[i];
+    const r = f.row;
+    const kg = f.kg;
+    const banda = f.banda;
+    const cls = (f.banda2 != null
+      ? 'campana-split-' + (banda % 2)
+      : 'campana-band-' + (banda % 2) + (kg == null ? ' kg-miss' : kg === 0 ? ' prod-ok' : ''))
+      + (inicios.has(i) && i > 0 ? ' campana-divisor' : '');
+    const entLabel = r.tot_entregada + ' / ' + r.cantidadpedida;
+    const pct = r.cantidadpedida > 0 ? Math.round(r.tot_entregada / r.cantidadpedida * 100) : 0;
+    const codPieza = r.codigo_pieza
+      ? '<div style="font-size:10px;color:var(--muted)">' + r.codigo_pieza + '</div>' : '';
+    const otMain = r.ot_id
+      ? '<code style="color:var(--accent);font-size:13px">&#35;' + r.ot_id + '</code>'
+        + (r.ot_estado ? '<div style="font-size:10px;color:var(--muted)">' + r.ot_estado + '</div>' : '')
+      : '<span style="color:var(--muted);font-size:11px">sin OT</span>';
+    const pedLink = '<code style="color:var(--muted);font-size:11px;cursor:pointer;text-decoration:underline;text-underline-offset:2px" onclick="event.stopPropagation();go(\'pedido\',' + r.idpedido + ')">'
+      + (r.nropedido || r.idpedido) + '</code>';
+    const rowClick = r.ot_id ? 'go(\'trabajo\',' + r.ot_id + ')' : 'go(\'pedido\',' + r.idpedido + ')';
+    const probTagE = r.pide_probeta_traccion ? '<span class="prob-tag">&#128300; Probeta</span>' : '';
+    tbody += '<tr class="tr-link ' + cls + '" data-ot-estado="' + (r.ot_estado || '') + '" onclick="' + rowClick + '">'
+      + _campanaCellHtml(grupos, i)
+      + _aporteCellHtml(f)
+      + '<td>' + otMain + '</td>'
+      + '<td>' + pedLink + '<div style="font-size:11px;color:var(--muted)">' + (r.cliente_nombre || '—') + '</div></td>'
+      + '<td style="font-size:12px">' + (r.nombrepieza || '—') + codPieza + '</td>'
+      + '<td style="text-align:right;font-weight:600">' + entLabel
+        + ' <span style="font-size:10px;color:var(--muted)">(' + pct + '%)</span></td>'
+      + '<td style="white-space:nowrap;font-size:12px">' + (r.fecha_entrega || '—') + '</td>'
+      + '<td style="text-align:center">' + probTagE + '</td>'
+      + '</tr>';
+  }
+  el.innerHTML = '<div class="tbl-wrap"><table>'
+    + '<thead><tr><th>Campa&ntilde;a</th><th style="text-align:right">Kg</th><th>&#218;lt. OT</th><th>Pedido / Cliente</th><th>Pieza</th>'
     + '<th style="text-align:right">Entregadas / Pedidas</th>'
     + '<th>Fecha</th>'
     + '<th style="text-align:center">Probeta</th>'
@@ -3018,6 +3587,15 @@ function _renderEntregadosTblByPedido(rows, elId, key) {
 function _renderDashTable(key, elId, emptyMsg) {
   const rows = S._dashRows[key];
   if (!rows) return;
+  const tituloElId = 'dash-campanas-' + key;
+  if (S.dashModo === 'campana' || S.dashModo === 'material') {
+    // Entregados no se ve en ninguno de los dos (ya se fundio) -- se renderiza
+    // igual, como campañas, por si algo lo consulta.
+    if (key === 'entregados') _renderEntregadosTblCampana(rows, elId, tituloElId);
+    else _renderVencTblCampana(rows, elId, emptyMsg || '', tituloElId, S.dashModo);
+    return;
+  }
+  const t = $id(tituloElId); if (t) t.textContent = '';
   if (S.dashView === 'pedido') {
     if (key === 'entregados') _renderEntregadosTblByPedido(rows, elId, key);
     else _renderVencTblByPedido(rows, elId, emptyMsg || '', key);
@@ -3035,8 +3613,25 @@ function _dashMesesLabel(m) {
   return meses[desde.getMonth()] + ' ' + desde.getFullYear() + ' — Hoy';
 }
 
+// Recuerda en localStorage cómo dejó el usuario la pestaña Trabajos (modo
+// fecha/campaña, por OT/por pedido, período y qué cards tiene abiertas) --
+// mismo patrón que kiosk_cfg. `cards` se mergea aparte para que guardar UNA
+// card no borre el estado de las otras dos.
+function _trDashPrefsGet() {
+  try { return JSON.parse(localStorage.getItem('trabajos_dash_prefs') || '{}'); }
+  catch (e) { return {}; }
+}
+function _trDashPrefsSave(patch) {
+  try {
+    const cur = _trDashPrefsGet();
+    if (patch.cards) patch.cards = Object.assign({}, cur.cards, patch.cards);
+    localStorage.setItem('trabajos_dash_prefs', JSON.stringify(Object.assign(cur, patch)));
+  } catch (e) {}
+}
+
 function changeDashMeses(val) {
   S.dashMeses = parseInt(val);
+  _trDashPrefsSave({ dashMeses: S.dashMeses });
   const lbl = $id('dash-meses-lbl');
   if (lbl) lbl.textContent = _dashMesesLabel(S.dashMeses);
   [
@@ -3050,6 +3645,54 @@ function changeDashMeses(val) {
       .then(r => { S._dashRows[s.key] = r; _renderDashTable(s.key, s.id, s.empty); })
       .catch(() => { const e2 = $id(s.id); if (e2) e2.innerHTML = '<div class="empty">No se pudo cargar</div>'; });
   });
+}
+
+// Leyenda de colores del modo campañas -- comparte la misma para las 3 cards
+// (Vencidos/Próximos/Entregados usan exactamente la misma paleta), en vez de
+// dejar visible la leyenda de días/entregas del modo fecha, que no aplica acá.
+// Leyenda de la vista "por materiales": el color de la celda de cada grupo de
+// materiales (con todos sus materiales presentes) y la linea gruesa que separa
+// las divisiones. .leg-mat solo se muestra en esa vista, ver _aplicarLeyendaDashModo.
+const _LEYENDA_MATERIAL_HTML = _PEND_FUNDIR_GRUPOS
+  .map((g, gi) => [g.join(' \u00b7 '), _estiloDivisionMaterial(gi, g).fondo])
+  .concat([['Otros materiales', _estiloDivisionMaterial(_PEND_FUNDIR_GRUPOS.length, []).fondo]])
+  .map(([nombre, fondo]) =>
+    '<span class="leg-mat" style="display:none;align-items:center;gap:5px"><span style="width:16px;height:12px;border-radius:2px;display:inline-block;background:'
+    + fondo + '"></span>' + nombre + '</span>')
+  .join('')
+  + '<span class="leg-mat" style="display:none;align-items:center;gap:5px"><span style="width:22px;height:0;border-top:6px solid #13a5a0;display:inline-block"></span>l&iacute;nea gruesa: empieza otra divisi&oacute;n (del color de la de arriba)</span>'
+  + '<span class="leg-mat" style="display:none;align-items:center;color:var(--muted)">el tono cambia seg&uacute;n qu&eacute; materiales tenga la divisi&oacute;n</span>';
+
+const _LEYENDA_CAMPANA_HTML = `
+  <div class="dash-legend-campana" style="display:none;gap:12px;font-size:11px;margin-bottom:10px;flex-wrap:wrap">
+    <span class="leg-camp-solo" style="display:flex;align-items:center;gap:5px"><span style="width:12px;height:12px;border-radius:2px;background:var(--campana-0);display:inline-block"></span><span class="leg-cap">Campa&ntilde;a</span>&nbsp;par</span>
+    <span class="leg-camp-solo" style="display:flex;align-items:center;gap:5px"><span style="width:12px;height:12px;border-radius:2px;background:var(--campana-1);display:inline-block"></span><span class="leg-cap">Campa&ntilde;a</span>&nbsp;impar</span>
+    <span class="leg-camp-solo" style="display:flex;align-items:center;gap:5px"><span class="campana-split-0" style="width:12px;height:12px;border-radius:2px;display:inline-block"></span>OT partida entre dos <span class="leg-plu">campa&ntilde;as</span></span>
+    <span style="display:flex;align-items:center;gap:5px"><span style="width:24px;height:12px;border-radius:2px;display:inline-block;background-image:repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(60,200,60,.5) 4px,rgba(60,200,60,.5) 8px)"></span>Aporta 0 kg (ya cubierto)</span>
+    <span style="display:flex;align-items:center;gap:5px"><span style="width:24px;height:12px;border-radius:2px;display:inline-block;background-image:repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(255,167,38,.5) 4px,rgba(255,167,38,.5) 8px)"></span>Sin peso cargado</span>
+    ${_LEYENDA_MATERIAL_HTML}
+  </div>
+`;
+
+function _aplicarLeyendaDashModo() {
+  const bandas = S.dashModo !== 'fecha';
+  const material = S.dashModo === 'material';
+  document.querySelectorAll('.dash-legend-fecha').forEach(el => { el.style.display = bandas ? 'none' : 'flex'; });
+  document.querySelectorAll('.dash-legend-campana').forEach(el => { el.style.display = bandas ? 'flex' : 'none'; });
+  document.querySelectorAll('.leg-cap').forEach(el => { el.innerHTML = material ? 'Divisi&oacute;n' : 'Campa&ntilde;a'; });
+  document.querySelectorAll('.leg-plu').forEach(el => { el.innerHTML = material ? 'divisiones' : 'campa&ntilde;as'; });
+  document.querySelectorAll('.leg-mat').forEach(el => { el.style.display = material ? 'flex' : 'none'; });
+  document.querySelectorAll('.leg-camp-solo').forEach(el => { el.style.display = material ? 'none' : 'flex'; });
+}
+
+function _toggleDashCard(key) {
+  const body = $id('dash-body-' + key);
+  const btn  = $id('dash-toggle-' + key);
+  if (!body) return;
+  const opening = body.style.display === 'none';
+  body.style.display = opening ? 'block' : 'none';
+  if (btn) btn.innerHTML = opening ? '&#9660; Ocultar' : '&#9654; Mostrar';
+  _trDashPrefsSave({ cards: { [key]: opening } });
 }
 
 const _PRINT_DASH_META = {
@@ -3129,7 +3772,7 @@ async function _printDashSelected() {
 <html lang="es"><head><meta charset="utf-8">
 <title>Trabajos — Listas</title>
 <style>
-:root{--red:#ef5350;--yellow:#ffa726;--green:#66bb6a;--accent:#1e88e5;--fg:#111;--muted:#666;--border:#ddd;--surface2:#f5f5f5}
+:root{--red:#ef5350;--yellow:#ffa726;--green:#66bb6a;--accent:#1e88e5;--fg:#111;--muted:#666;--border:#ddd;--surface2:#f5f5f5;--campana-0:rgba(0,0,0,.05);--campana-1:rgba(0,150,170,.12)}
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,-apple-system,sans-serif;font-size:12px;color:#111;background:#fff;padding:24px 28px}
 h1{font-size:17px;font-weight:700;color:#333;margin-bottom:3px}
@@ -3145,6 +3788,14 @@ td{padding:5px 8px;border-bottom:1px solid #eee;vertical-align:middle}
 .venc-2  { background-color: rgba(0,0,0,.06); font-weight:600; }
 .ent-completo { background-color: rgba(60,200,60,.10); }
 .ent-parcial  { background-color: rgba(255,167,38,.14); }
+.campana-band-0 { background-color: var(--campana-0); }
+.campana-band-1 { background-color: var(--campana-1); }
+.campana-split-0 { background: linear-gradient(to bottom, var(--campana-0) 50%, var(--campana-1) 50%); }
+.campana-split-1 { background: linear-gradient(to bottom, var(--campana-1) 50%, var(--campana-0) 50%); }
+.campana-divisor > td { border-top: 4px solid var(--accent) !important; }
+.matdiv-inicio > td { border-top: 8px solid var(--linea-div, var(--accent)) !important; }
+.prod-ok { background-image: repeating-linear-gradient(45deg, transparent, transparent 7px, rgba(60,200,60,.28) 7px, rgba(60,200,60,.28) 14px); }
+.kg-miss { background-image: repeating-linear-gradient(45deg, transparent, transparent 7px, rgba(255,167,38,.35) 7px, rgba(255,167,38,.35) 14px); }
 .prob-tag{display:inline-flex;align-items:center;gap:4px;background:rgba(124,77,255,.12);border:1px solid rgba(124,77,255,.4);border-radius:4px;padding:1px 6px;font-size:10px;color:#5e35b1;white-space:nowrap}
 code{font-family:ui-monospace,monospace}
 tfoot td{border-top:1px solid #000;border-bottom:none;padding-top:8px}
@@ -3162,10 +3813,104 @@ ${sectionsHtml}
 
 function toggleDashView() {
   S.dashView = S.dashView === 'ot' ? 'pedido' : 'ot';
+  _trDashPrefsSave({ dashView: S.dashView });
   const btn  = $id('dash-view-btn');
   const hint = $id('dash-expand-hint');
   if (btn)  btn.textContent = S.dashView === 'pedido' ? '⋮⋮ Por OT' : '⋮⋮ Por pedido';
-  if (hint) hint.style.visibility = S.dashView === 'pedido' ? 'visible' : 'hidden';
+  if (hint) hint.style.visibility = (S.dashView === 'pedido' && S.dashModo === 'fecha') ? 'visible' : 'hidden';
+  _renderDashTable('vencidos',  'dash-vencidos',  'Sin pedidos vencidos');
+  _renderDashTable('proximos',  'dash-proximos',  'Sin pedidos por vencer en los próximos 30 días');
+  _renderDashTable('entregados','dash-entregados');
+}
+
+// En campañas no tiene sentido planificar con lo ya entregado, así que esa
+// card directamente no se muestra en ese modo (no solo queda contraída) --
+// sigue trayendo sus datos en segundo plano para que reaparezca al toque al
+// volver a "Vista por fechas de entrega".
+function _actualizarVisibilidadEntregadosCampana() {
+  const card = $id('dash-card-entregados');
+  if (card) card.style.display = S.dashModo !== 'fecha' ? 'none' : '';
+}
+
+// ── Kg que produce el horno hoy ─────────────────────────────────────────────
+// Campo de las vistas "por campañas" y "por materiales": de cuantos kg se arma
+// cada grupo. Un solo valor para todos los usuarios, guardado en el servidor
+// junto con quien lo cambio y cuando (GET/POST /api/horno/kg).
+async function _cargarHornoKg() {
+  try {
+    const d = await api('/api/horno/kg');
+    S.hornoKg = d.kg;
+    S.hornoInfo = d;
+  } catch (e) { /* sin conexion o sin sesion: queda el valor inicial */ }
+}
+
+function _fechaAR(iso) { return iso ? iso.slice(0, 10).split('-').reverse().join('/') : ''; }
+
+// Muestra u oculta el campo segun la vista (solo campañas y materiales lo usan)
+// y lo deja al dia: el valor vigente, para que sirve en la vista actual y quien
+// lo guardo. No pisa lo que se este tipeando en ese momento.
+function _renderHornoCampo() {
+  const wrap = $id('dash-horno-wrap');
+  if (!wrap) return;
+  wrap.style.display = S.dashModo === 'fecha' ? 'none' : 'flex';
+  const inp = $id('dash-horno-kg');
+  if (inp && document.activeElement !== inp) inp.value = _hornoKg();
+  const uso = $id('dash-horno-uso');
+  if (uso) uso.textContent = S.dashModo === 'material'
+    ? 'Vista por materiales: divisiones de ' + fmt(_hornoKg()) + ' kg'
+    : 'Vista por campañas: campañas de ' + fmt(_campanaKg()) + ' kg (3 × ' + fmt(_hornoKg()) + ')';
+  const info = $id('dash-horno-info');
+  if (info) {
+    const h = S.hornoInfo;
+    if (!h || h.por_defecto) {
+      info.innerHTML = 'Todav&iacute;a nadie lo guard&oacute; &mdash; se usa el valor inicial';
+    } else {
+      info.innerHTML = 'Guardado por <b>' + _esc(h.cambiado_por_nombre || ('legajo ' + h.cambiado_por_legajo)) + '</b> el ' + _fechaAR(h.fecha)
+        + (h.fecha !== _fechaISO(new Date()) ? ' <span style="color:var(--yellow)">&#9888; no es de hoy</span>' : '');
+    }
+  }
+}
+
+async function guardarHornoKg() {
+  const inp = $id('dash-horno-kg');
+  const kg = Number(String(inp?.value || '').replace(',', '.'));
+  if (!(kg > 0) || !isFinite(kg)) { alert('Ingresá los kg que produce el horno hoy (un número mayor a 0).'); return; }
+  const btn = $id('dash-horno-guardar');
+  if (btn) { btn.disabled = true; btn.textContent = 'Guardando...'; }
+  try {
+    const d = await api('/api/horno/kg', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ kg }) });
+    S.hornoKg = d.kg;
+    S.hornoInfo = d;
+  } catch (e) {
+    alert('No se pudo guardar: ' + e.message);
+    return;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Guardar'; }
+  }
+  if (inp) inp.value = _hornoKg();
+  _renderHornoCampo();
+  _renderDashTable('vencidos',  'dash-vencidos',  'Sin pedidos vencidos');
+  _renderDashTable('proximos',  'dash-proximos',  'Sin pedidos por vencer en los próximos 30 días');
+}
+
+// Ciclo de vistas de las tablas de Trabajos: el boton siempre ofrece la
+// SIGUIENTE (fecha -> campañas -> materiales -> fecha).
+const _DASH_MODOS = ['fecha', 'campana', 'material'];
+function _dashModoBtnLabel(modo) {
+  return { fecha: '🔥 Vista por campañas', campana: '🧪 Vista por materiales', material: '📅 Vista por fechas de entrega' }[modo]
+    || '🔥 Vista por campañas';
+}
+
+function toggleDashModo() {
+  S.dashModo = _DASH_MODOS[(_DASH_MODOS.indexOf(S.dashModo) + 1) % _DASH_MODOS.length];
+  _trDashPrefsSave({ dashModo: S.dashModo });
+  const btn  = $id('dash-modo-btn');
+  const hint = $id('dash-expand-hint');
+  if (btn)  btn.textContent = _dashModoBtnLabel(S.dashModo);
+  if (hint) hint.style.visibility = (S.dashView === 'pedido' && S.dashModo === 'fecha') ? 'visible' : 'hidden';
+  _aplicarLeyendaDashModo();
+  _actualizarVisibilidadEntregadosCampana();
+  _renderHornoCampo();
   _renderDashTable('vencidos',  'dash-vencidos',  'Sin pedidos vencidos');
   _renderDashTable('proximos',  'dash-proximos',  'Sin pedidos por vencer en los próximos 30 días');
   _renderDashTable('entregados','dash-entregados');
@@ -3283,7 +4028,7 @@ async function showDashboard() {
       <div class="chart-box"><canvas id="chart-pend-fundir-dash"></canvas></div>
       <div class="pend-fundir-cal" id="cal-pend-fundir-dash" style="display:none"></div>
       <div class="pend-fundir-acciones" style="text-align:right;margin-top:8px;display:flex;justify-content:flex-end;gap:8px">
-        <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="_abrirPendFundirDetalle('OTs olvidadas — programadas con más de un mes de atraso',{olvidadas:1})">&#9200; Ver OTs olvidadas</button>
+        <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="_abrirPendFundirTrabadasModal()">&#128274; Ver OT ocultas</button>
         <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="_imprimirPendienteFundir()">&#128438; Imprimir</button>
         <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="openSinPesoModal()">&#9888; Ver piezas sin peso</button>
         <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="openSinPrecioModal()">&#9888; Ver piezas sin precio</button>
@@ -4937,6 +5682,7 @@ async function _loadEvolData() {
       api('/api/analytics/evolucion_mensual?meses=' + meses),
       api('/api/analytics/top_piezas?meses=6'),
       api('/api/analytics/top_defectos?meses=6'),
+      _horasUltimaCarga(), // se cachea sola -- _evolRender la lee del cache, no del resultado
     ]);
     _evolData = d.meses;
     _rankData  = rd;
@@ -5025,7 +5771,7 @@ function _evolRender() {
         const avgProd = prodVals.length ? prodVals.reduce((s,v) => s+v, 0) / prodVals.length : null;
         const prodLabel = kgModo === 'pieza' ? 'Productividad (piezas)' : 'Productividad (metal)';
         return avgProd !== null ? `<div class="kpi-card" style="min-width:130px;padding:12px 16px">
-          <div class="kpi-label">${prodLabel}</div>
+          <div class="kpi-label">${prodLabel}${_horasAvisoHtml(_horasUltimaCargaCache)}</div>
           <div class="kpi-value c-blue" style="font-size:20px">${avgProd.toFixed(1)} <span style="font-size:13px;font-weight:400">kg/hs</span></div>
         </div>` : '';
       })() : ''}
@@ -5036,7 +5782,7 @@ function _evolRender() {
       <div class="card"><div class="card-title">&#205;ndices de Rechazo Interno, Reparaci&#xf3;n y Devoluci&#xf3;n (%)</div>
         <div class="chart-box"><canvas id="evol-chart-pct"></canvas></div></div>
     </div>
-    ${hasKg ? `<div class="card" style="margin-bottom:14px"><div class="card-title">Productividad mensual (kg / hs trabajadas) &mdash; ${kgModo === 'ambos' ? 'piezas vs total c/coladas' : kgModo === 'pieza' ? 'piezas finales' : 'total c/coladas'}</div>
+    ${hasKg ? `<div class="card" style="margin-bottom:14px"><div class="card-title">Productividad mensual (kg / hs trabajadas) &mdash; ${kgModo === 'ambos' ? 'piezas vs total c/coladas' : kgModo === 'pieza' ? 'piezas finales' : 'total c/coladas'}${_horasAvisoHtml(_horasUltimaCargaCache)}</div>
       <div class="chart-box"><canvas id="evol-chart-prod"></canvas></div></div>` : ''}
     `;
 
@@ -6506,6 +7252,26 @@ function _renderStockRows(items) {
       <td style="font-size:12px;color:var(--muted)">${r.ubicacion || '&#8212;'}</td>
     </tr>
   `).join('');
+}
+
+// ── Aviso de horas trabajadas desactualizadas ───────────────────────────────────
+// RRHH carga HorasPorFecha a mano, sin periodicidad fija -- puede pasar meses
+// sin carga nueva. Cualquier pantalla que muestre productividad (kg o cajas /
+// horas) usa este mismo aviso en vez de inventar el suyo -- un solo fetch
+// para toda la sesión (se pide poquísimas veces por día en la fuente real,
+// cachearlo por sesión es más que suficiente).
+let _horasUltimaCargaCache = null;
+async function _horasUltimaCarga() {
+  if (_horasUltimaCargaCache) return _horasUltimaCargaCache;
+  try { _horasUltimaCargaCache = await api('/api/horas/ultima_carga'); }
+  catch (e) { return null; }
+  return _horasUltimaCargaCache;
+}
+const _HORAS_DIAS_AVISO = 30; // a partir de cuánto atraso se considera "no confiable"
+function _horasAvisoHtml(info) {
+  if (!info || info.dias == null || info.dias < _HORAS_DIAS_AVISO) return '';
+  const fecha = info.ultima_fecha ? info.ultima_fecha.split('-').reverse().join('/') : '?';
+  return ` <span style="color:var(--yellow);font-size:11px;font-weight:600;cursor:help" title="Las horas trabajadas las carga RRHH a mano y sin periodicidad fija -- el último dato es del ${fecha} (hace ${info.dias} días). La productividad de los períodos más recientes puede no ser confiable todavía.">&#9888; horas desde ${fecha}</span>`;
 }
 
 // ── Clientes ───────────────────────────────────────────────────────────────────
@@ -8361,8 +9127,158 @@ function estadoTag(codigo, label) {
   return `<span class="tag ${cls}">${label || _OT_ESTADO[codigo] || codigo || '—'}</span>`;
 }
 
+// ── Recorrido guiado de Trabajos (mismo motor que Cargar moldeo) ───────────
+// Cada paso declara el estado que necesita (dashView/dashModo/card) en vez de
+// un booleano suelto por feature -- _trabajosTourSincronizar arma ESE estado
+// exacto antes de buscar el elemento a señalar, prendiendo o apagando lo que
+// haga falta según el paso, en cualquier dirección (Siguiente o Atrás). Así
+// el recorrido puede pasar completo por "Por pedido" (en las 3 tablas) y
+// después por "Vista por campañas" (en las 3 tablas) sin que cada tramo
+// tenga que saber del otro. _trabajosIniciarTour deja todo como estaba al
+// salir, sea cual sea el paso en el que se cierre (mismo criterio que el
+// modal de "Agregar sin OT" en Cargar moldeo).
+function _trabajosTourBuscarEnTabla(tablaId, selectorDentro, respaldoSel) {
+  const els = document.querySelectorAll('#' + tablaId + ' ' + selectorDentro);
+  for (const el of els) {
+    if (el.offsetParent !== null) return el;
+  }
+  return respaldoSel ? document.querySelector(respaldoSel) : null;
+}
+
+// El id del pedido visible ahora mismo en esa tabla -- lo saca de la
+// flechita de expandir (exp-{key}-{idpedido}), que siempre existe en modo
+// "Por pedido" aunque el grupo todavía no se haya desplegado nunca.
+function _trabajosTourIdPedidoVisible(tablaId, key) {
+  const flecha = _trabajosTourBuscarEnTabla(tablaId, 'span[id^="exp-' + key + '-"]');
+  return flecha ? flecha.id.slice(('exp-' + key + '-').length) : null;
+}
+
+// Fila de pedido colapsada + su fila desplegada debajo (ver expandirPedido en
+// _trabajosTourSincronizar, que la despliega antes de que esto se llame) --
+// se resaltan juntas de una, con el motor de spotlight múltiple.
+function _trabajosTourFilaYDesplegado(tablaId, key) {
+  const id = _trabajosTourIdPedidoVisible(tablaId, key);
+  if (id == null) return [];
+  const flecha = _trabajosTourBuscarEnTabla(tablaId, 'span[id="exp-' + key + '-' + id + '"]');
+  const fila = flecha ? flecha.closest('tr') : null;
+  const desplegado = $id('tr-det-' + key + '-' + id);
+  return [fila, desplegado];
+}
+
+const _TRABAJOS_TOUR_PASOS = [
+  { sel: '#dash-meses-sel', titulo: 'Per&#237;odo', texto: 'Eleg&#237; cu&#225;ntos meses de historia mirar para Vencidos, Entregados y Pendiente de fundir por material. Pr&#243;ximos vencimientos no depende de esto &mdash; siempre mira los pr&#243;ximos 30 d&#237;as.' },
+
+  { sel: '#pend-fundir-titulo-tr', titulo: 'Pendiente de fundir por material', texto: 'Esta tabla resume, por cada material, cu&aacute;nto falta fundir en total &mdash; una fila por material, con tres barras: <b>Inicial</b>, <b>Programado</b> y <b>Fundido</b> (ya se fundi&oacute;, falta entregarlo).' },
+  { buscar: () => $id('chart-pend-fundir-tr')?.closest('.chart-box'), titulo: 'C&oacute;mo leer una barra', texto: 'El n&uacute;mero al final de cada barra es el total, y las marcas dibujadas arriba son una regla de escala. El tramo m&aacute;s oscuro en la punta es Batiplane &mdash; nunca se excluye, solo se resalta aparte para que no se pierda de vista. Toc&aacute; una barra para ver la lista de OT detr&aacute;s de ese n&uacute;mero.' },
+  { sel: '#pend-fundir-kg-btn', titulo: 'Cambiar de unidad', texto: 'Alterna qu&eacute; miden las barras: piezas &rarr; kg &rarr; $ (si ten&eacute;s permiso de precios) &rarr; piezas de nuevo.' },
+  { sel: '#pend-fundir-sub-tr', titulo: 'Resumen en vivo', texto: 'Total de OT, piezas y kg/$ seg&uacute;n la unidad elegida, desglosado por Inicial/Programado/Fundido. Si destild&aacute;s una de esas series en la leyenda del gr&aacute;fico, este resumen (y los totales de las barras) se recalculan sin ella. Tambi&eacute;n avisa ac&aacute; si falta peso o precio cargado en alguna pieza.' },
+  { sel: '#pend-fundir-cal-btn', titulo: 'Modo calendario', texto: 'Cambia toda esta tabla a un calendario: mismo Inicial/Programado/Fundido, pero organizado por fecha de entrega en vez de por material &mdash; para ver qu&eacute; vence cada d&iacute;a. Vamos a entrar.' },
+  { pendFundirCal: true, sel: '#cal-pend-fundir-tr', titulo: 'As&iacute; se ve el calendario', texto: 'Navegá con las flechas, o cambi&aacute; entre vista <b>Mes</b> y <b>A&ntilde;o</b> con los botones de arriba &mdash; cada vista tiene su propio bot&oacute;n de Imprimir, separado del de la tabla.' },
+  { pendFundirCal: true, buscar: () => document.querySelector('#cal-pend-fundir-tr .cal-celda[onclick]'), titulo: 'Un d&iacute;a del calendario', texto: 'Cada d&iacute;a muestra sus propios badges de Inicial/Programado/Fundido (OT y kg). Tocalo para ver la lista de esas OT, igual que al tocar una barra del gr&aacute;fico. Un d&iacute;a ya vencido (con algo Inicial o Programado todav&iacute;a) se resalta en rojo.' },
+  { pendFundirCal: true, pendFundirCalVista: 'año', buscar: () => document.querySelector('#cal-pend-fundir-tr .cal-anual-grid'), titulo: 'Vista Año', texto: 'Los 12 meses de una vez, cada uno con una mini tabla de sus 4 semanas x Inicial/Programado/Fundido. Un mes sin nada pendiente muestra una raya en vez de la tabla. Tocando un mes se va directo a su vista Mes, con el detalle d&iacute;a por d&iacute;a que viste reci&eacute;n.' },
+  { sel: '#pend-fundir-acciones-tr', titulo: 'Ver OT ocultas e impresi&oacute;n', texto: '<b>Ver OT ocultas</b> es el mismo mecanismo que en Cargar moldeo, ac&aacute; en un solo lugar: las Programadas hace m&aacute;s de un mes (con la misma <span style="color:#e74c3c;font-weight:700">&#10005;</span> roja para ocultarlas) y las que ya est&aacute;n ocultas (con <span style="color:var(--accent)">&#8635; Volver a mostrar</span>) -- ocultar ac&aacute; tambi&eacute;n las saca de Cargar moldeo, y al rev&eacute;s. <b>Imprimir</b> exporta el gr&aacute;fico como imagen, y los &uacute;ltimos dos abren la lista de piezas a las que les falta peso o precio cargado.' },
+
+  { sel: '#dash-view-btn', titulo: 'Por OT / Por pedido', texto: 'Este bot&oacute;n alterna c&oacute;mo se ve cada tabla: una fila por OT (el modo de por defecto), o agrupadas por pedido. Vamos a ver primero c&oacute;mo se ve cada una.' },
+  { dashView: 'ot', card: 'vencidos', buscar: () => _trabajosTourBuscarEnTabla('dash-vencidos', 'tr.tr-link'), titulo: 'Cada fila es una OT', texto: 'Por defecto, cada fila de estas tablas es una Orden de Trabajo: n&#250;mero de OT, pedido y cliente, pieza, cantidad pedida y ya producida, fecha de entrega, d&#237;as restantes y si pide probeta.' },
+  { dashView: 'pedido', card: 'vencidos', expandirPedido: true, buscar: () => _trabajosTourFilaYDesplegado('dash-vencidos', 'vencidos'), titulo: 'Vencidos por pedido', texto: 'Cada fila agrupa todas las OT de un pedido: pedido y cliente, sus piezas, la cantidad pedida y neta sumada entre todas, la fecha m&aacute;s urgente y si alguna pide probeta. Un click (o la flechita) la despliega as&iacute;, mostrando cada OT por separado con su propia cantidad, fecha y estado &mdash; Shift+click para tener varios pedidos abiertos a la vez.' },
+  { dashView: 'pedido', card: 'proximos', expandirPedido: true, buscar: () => _trabajosTourFilaYDesplegado('dash-proximos', 'proximos'), titulo: 'Ahora en Pr&#243;ximos vencimientos', texto: 'El mismo agrupado por pedido, con las mismas columnas que reci&eacute;n &mdash; &uacute;til cuando un cliente tiene varias piezas por entregar juntas dentro de los pr&oacute;ximos 30 d&iacute;as. Se despliega exactamente igual.' },
+  { dashView: 'pedido', card: 'entregados', expandirPedido: true, buscar: () => _trabajosTourFilaYDesplegado('dash-entregados', 'entregados'), titulo: 'Ahora en Entregados', texto: 'Ac&aacute; cambia una columna: en vez de "Cantidad pedida / neta" y "D&iacute;as", agrupa <b>"Entregadas / Pedidas"</b> con el porcentaje &mdash; cu&aacute;nto de ese pedido ya sali&oacute; en total. Desplegar y Shift+click funcionan igual.' },
+
+  { sel: '#dash-modo-btn', titulo: 'Vista por campa&ntilde;as', texto: 'El modo normal ordena por fecha de entrega. <b>"Vista por campa&ntilde;as"</b> mantiene ese mismo orden pero pinta una franja de color distinta cada <b>3 veces los kg que produce el horno</b> (3300kg mientras el campo del horno siga en 1100) &mdash; pensado para planificar coladas. Entregados no tiene sentido acá (ya se fundi&oacute;) y por eso directamente se esconde en este modo &mdash; vamos a ver Vencidos y Pr&oacute;ximos.' },
+  { dashModo: 'campana', sel: '#dash-horno-wrap', titulo: 'Kg que produce el horno hoy', texto: 'Este campo aparece en las vistas por campa&ntilde;as y por materiales y le dice a la tabla de cu&aacute;ntos kg tiene que armar cada grupo: <b>por materiales</b> usa el valor tal cual (divisiones de esos kg) y <b>por campa&ntilde;as</b> lo multiplica por 3. Cambialo y toc&aacute; <b>Guardar</b>: queda asentado para todos, con qui&eacute;n lo cambi&oacute; y la fecha (te avisa si el guardado no es de hoy). Arranca en 1100.' },
+  { dashModo: 'campana', card: 'vencidos', buscar: () => [
+      $id('dash-campanas-vencidos'),
+      document.querySelector('#dash-vencidos table thead th:first-child'),
+      document.querySelector('#dash-vencidos table thead th:nth-child(2)'),
+    ], titulo: 'Vencidos por campa&ntilde;as', texto: 'El t&iacute;tulo suma cu&aacute;ntas campa&ntilde;as arma con lo vencido ahora mismo. La columna <b>Campa&ntilde;a</b> (celda unida) muestra el total de cada divisi&oacute;n &mdash; redondas, salvo la &uacute;ltima, con una l&iacute;nea gruesa marcando d&oacute;nde empieza la siguiente. La columna <b>Kg</b>, sin fusionar, muestra lo que aporta cada fila: una OT que cae justo en el l&iacute;mite se reparte entre las dos campa&ntilde;as, con la fila mitad de un color, mitad del otro.' },
+  { dashModo: 'campana', card: 'proximos', buscar: () => [
+      $id('dash-campanas-proximos'),
+      document.querySelector('#dash-proximos table thead th:first-child'),
+      document.querySelector('#dash-proximos table thead th:nth-child(2)'),
+    ], titulo: 'Ahora en Pr&#243;ximos vencimientos', texto: 'Mismo sistema ac&aacute; &mdash; con la diferencia de que el aporte de cada fila es lo que le falta <b>producir</b> a esa OT, no lo pedido total.' },
+  { dashModo: 'campana', sel: '#dash-modo-btn', titulo: 'Vista por materiales', texto: 'Un toque m&aacute;s en el mismo bot&oacute;n (ahora ofrece <b>"Vista por materiales"</b>) pasa a la tercera vista: la misma idea de dividir por kg, pero del tama&ntilde;o que produce el horno (<b>1100kg</b> mientras no se guarde otro valor) y <b>separando las OT</b> en los mismos grupos que el gr&aacute;fico "Pendiente de fundir por material" (5 &middot; 1 &middot; 3 &middot; 7, 2 &middot; 1/2 y 10 &middot; 12 &middot; 13 &middot; 8; los dem&aacute;s materiales, aparte). Las divisiones de todos los grupos se ordenan entre s&iacute; por su <b>fecha de entrega m&aacute;s urgente</b>, as&iacute; que pueden quedar alternadas. Si segu&iacute;s tocando, el ciclo vuelve a la vista por fechas de entrega.' },
+  { dashModo: 'material', card: 'vencidos', buscar: () => [
+      $id('dash-campanas-vencidos'),
+      document.querySelector('#dash-vencidos tbody td[rowspan]'),
+    ], titulo: 'Vencidos por materiales', texto: 'El t&iacute;tulo suma las divisiones. Cada divisi&oacute;n dice cu&aacute;ntos kg tiene y, entre par&eacute;ntesis, los materiales que contiene, por ejemplo <b>(1, 3, 5)</b>; el <b>color</b> de esa casilla indica el grupo de materiales (un tono por grupo, con una variaci&oacute;n seg&uacute;n cu&aacute;les de sus materiales est&eacute;n presentes). El grupo 5 &middot; 1 &middot; 3 &middot; 7 va en verdes y las divisiones con material <b>2</b> o <b>1/2</b> en amarillo oscuro &mdash; la leyenda de arriba muestra cada color. Entre una divisi&oacute;n y la siguiente hay una <b>l&iacute;nea gruesa</b> del color de la divisi&oacute;n de arriba. <b>Una divisi&oacute;n nunca mezcla dos grupos</b> de materiales (5 &middot; 1 &middot; 3 &middot; 7, 2 &middot; 1/2 y 10 &middot; 12 &middot; 13 &middot; 8) &mdash; la cuenta de kg arranca de cero en cada grupo. Las divisiones se ordenan por su fecha de entrega m&aacute;s urgente, as&iacute; que un mismo grupo puede aparecer varias veces entre los otros. El material <b>1/2</b> es flexible: se acomoda con 2 &middot; 1/2 o con 5 &middot; 1 &middot; 3 &middot; 7, seg&uacute;n donde quede en la divisi&oacute;n m&aacute;s urgente. Una OT que cruza el l&iacute;mite de una divisi&oacute;n se parte: aparece en cada divisi&oacute;n con su parte (<b>parte 1/2</b>, <b>2/2</b>). La columna nueva <b>Material</b> muestra el n&uacute;mero del material de la &uacute;ltima OT de cada pedido. Entregados tambi&eacute;n se esconde ac&aacute;.' },
+  { sel: '#dash-print-btn', titulo: 'Imprimir', texto: 'Arma una lista para imprimir con las tablas que elijas (Vencidos, Pr&#243;ximos, Entregados), pudiendo filtrar por estado de OT.' },
+  { sel: '#dash-toggle-vencidos', titulo: 'Contraer / expandir', texto: 'Cada una de las tres tablas empieza contra&iacute;da &mdash; toc&aacute; ac&aacute; para desplegarla. La pantalla se acuerda de c&oacute;mo la dejaste (contra&iacute;da o no, en qu&eacute; vista) la pr&oacute;xima vez que entr&eacute;s.' },
+  { sel: '#tr-q', titulo: 'Buscar en el hist&oacute;rico', texto: 'M&aacute;s abajo, la tabla completa de OT (no solo las vigentes) se puede filtrar por a&ntilde;o, cliente, estado, n&uacute;mero de OT o OT anterior, o buscar libremente ac&aacute;.' },
+  { buscar: () => document.querySelector('button[onclick="chipAdd(\'tr\')"]'), titulo: 'Filtros guardados', texto: 'Lo que escribas ac&aacute; se puede sumar como un filtro fijo (chip) con <b>"+ Filtro"</b> en vez de perderse al borrar el buscador &mdash; se pueden combinar varios a la vez.' },
+];
+
+const _TRABAJOS_TOUR_CARDS = ['vencidos', 'proximos', 'entregados'];
+
+async function _trabajosTourSincronizar(paso) {
+  const vistaQuiere = paso.dashView || 'ot';
+  if (S.dashView !== vistaQuiere) toggleDashView();
+  const modoQuiere = paso.dashModo || 'fecha';
+  for (let n = 0; S.dashModo !== modoQuiere && n < _DASH_MODOS.length; n++) toggleDashModo(); // el ciclo tiene 3 modos
+  _TRABAJOS_TOUR_CARDS.forEach(k => {
+    const body = $id('dash-body-' + k);
+    if (!body) return;
+    const debeAbrir = paso.card === k;
+    const estaAbierto = body.style.display !== 'none';
+    if (debeAbrir !== estaAbierto) _toggleDashCard(k);
+  });
+  // Despliega el primer pedido visible de esa tabla -- togglePedidoItems es
+  // la misma función que usa el click real de la fila, así que queda
+  // exactamente como si el usuario lo hubiera abierto a mano.
+  if (paso.expandirPedido && paso.card) {
+    const id = _trabajosTourIdPedidoVisible('dash-' + paso.card, paso.card);
+    if (id != null) {
+      const det = $id('tr-det-' + paso.card + '-' + id);
+      if (det && det.style.display === 'none') togglePedidoItems(paso.card, Number(id), false);
+    }
+  }
+  // Mismo criterio: _togglePendFundirCal() es la función real del botón. La
+  // primera vez que se activa pide los datos del calendario a la API, así
+  // que hay que esperarla -- si no, el paso buscaría en un calendario que
+  // todavía dice "Cargando…" y se saltaría solo (ver _tourMostrarPaso).
+  const quierePendFundirCal = !!paso.pendFundirCal;
+  if (quierePendFundirCal !== _pendFundirCalMode) await _togglePendFundirCal();
+  // Vista Mes/Año dentro del calendario -- solo importa si el paso ya pidió
+  // (arriba) que el calendario esté activo; _pendFundirCalCambiarVista es
+  // sincrónica (los datos del año ya están, vienen del mismo fetch inicial).
+  if (_pendFundirCalMode) {
+    const vistaCalQuiere = paso.pendFundirCalVista || 'mes';
+    if (_pendFundirCalVista !== vistaCalQuiere) _pendFundirCalCambiarVista(vistaCalQuiere);
+  }
+}
+
+function _trabajosIniciarTour() {
+  const original = {
+    dashView: S.dashView,
+    dashModo: S.dashModo,
+    cards: Object.fromEntries(_TRABAJOS_TOUR_CARDS.map(k => [k, $id('dash-body-' + k)?.style.display !== 'none'])),
+    pendFundirCal: _pendFundirCalMode,
+    pendFundirCalVista: _pendFundirCalVista,
+  };
+  _iniciarTour(_TRABAJOS_TOUR_PASOS, {
+    sincronizar: _trabajosTourSincronizar,
+    onClose: () => {
+      if (S.dashView !== original.dashView) toggleDashView();
+      for (let n = 0; S.dashModo !== original.dashModo && n < _DASH_MODOS.length; n++) toggleDashModo();
+      _TRABAJOS_TOUR_CARDS.forEach(k => {
+        const body = $id('dash-body-' + k);
+        if (!body) return;
+        const estaAbierto = body.style.display !== 'none';
+        if (estaAbierto !== original.cards[k]) _toggleDashCard(k);
+      });
+      if (_pendFundirCalVista !== original.pendFundirCalVista) _pendFundirCalCambiarVista(original.pendFundirCalVista);
+      if (_pendFundirCalMode !== original.pendFundirCal) _togglePendFundirCal();
+    },
+  });
+}
+
 async function showTrabajos() {
   setMain('<div class="loading">Cargando...</div>');
+
+  const _trPrefs = _trDashPrefsGet();
+  if (_DASH_MODOS.includes(_trPrefs.dashModo)) S.dashModo = _trPrefs.dashModo;
+  if (_trPrefs.dashView) S.dashView = _trPrefs.dashView;
+  if (_trPrefs.dashMeses) S.dashMeses = _trPrefs.dashMeses;
+  await _cargarHornoKg();
 
   if (!_trabajosMeta) {
     try { _trabajosMeta = await api('/api/trabajos/meta'); } catch(e) {}
@@ -8402,7 +9318,10 @@ async function showTrabajos() {
       </button>
     </div>
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:14px">
-      <div class="sec-title" style="margin-bottom:0">Trabajos &mdash; &#211;rdenes de trabajo</div>
+      <div class="sec-title" style="margin-bottom:0;display:flex;align-items:center;gap:10px">
+        Trabajos &mdash; &#211;rdenes de trabajo
+        <button class="page-btn" style="font-size:12px;padding:3px 11px;border-radius:20px" onclick="_trabajosIniciarTour()" title="Ayuda">&#10067; Ayuda</button>
+      </div>
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <span style="font-size:12px;font-weight:600;color:var(--muted)">Per&#237;odo:</span>
         <select id="dash-meses-sel" onchange="changeDashMeses(this.value)" style="font-size:12px;padding:4px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);cursor:pointer">
@@ -8416,13 +9335,22 @@ async function showTrabajos() {
         <span id="dash-meses-lbl" style="font-size:11px;color:var(--muted)"></span>
         <span id="dash-expand-hint" style="font-size:11px;color:var(--muted)">Click para expandir &middot; <kbd style="font-size:10px;padding:1px 4px;border:1px solid var(--border);border-radius:3px">Shift</kbd>+click para abrir varios</span>
         <button class="page-btn" id="dash-view-btn" onclick="toggleDashView()" style="font-size:11px;padding:4px 10px">&#8942;&#8942; Por OT</button>
-        <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="openPrintDashModal()">&#128438; Imprimir</button>
+        <button class="page-btn" id="dash-modo-btn" onclick="toggleDashModo()" style="font-size:11px;padding:4px 10px">&#128293; Vista por campa&ntilde;as</button>
+        <button class="page-btn" id="dash-print-btn" style="font-size:11px;padding:4px 10px" onclick="openPrintDashModal()">&#128438; Imprimir</button>
       </div>
+    </div>
+
+    <div id="dash-horno-wrap" style="display:none;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;padding:8px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface2)">
+      <label for="dash-horno-kg" style="font-size:12px;font-weight:600">Kg que produce el horno hoy:</label>
+      <input id="dash-horno-kg" class="inp" type="number" min="1" step="1" style="width:110px" onkeydown="if(event.key==='Enter')guardarHornoKg()">
+      <button class="page-btn" id="dash-horno-guardar" onclick="guardarHornoKg()" style="font-weight:600;background:var(--accent-dim);border-color:var(--accent);color:var(--accent)">Guardar</button>
+      <span id="dash-horno-uso" style="font-size:11px;color:var(--text)"></span>
+      <span id="dash-horno-info" style="font-size:11px;color:var(--muted)"></span>
     </div>
 
     <div class="card" style="margin-bottom:14px">
       <div class="card-title" style="display:flex;align-items:baseline;justify-content:space-between;gap:8px">
-        <span>Pendiente de fundir por material</span>
+        <span id="pend-fundir-titulo-tr">Pendiente de fundir por material</span>
         <div style="display:flex;align-items:baseline;gap:10px">
           <span id="pend-fundir-sub-tr" style="font-size:11px;color:var(--muted);font-weight:400">Cargando&#8230;</span>
           <button class="page-btn" id="pend-fundir-kg-btn" style="font-size:11px;padding:3px 9px" onclick="_ciclarPendFundirModo()">Ver en kg</button>
@@ -8432,7 +9360,8 @@ async function showTrabajos() {
       ${_PEND_FUNDIR_LEYENDA_BATIPLANE_HTML}
       <div class="chart-box"><canvas id="chart-pend-fundir-tr"></canvas></div>
       <div class="pend-fundir-cal" id="cal-pend-fundir-tr" style="display:none"></div>
-      <div class="pend-fundir-acciones" style="text-align:right;margin-top:8px;display:flex;justify-content:flex-end;gap:8px">
+      <div class="pend-fundir-acciones" id="pend-fundir-acciones-tr" style="text-align:right;margin-top:8px;display:flex;justify-content:flex-end;gap:8px">
+        <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="_abrirPendFundirTrabadasModal()">&#128274; Ver OT ocultas</button>
         <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="_imprimirPendienteFundir()">&#128438; Imprimir</button>
         <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="openSinPesoModal()">&#9888; Ver piezas sin peso</button>
         <button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="openSinPrecioModal()">&#9888; Ver piezas sin precio</button>
@@ -8440,32 +9369,50 @@ async function showTrabajos() {
     </div>
 
     <div class="card" style="margin-bottom:14px">
-      <div class="card-title">&#9888; Vencidos</div>
-      <div style="display:flex;gap:12px;font-size:11px;margin-bottom:10px;flex-wrap:wrap">
-        <span style="display:flex;align-items:center;gap:5px"><span style="width:28px;height:12px;border-radius:2px;display:inline-block;background-image:repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(60,200,60,.5) 4px,rgba(60,200,60,.5) 8px);background-color:rgba(239,83,80,.18)"></span>Listo para entregar</span>
+      <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+        <span>&#9888; Vencidos<span id="dash-campanas-vencidos"></span></span>
+        <button class="page-btn" id="dash-toggle-vencidos" style="font-size:11px;padding:3px 9px" onclick="_toggleDashCard('vencidos')">&#9654; Mostrar</button>
       </div>
-      <div id="dash-vencidos"><div class="loading" style="padding:8px 0">Cargando...</div></div>
+      <div id="dash-body-vencidos" style="display:none">
+        <div class="dash-legend-fecha" style="display:flex;gap:12px;font-size:11px;margin-bottom:10px;flex-wrap:wrap">
+          <span style="display:flex;align-items:center;gap:5px"><span style="width:28px;height:12px;border-radius:2px;display:inline-block;background-image:repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(60,200,60,.5) 4px,rgba(60,200,60,.5) 8px);background-color:rgba(239,83,80,.18)"></span>Listo para entregar</span>
+        </div>
+        ${_LEYENDA_CAMPANA_HTML}
+        <div id="dash-vencidos"><div class="loading" style="padding:8px 0">Cargando...</div></div>
+      </div>
     </div>
 
     <div class="card" style="margin-bottom:14px">
-      <div class="card-title">Pr&#243;ximos vencimientos &mdash; 30 d&#237;as</div>
-      <div style="display:flex;gap:12px;font-size:11px;margin-bottom:10px;flex-wrap:wrap">
-        <span style="display:flex;align-items:center;gap:5px"><span style="width:12px;height:12px;border-radius:2px;background:rgba(79,140,247,.35);display:inline-block"></span>&#8804; 30 d</span>
-        <span style="display:flex;align-items:center;gap:5px"><span style="width:12px;height:12px;border-radius:2px;background:rgba(255,167,38,.45);display:inline-block"></span>&#8804; 15 d</span>
-        <span style="display:flex;align-items:center;gap:5px"><span style="width:12px;height:12px;border-radius:2px;background:rgba(239,83,80,.5);display:inline-block"></span>&#8804; 7 d</span>
-        <span style="display:flex;align-items:center;gap:5px"><span style="width:12px;height:12px;border-radius:2px;background:rgba(200,200,200,.35);border:1px solid var(--border);display:inline-block"></span>&#8804; 2 d</span>
-        <span style="display:flex;align-items:center;gap:5px"><span style="width:28px;height:12px;border-radius:2px;display:inline-block;background-image:repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(60,200,60,.5) 4px,rgba(60,200,60,.5) 8px);background-color:rgba(79,140,247,.13)"></span>Listo para entregar</span>
+      <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+        <span>Pr&#243;ximos vencimientos &mdash; 30 d&#237;as<span id="dash-campanas-proximos"></span></span>
+        <button class="page-btn" id="dash-toggle-proximos" style="font-size:11px;padding:3px 9px" onclick="_toggleDashCard('proximos')">&#9654; Mostrar</button>
       </div>
-      <div id="dash-proximos"><div class="loading" style="padding:8px 0">Cargando...</div></div>
+      <div id="dash-body-proximos" style="display:none">
+        <div class="dash-legend-fecha" style="display:flex;gap:12px;font-size:11px;margin-bottom:10px;flex-wrap:wrap">
+          <span style="display:flex;align-items:center;gap:5px"><span style="width:12px;height:12px;border-radius:2px;background:rgba(79,140,247,.35);display:inline-block"></span>&#8804; 30 d</span>
+          <span style="display:flex;align-items:center;gap:5px"><span style="width:12px;height:12px;border-radius:2px;background:rgba(255,167,38,.45);display:inline-block"></span>&#8804; 15 d</span>
+          <span style="display:flex;align-items:center;gap:5px"><span style="width:12px;height:12px;border-radius:2px;background:rgba(239,83,80,.5);display:inline-block"></span>&#8804; 7 d</span>
+          <span style="display:flex;align-items:center;gap:5px"><span style="width:12px;height:12px;border-radius:2px;background:rgba(200,200,200,.35);border:1px solid var(--border);display:inline-block"></span>&#8804; 2 d</span>
+          <span style="display:flex;align-items:center;gap:5px"><span style="width:28px;height:12px;border-radius:2px;display:inline-block;background-image:repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(60,200,60,.5) 4px,rgba(60,200,60,.5) 8px);background-color:rgba(79,140,247,.13)"></span>Listo para entregar</span>
+        </div>
+        ${_LEYENDA_CAMPANA_HTML}
+        <div id="dash-proximos"><div class="loading" style="padding:8px 0">Cargando...</div></div>
+      </div>
     </div>
 
-    <div class="card" style="margin-bottom:14px">
-      <div class="card-title">&#10003; Entregados</div>
-      <div style="display:flex;gap:16px;font-size:11px;margin-bottom:10px;flex-wrap:wrap">
-        <span style="display:flex;align-items:center;gap:5px"><span style="width:12px;height:12px;border-radius:2px;background:rgba(60,200,60,.35);display:inline-block"></span>Entrega completa</span>
-        <span style="display:flex;align-items:center;gap:5px"><span style="width:12px;height:12px;border-radius:2px;background:rgba(255,167,38,.40);display:inline-block"></span>Entrega parcial</span>
+    <div class="card" id="dash-card-entregados" style="margin-bottom:14px">
+      <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+        <span>&#10003; Entregados<span id="dash-campanas-entregados"></span></span>
+        <button class="page-btn" id="dash-toggle-entregados" style="font-size:11px;padding:3px 9px" onclick="_toggleDashCard('entregados')">&#9654; Mostrar</button>
       </div>
-      <div id="dash-entregados"><div class="loading" style="padding:8px 0">Cargando...</div></div>
+      <div id="dash-body-entregados" style="display:none">
+        <div class="dash-legend-fecha" style="display:flex;gap:16px;font-size:11px;margin-bottom:10px;flex-wrap:wrap">
+          <span style="display:flex;align-items:center;gap:5px"><span style="width:12px;height:12px;border-radius:2px;background:rgba(60,200,60,.35);display:inline-block"></span>Entrega completa</span>
+          <span style="display:flex;align-items:center;gap:5px"><span style="width:12px;height:12px;border-radius:2px;background:rgba(255,167,38,.40);display:inline-block"></span>Entrega parcial</span>
+        </div>
+        ${_LEYENDA_CAMPANA_HTML}
+        <div id="dash-entregados"><div class="loading" style="padding:8px 0">Cargando...</div></div>
+      </div>
     </div>
 
     <div id="tr-pipeline" style="margin-bottom:14px"><div class="loading" style="font-size:12px">Cargando pipeline...</div></div>
@@ -8500,8 +9447,20 @@ async function showTrabajos() {
   if (_lblMeses) _lblMeses.textContent = _dashMesesLabel(S.dashMeses);
   const _dvBtn = $id('dash-view-btn');
   if (_dvBtn) _dvBtn.textContent = S.dashView === 'pedido' ? '⋮⋮ Por OT' : '⋮⋮ Por pedido';
+  const _dmBtn = $id('dash-modo-btn');
+  if (_dmBtn) _dmBtn.textContent = _dashModoBtnLabel(S.dashModo);
   const _hint = $id('dash-expand-hint');
-  if (_hint) _hint.style.visibility = S.dashView === 'pedido' ? 'visible' : 'hidden';
+  if (_hint) _hint.style.visibility = (S.dashView === 'pedido' && S.dashModo === 'fecha') ? 'visible' : 'hidden';
+  _aplicarLeyendaDashModo();
+  _actualizarVisibilidadEntregadosCampana();
+  _renderHornoCampo();
+  for (const _k of ['vencidos', 'proximos', 'entregados']) {
+    if (!_trPrefs.cards || !_trPrefs.cards[_k]) continue;
+    const _cardBody = $id('dash-body-' + _k);
+    const _cardBtn  = $id('dash-toggle-' + _k);
+    if (_cardBody) _cardBody.style.display = 'block';
+    if (_cardBtn)  _cardBtn.innerHTML = '&#9660; Ocultar';
+  }
 
   api('/api/dashboard/vencidos?meses=' + S.dashMeses)
     .then(r => { S._dashRows.vencidos = r; _renderDashTable('vencidos', 'dash-vencidos', 'Sin pedidos vencidos'); })
@@ -8528,6 +9487,7 @@ async function showTrabajos() {
 let _moldeoPersonal   = null;
 let _moldeoTodasOTs   = null;   // todas las OT Programado, una sola carga por apertura del modal
 let _moldeoExistentes = {};     // trabajo_id -> {operario_id -> {id, cantidad_cajas, cajas_sin_cerrar, cantidad_noyos, operario_nombre}} para la fecha elegida
+let _moldeoOtsConCarga = new Set(); // trabajo_id con carga alguna vez (cualquier fecha) -- ver _moldeoOtTieneCarga
 let _moldeoListaCache = [];     // cache de "Cargas del dia" (todos los operarios)
 let _moldeoOcultas    = {};     // trabajo_id -> true -- OT trabadas en Programado, parche local (ver _trabajo_oculto)
 let _moldeoAyudantes  = {};     // trabajo_id -> [{operario_id, operario_nombre}] -- fijo por OT (ver _trabajo_ayudante)
@@ -8541,6 +9501,227 @@ let _moldeoSortDir    = 1;      // 1 asc, -1 desc
 let _moldeoSinOTPieza    = null; // {id, nombre, codigo, cliente} elegida en "Agregar sin OT"
 let _moldeoSinOTResults  = [];
 let _moldeoSinOTTimer    = null;
+let _moldeoGrupos = []; // [{grupo_id, trabajo_ids}] -- cajas compartidas activas (ver GET /api/moldeo/grupos)
+let _moldeoGrupoPorOT = {}; // trabajo_id -> {grupoId, siblingIds} -- derivado de _moldeoGrupos (ver _moldeoArmarGrupoPorOT)
+let _moldeoConjuntoExistentes = {}; // trabajo_id -> {id, operario_id, cantidad_piezas} para la fecha elegida (filas con grupo_id de _produccion_moldeo)
+let _moldeoConjuntoExpandido = {}; // grupoId -> bool -- que conjuntos tiene desplegados el usuario (colapsado por default, ver _moldeoToggleConjunto)
+// Un solo color (azul verdoso) para todos los conjuntos -- antes rotaba por
+// una paleta que incluía rojo, y un conjunto en rojo parecía un error.
+const _MOLDEO_CONJUNTO_COLOR = '#13a5a0';
+function _moldeoGrupoColor(grupoId) { return _MOLDEO_CONJUNTO_COLOR; }
+
+// Cada OT de un conjunto es una fila real y completa (propia pieza,
+// cliente, ayudantes, responsables...) -- ninguna hace de "principal" ni
+// absorbe a las demas. Lo que representa al conjunto es una fila SINTETICA
+// aparte (ver _moldeoConjuntoHeaderHtml), que no es ninguna OT en
+// particular y por eso siempre esta visible: no depende de que una fila
+// puntual este oculta ni de a cual le toque mostrarse. Todas las OT del
+// conjunto (sin excepcion) quedan como data-conjunto-sub, escondidas por
+// _moldeoAplicarFiltro hasta que se despliega esa fila.
+function _moldeoArmarGrupoPorOT(grupos) {
+  const porOT = {};
+  (grupos || []).forEach(g => {
+    g.trabajo_ids.forEach(tid => {
+      porOT[tid] = { grupoId: g.grupo_id, siblingIds: g.trabajo_ids.filter(x => x !== tid) };
+    });
+  });
+  return porOT;
+}
+
+// Recalcula _moldeoGrupoPorOT y actualiza en el DOM el color, el badge y el
+// atributo data-conjunto-sub de cada fila, sin reconstruir la tabla entera
+// -- se llama después de traer/crear/romper conjuntos y después de
+// ocultar/mostrar una OT. _moldeoReagruparConjuntos se encarga de las
+// filas-header (crearlas, moverlas, borrar las que ya no correspondan).
+function _moldeoAplicarGrupoAFilas() {
+  _moldeoGrupoPorOT = _moldeoArmarGrupoPorOT(_moldeoGrupos);
+  (_moldeoTodasOTs || []).forEach((r, i) => {
+    const tr = $id('moldeo-tr-'+i);
+    if (!tr) return;
+    const info = _moldeoGrupoPorOT[r.iditemtrabajo];
+    // Un conjunto se pinta con el color de su grupo (ver _moldeoGrupoColor)
+    // en vez del tinte por estado de siempre -- se distingue de un vistazo
+    // de una OT suelta, y nunca hace falta elegir entre los dos: sus
+    // miembros solo pueden estar en Inicial/Programado.
+    tr.style.background = info ? _moldeoGrupoColor(info.grupoId) + '22' : _moldeoColorEstado(r.estadotrabajo);
+    tr.style.borderLeft = info ? `4px solid ${_moldeoGrupoColor(info.grupoId)}` : '';
+    if (info) tr.dataset.conjuntoSub = info.grupoId; else delete tr.dataset.conjuntoSub;
+    const badge = $id('moldeo-ot-badge-'+i);
+    if (badge) badge.innerHTML = _moldeoConjuntoBadgeHtml(r.iditemtrabajo);
+  });
+  _moldeoReagruparConjuntos();
+}
+
+// Todas las OT de un conjunto comparten UN solo ayudante/responsable de
+// moldeo/responsable de noyos (los de la fila-header). No hay tablas nuevas:
+// cada alta/baja de roster se aplica a TODAS las OT del conjunto con los
+// mismos endpoints por OT de siempre (ver _moldeoRosterAplicar), así lo
+// que lee el resto de la app (productividad, herencia por cadena de
+// reemplazo, filtro por operario) sigue funcionando sin saber que existe el
+// conjunto. Para una OT suelta devuelven solo [ella] y todo se comporta
+// como siempre.
+function _moldeoMiembrosDe(trabajoId) {
+  const info = _moldeoGrupoPorOT[trabajoId];
+  return info ? [trabajoId, ...info.siblingIds] : [trabajoId];
+}
+
+// Roster de un conjunto (o de una OT suelta) = unión sin repetidos de los
+// rosters de todos sus miembros -- normalmente son iguales (todo cambio se
+// aplica a todos), pero si el conjunto se armó con OT que ya tenían gente
+// distinta asignada, la fila-header muestra a todos.
+function _moldeoRosterDe(mapa, trabajoId) {
+  const vistos = new Set();
+  const out = [];
+  _moldeoMiembrosDe(trabajoId).forEach(tid => (mapa[tid] || []).forEach(a => {
+    if (!vistos.has(a.operario_id)) { vistos.add(a.operario_id); out.push(a); }
+  }));
+  return out;
+}
+
+// Alta ('add') o baja ('del') de un operario en el roster `recurso`
+// (ayudantes | responsables_moldeo | responsables_noyos) de TODAS las OT del
+// conjunto de `trabajoId`, actualizando `mapa` (el estado en memoria de ese
+// rol). Sigue con las demás OT si una falla, y devuelve cuántas fallaron.
+async function _moldeoRosterAplicar(trabajoId, recurso, operarioId, mapa, accion) {
+  const miembros = _moldeoMiembrosDe(trabajoId);
+  let falla = 0, error = '';
+  for (const tid of miembros) {
+    try {
+      if (accion === 'add') {
+        mapa[tid] = await api('/api/trabajos/' + tid + '/' + recurso, {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ operario_id: operarioId }),
+        });
+      } else {
+        await api('/api/trabajos/' + tid + '/' + recurso + '/' + operarioId, { method: 'DELETE' });
+        mapa[tid] = (mapa[tid] || []).filter(a => a.operario_id !== operarioId);
+      }
+    } catch(e) { falla++; error = e.message; }
+  }
+  return { miembros, falla, error };
+}
+
+// Refresca lo que se ve después de cambiar un roster: la celda de la fila
+// (OT suelta), o la fila-header (conjunto) más el data-op-ids de cada
+// miembro para que el filtro por operario los siga encontrando. Solo toca el
+// rol que cambió -- refrescar los otros borraría lo que se esté tipeando.
+function _moldeoRefrescarRoster(tipo, trabajoId, miembros) {
+  const info = _moldeoGrupoPorOT[trabajoId];
+  if (info) {
+    miembros.forEach(tid => {
+      const idx = (_moldeoTodasOTs || []).findIndex(r => r.iditemtrabajo === tid);
+      if (idx >= 0) _moldeoRecalcularAsignado($id('moldeo-tr-' + idx), tid);
+    });
+    _moldeoRefrescarHeaderConjunto(info.grupoId, tipo);
+    return;
+  }
+  if (tipo === 'ayd') _moldeoRefrescarCeldaAyudantes(trabajoId);
+  else if (tipo === 'resp') _moldeoRefrescarCeldaRespMoldeo(trabajoId);
+  else _moldeoRefrescarCeldaRespNoyos(trabajoId);
+}
+
+// HTML de las tres celdas de roster de la fila-header. Se ancla en la OT de
+// menor número solo para tener un trabajoId contra el cual guardar las
+// cantidades de noyos (las de piezas van en cada OT, al desplegar) -- los
+// altas/bajas se aplican a todas igual, ver _moldeoRosterAplicar.
+function _moldeoConjuntoHeaderCeldas(anchor) {
+  return {
+    ayd: _moldeoAyudantesCeldaHtml(anchor, _moldeoRosterDe(_moldeoAyudantes, anchor), false, true),
+    resp: _moldeoRespMoldeoCeldaHtml(anchor, _moldeoRosterDe(_moldeoResponsablesMoldeo, anchor), false, null, true),
+    noyos: _moldeoRespNoyosCeldaHtml(anchor, _moldeoRosterDe(_moldeoResponsablesNoyos, anchor), false, true),
+  };
+}
+
+function _moldeoConjuntoHeaderOpIds(anchor) {
+  const ids = new Set([
+    ..._moldeoRosterDe(_moldeoResponsablesMoldeo, anchor).map(a => a.operario_id),
+    ..._moldeoRosterDe(_moldeoResponsablesNoyos, anchor).map(a => a.operario_id),
+  ]);
+  return Array.from(ids).join(',');
+}
+
+// Refresca las celdas de roster de la fila-header de un conjunto (solo la
+// del rol indicado, o las tres si tipo es null) y su data-op-ids.
+function _moldeoRefrescarHeaderConjunto(grupoId, tipo) {
+  const h = $id('moldeo-conjunto-header-' + grupoId);
+  if (!h) return;
+  const anchor = Number(h.dataset.anchor);
+  const c = _moldeoConjuntoHeaderCeldas(anchor);
+  if (!tipo || tipo === 'ayd')   { const el = $id('moldeo-conj-ayd-' + grupoId);   if (el) el.innerHTML = c.ayd; }
+  if (!tipo || tipo === 'resp')  { const el = $id('moldeo-conj-resp-' + grupoId);  if (el) el.innerHTML = c.resp; }
+  if (!tipo || tipo === 'noyos') { const el = $id('moldeo-conj-noyos-' + grupoId); if (el) el.innerHTML = c.noyos; }
+  h.dataset.opIds = _moldeoConjuntoHeaderOpIds(anchor);
+}
+
+// Fila sintética (no es ninguna OT real) que representa al conjunto:
+// triángulo de despliegue, código de cada OT miembro, el ✕ para romperlo, y
+// las tres celdas de roster COMPARTIDAS por todo el conjunto (ayudantes,
+// responsables de moldeo, responsables de noyos). Las OT de adentro solo se
+// despliegan para cargar sus piezas o ver datos propios. El clic para
+// desplegar vive solo en la celda de identidad -- el resto tiene botones e
+// inputs propios.
+function _moldeoConjuntoHeaderHtml(grupoId, trabajoIds) {
+  const color = _moldeoGrupoColor(grupoId);
+  const expandido = !!_moldeoConjuntoExpandido[grupoId];
+  const ids = trabajoIds.slice().sort((a, b) => a - b);
+  const anchor = ids[0];
+  const otsLabel = ids.map(id => `<code>${String(id).padStart(6,'0')}</code>`).join(' ');
+  const c = _moldeoConjuntoHeaderCeldas(anchor);
+  return `
+    <tr id="moldeo-conjunto-header-${grupoId}" data-conjunto-header="${grupoId}" data-anchor="${anchor}"
+        data-miembros="${ids.join(',')}" data-op-ids="${_moldeoConjuntoHeaderOpIds(anchor)}"
+        style="background:${color}22;border-left:4px solid ${color}">
+      <td colspan="4" style="padding:8px 10px;cursor:pointer" onclick="_moldeoToggleConjunto(${grupoId})">
+        <span class="moldeo-conjunto-toggle" data-grupo-id="${grupoId}" style="font-size:10px;margin-right:6px;display:inline-block;width:10px">${expandido ? '&#9660;' : '&#9654;'}</span>
+        <b>Conjunto</b> <span style="color:var(--muted);font-size:11px">(caja compartida)</span>
+        <div style="margin-top:3px">${otsLabel}</div>
+        <span onclick="event.stopPropagation();_moldeoRomperConjunto(${grupoId})" style="cursor:pointer;color:#e74c3c;font-weight:700;font-size:11px" title="Romper este conjunto -- las OT vuelven a ser independientes">&#10005; Romper</span>
+      </td>
+      <td id="moldeo-conj-ayd-${grupoId}" class="moldeo-col-divide" style="min-width:150px">${c.ayd}</td>
+      <td id="moldeo-conj-resp-${grupoId}" class="moldeo-td-resp">${c.resp}</td>
+      <td id="moldeo-conj-noyos-${grupoId}" class="moldeo-td-respnoyos moldeo-col-divide">${c.noyos}</td>
+      <td class="moldeo-col-divide"></td>
+    </tr>`;
+}
+
+// Despliega/colapsa las OT de un conjunto -- _moldeoAplicarFiltro es quien
+// realmente decide mostrar/ocultar cada fila (así conjunto y
+// buscador/checkboxes no se pisan entre sí). La fila-header nunca se
+// oculta a sí misma, solo cambia su propio triángulo.
+function _moldeoToggleConjunto(grupoId) {
+  _moldeoConjuntoExpandido[grupoId] = !_moldeoConjuntoExpandido[grupoId];
+  const el = document.querySelector('.moldeo-conjunto-toggle[data-grupo-id="' + grupoId + '"]');
+  if (el) el.innerHTML = _moldeoConjuntoExpandido[grupoId] ? '&#9660;' : '&#9654;';
+  _moldeoAplicarFiltro();
+}
+
+// Reconstruye las filas-header de cada conjunto activo y las deja pegadas
+// justo antes de la primera de sus OT en el orden ACTUAL de la tabla (no en
+// _moldeoTodasOTs) -- se llama después de ordenar por columna y después de
+// traer/crear/romper conjuntos, así la fila-header sigue a sus OT sin
+// importar cómo las dejó el último sort.
+function _moldeoReagruparConjuntos() {
+  const tbody = $id('moldeo-ot-tbody');
+  if (!tbody) return;
+  const grupoIds = [...new Set(Array.from(tbody.querySelectorAll('tr[data-conjunto-sub]')).map(tr => tr.dataset.conjuntoSub))];
+  tbody.querySelectorAll('tr[data-conjunto-header]').forEach(h => {
+    if (!grupoIds.includes(h.dataset.conjuntoHeader)) h.remove();
+  });
+  grupoIds.forEach(grupoIdStr => {
+    const miembros = Array.from(tbody.querySelectorAll('tr[data-conjunto-sub="' + grupoIdStr + '"]'));
+    if (!miembros.length) return;
+    let anchor = miembros[0];
+    for (let k = 1; k < miembros.length; k++) { anchor.after(miembros[k]); anchor = miembros[k]; }
+    const trabajoIds = miembros.map(tr => Number(tr.dataset.sortOt)).sort((a, b) => a - b);
+    // La fila-header se MUEVE en vez de recrearse (así no pierde lo que se
+    // esté tipeando en su celda de noyos al ordenar por columna); solo se
+    // recrea si cambió qué OT forman el conjunto.
+    let h = $id('moldeo-conjunto-header-' + grupoIdStr);
+    if (h && h.dataset.miembros !== trabajoIds.join(',')) { h.remove(); h = null; }
+    if (h) miembros[0].before(h);
+    else miembros[0].insertAdjacentHTML('beforebegin', _moldeoConjuntoHeaderHtml(Number(grupoIdStr), trabajoIds));
+  });
+}
 
 // Mismos colores que usa Pendiente de fundir para Inicial/Programado/Fundido
 // (_COLOR_INICIAL/_COLOR_PROGRAMADO/_COLOR_FUNDIDO en pend_fundir.js), en
@@ -8563,16 +9744,36 @@ const _MOLDEO_TOUR_PASOS = [
   { sel: '#moldeo-fecha', titulo: 'Fecha', texto: 'Eleg&#237; el d&#237;a que est&#225;s cargando. Las flechitas &#8249; &#8250; de los costados lo mueven un d&#237;a para adelante o atr&#225;s sin abrir el calendario.' },
   { sel: '#moldeo-ot-filtro', titulo: 'Buscar', texto: 'Busc&#225; por n&#250;mero de OT, pieza o cliente. Mientras haya algo escrito ac&#225;, busca en <b>todas</b> las OT, incluso si hay un operario elegido en el combo de al lado.' },
   { sel: '#moldeo-operario-filtro', titulo: 'Filtrar por operario', texto: 'Muestra solo las OT donde esa persona es responsable de moldeo o de noyos. Las flechitas &#8249; &#8250; de los costados lo recorren sin abrir el desplegable.' },
-  { sel: '#moldeo-checks-wrap', titulo: 'Qu&#233; OT se muestran', texto: 'Por defecto solo se ven las OT que ya tienen cantidad de cajas o de noyos cargada ese d&#237;a. Tild&#225; <b>"Ver todas las OT activas"</b> para saltear ese filtro y ver todas, por ejemplo para empezar a cargar una que todav&#237;a no tiene nada. Las otras dos muestran las OT ocultas (m&#225;s abajo) y las ya fundidas (de solo lectura).' },
+  { sel: '#moldeo-checks-wrap', titulo: 'Qu&#233; OT se muestran', texto: 'Por defecto solo se ven las OT que ya tienen cantidad de cajas o de noyos cargada alguna vez (no hace falta que sea justo ese d&#237;a) m&#225;s sus reemplazos. Tild&#225; <b>"Ver todas las OT activas"</b> para saltear ese filtro y ver todas, por ejemplo para empezar a cargar una que todav&#237;a no tiene nada. Las otras dos muestran las OT ocultas (m&#225;s abajo) y las ya fundidas (de solo lectura).' },
   { buscar: () => _moldeoTourBuscarEnFilas('button[onclick^="_moldeoAbrirAyudante"]', '#moldeo-th-ayudantes'), titulo: 'Ayudantes', texto: 'Toc&#225; <b>"+ Ayudante"</b> para agregar a alguien a la OT &mdash; elegilo de la lista que aparece y qued&#243; sumado. Es solo informativo: a diferencia de los responsables, un ayudante <b>no</b> suma a la producci&#243;n ni carga cantidad propia. Para sacarlo, toc&#225; la <span style="color:var(--muted);font-weight:700">&#10005;</span> gris que aparece al lado de su nombre una vez agregado.' },
   { buscar: () => _moldeoTourBuscarEnFilas('button[onclick^="_moldeoAbrirRespMoldeo"]', '#moldeo-th-resp'), titulo: 'Responsables de moldeo', texto: 'Una caja puede necesitar m&#225;s de una persona &mdash; toc&#225; <b>"+ Responsable"</b> para agregar a alguien. Una vez agregado, le aparecen sus <b>propias</b> casillas ah&#237; mismo para cargar cu&#225;ntas cajas sin cerrar y cerradas hizo &#233;l ese d&#237;a. La <span style="color:var(--muted);font-weight:700">&#10005;</span> gris al lado de su nombre lo saca de la OT.' },
   { buscar: () => _moldeoTourBuscarEnFilas('button[onclick^="_moldeoAbrirRespNoyos"]', '#moldeo-th-respnoyos'), titulo: 'Responsables de noyos', texto: 'Mismo sistema que responsables de moldeo: toc&#225; <b>"+ Responsable"</b> para agregar a alguien, le aparece su propia casilla para cargar cu&#225;ntos noyos hizo, y la <span style="color:var(--muted);font-weight:700">&#10005;</span> gris al lado de su nombre lo saca.' },
-  { buscar: _moldeoTourBuscarXOcultar, titulo: 'OT trabadas', texto: 'La <span style="color:#e74c3c;font-weight:700">&#10005;</span> roja de esta columna oculta una OT trabada en Programado que solo se puede corregir desde Access &mdash; es un parche local, solo afecta esta tabla. Se puede revertir tildando "Ver OT ocultas".' },
-  { sel: '#moldeo-guardar-btn', titulo: 'Guardar', texto: 'Manda de una vez todas las cantidades que hayas cargado en la tabla &mdash; cajas, noyos, de todos los responsables de todas las OT visibles.' },
+  { buscar: _moldeoTourBuscarXOcultar, titulo: 'OT trabadas', texto: 'La <span style="color:#e74c3c;font-weight:700">&#10005;</span> roja de esta columna oculta una OT trabada en Programado que solo se puede corregir desde Access &mdash; es un parche local (no toca Access), compartido con Pendiente de fundir: ocultarla acá tambi&eacute;n la saca de ah&iacute;. Se puede revertir tildando "Ver OT ocultas".' },
+  { sel: '#moldeo-guardar-btn', titulo: 'Guardar', texto: 'Manda de una vez todas las cantidades que hayas cargado en la tabla &mdash; cajas, noyos, de todos los responsables de todas las OT visibles. Si hay <b>conjuntos</b>, tambi&eacute;n guarda las piezas de cada una de sus OT (arrancan en 1: correg&iacute; las que no correspondan antes de guardar). M&aacute;s adelante te muestro c&oacute;mo funcionan.' },
+
+  // ── Conjuntos (cajas compartidas) ──────────────────────────────────────
+  // Todo lo que muestra este tramo es un EJEMPLO con datos falsos, armado en
+  // pantalla y desarmado al terminar el recorrido (ver _moldeoTourDemoTabla /
+  // _moldeoTourOTsFalsas): nunca se crea ni se guarda nada de verdad.
+  // modalConjunto abre el popup "Crear conjunto" con OT de ejemplo;
+  // conjuntoTildar lo deja con dos OT ya tildadas; demo arma la fila de
+  // conjunto de ejemplo en la tabla y en "Cargas del día"; conjunto indica si
+  // esa fila de ejemplo está desplegada o no.
+  { sel: '#moldeo-conjunto-abrir-btn', titulo: 'Conjuntos: cajas compartidas', texto: 'A veces una misma caja f&iacute;sica se llena con piezas de <b>varias OT distintas</b> (piezas chicas que aprovechan el molde juntas). Para esos casos existe el <b>conjunto</b>. Este bot&oacute;n abre el creador &mdash; te lo muestro a continuaci&oacute;n con datos de <b>ejemplo</b> que desaparecen al terminar el recorrido, no se guarda nada.' },
+  { modalConjunto: true, sel: '#moldeo-conjunto-filtro', titulo: '1. Buscar las OT', texto: 'El popup lista las OT activas (Inicial o Programado, sin las ocultas) igual que la tabla principal. Escrib&iacute; el n&uacute;mero, la pieza o el cliente para encontrar r&aacute;pido las que compartieron la caja.' },
+  { modalConjunto: true, conjuntoTildar: true, buscar: () => Array.from(document.querySelectorAll('#moldeo-conjunto-tbody tr[data-q]')).slice(0, 2), titulo: '2. Tild&aacute; las OT de la caja', texto: 'Marc&aacute; con el casillero las OT que comparten la misma caja &mdash; <b>m&iacute;nimo 2</b>. Ac&aacute; ya dejamos dos tildadas de ejemplo.' },
+  { modalConjunto: true, conjuntoTildar: true, sel: '#moldeo-conjunto-tbody .moldeo-piezas-stepper', titulo: '3. Piezas de cada OT', texto: 'Al tildar una OT se habilita su cantidad de <b>piezas en el conjunto</b>: cu&aacute;ntas piezas de <i>esa</i> OT entraron en la caja. Arranca en <b>1</b>; con los botones <b>&minus;</b> y <b>+</b> sub&iacute;s o baj&aacute;s de a una, o tipe&aacute;s el n&uacute;mero.' },
+  { modalConjunto: true, sel: '#moldeo-conjunto-guardar-btn', titulo: '4. Crear conjunto', texto: 'Crea el conjunto y guarda en el momento las piezas de hoy de cada OT. Las piezas se cargan a nombre del <b>primer responsable de moldeo</b> del conjunto &mdash; si todav&iacute;a no tiene ninguno, avisa y hay que agregarlo. El conjunto queda como plantilla: sigue apareciendo d&iacute;a a d&iacute;a (incluso si una de sus OT se reemplaza) mientras alguna siga en Inicial o Programado.' },
+  { demo: true, conjunto: 'colapsado', buscar: () => $id('moldeo-demo-header'), titulo: 'As&iacute; se ve en la tabla', texto: 'Cada conjunto es <b>una fila propia</b>, de color azul verdoso, que siempre est&aacute; visible: dice <b>"Conjunto"</b> y los n&uacute;meros de todas sus OT.<div style="border-left:4px solid #13a5a0;background:#13a5a022;padding:5px 8px;border-radius:4px;font-size:12px;margin:8px 0 0"><span style="font-size:10px">&#9654;</span> <b>Conjunto</b> <span style="color:var(--muted);font-size:11px">(caja compartida)</span><div><code>900001</code> <code>900002</code></div></div>' },
+  { demo: true, conjunto: 'colapsado', buscar: () => ['moldeo-demo-ayd', 'moldeo-demo-resp', 'moldeo-demo-noyos'].map($id), titulo: 'Un solo equipo para todo el conjunto', texto: 'En esa fila hay <b>un solo</b> ayudante, responsable de moldeo y responsable de noyos para <b>todo</b> el conjunto: lo que agregues o saques ah&iacute; se aplica a todas sus OT. Los noyos se cargan en esa misma fila.' },
+  { demo: true, conjunto: 'expandido', buscar: () => [$id('moldeo-demo-header'), ...document.querySelectorAll('#moldeo-ot-tbody tr[data-demo-sub]')], titulo: 'Desplegar cada OT', texto: 'Toc&aacute; el tri&aacute;ngulo o el n&uacute;mero para desplegar una fila por cada OT. <b>Solo hace falta desplegar</b> para cambiar las piezas de esa OT con los botones <b>&minus; / +</b> o para ver sus datos (pieza, cliente, entrega). Por defecto quedan escondidas adentro del conjunto.' },
+  { demo: true, conjunto: 'expandido', sel: '#moldeo-demo-cargas', titulo: 'C&oacute;mo queda guardado', texto: 'Al tocar <b>Guardar</b>, cada OT del conjunto queda como una entrada en <b>"Cargas del d&iacute;a"</b>, con sus piezas (<b>pzs &#128279;</b>). Adem&aacute;s cada entrada guarda una <b>foto fija</b> del conjunto de ese momento: qu&eacute; OT lo formaban y qui&eacute;nes eran sus ayudantes y responsables. Esa informaci&oacute;n queda resguardada aunque despu&eacute;s el conjunto se rompa o cambie su equipo.' },
+  { demo: true, conjunto: 'colapsado', buscar: () => $id('moldeo-demo-romper'), titulo: 'Romper un conjunto', texto: 'El <span style="color:#e74c3c;font-weight:700">&#10005; Romper</span> de la fila deshace el conjunto: las OT vuelven a ser filas independientes. <b>No se borra nada</b> de lo ya cargado &mdash; las entradas de "Cargas del d&iacute;a" siguen ah&iacute; con su foto (si hay que corregir una, se elimina y se vuelve a cargar desde la OT suelta).' },
+
   { sel: '#moldeo-sinot-abrir-btn', titulo: 'Agregar sin OT', texto: 'Para cuando todav&#237;a no hay una OT prolija para esa pieza: por urgencia (se empez&#243; a moldear antes de tramitarla), porque la OT existe pero no aparece en esta lista, o porque un jefe pidi&#243; el trabajo directamente, de forma informal. Tambi&#233;n sirve para moldeo directo a stock, sin pedido detr&#225;s. Sigamos para ver qu&#233; hay adentro.' },
   // Estos pasos necesitan el popup de "Agregar sin OT" abierto -- modal:true
-  // le avisa a _moldeoTourMostrarPaso que lo abra (con _moldeoAbrirSinOT, la
-  // misma funcion que el boton real) antes de resaltar nada ahi adentro, y
+  // le avisa a _moldeoTourSincronizarModal que lo abra (con _moldeoAbrirSinOT,
+  // la misma funcion que el boton real) antes de resaltar nada ahi adentro, y
   // que lo cierre de nuevo al salir de este tramo del recorrido. sinotModo
   // hace que ademas salte directo a esa pantalla del popup (como si se
   // hubiera tocado ese boton grande), asi el recorrido puede mostrar los
@@ -8585,46 +9786,175 @@ const _MOLDEO_TOUR_PASOS = [
   { modal: true, sinotModo: 'ot', sel: '#moldeo-sinot-ot', titulo: 'N&#250;mero de OT', texto: 'Ac&#225; va el n&#250;mero real de esa OT. Al escribirlo, aparecen los mismos responsables de moldeo, de noyos y ayudantes que ya viste en la tabla principal -- se agregan y cargan exactamente igual.' },
   { modal: true, sinotModo: 'informal', sel: '#moldeo-sinot-btn', titulo: 'Agregar', texto: 'Guarda todo lo cargado en este popup de una vez -- en el camino sin OT, una carga; en el camino con OT, una por cada responsable con cantidad puesta.' },
 ];
-let _moldeoTourPaso = 0;
 
-function _moldeoIniciarTour() {
-  _moldeoTourPaso = 0;
-  const overlay = $id('moldeo-tour-overlay');
+// ── Motor genérico de recorridos guiados ────────────────────────────────────
+// Nació con Cargar moldeo pero no tiene nada específico de esa pantalla --
+// cualquier lista de pasos {sel|buscar, titulo, texto} sirve. Lo pantalla-
+// específico (como sincronizar un modal, o dejar todo como estaba al salir)
+// se pasa por afuera como `opts.sincronizar`/`opts.onClose`, nunca hardcodeado
+// acá adentro. Los elementos del overlay (#tour-overlay/#tour-spot/#tour-tip)
+// viven una sola vez en el shell de la página, así que sirven para cualquier
+// pantalla sin duplicar markup.
+let _tourPasos = [];
+let _tourPaso = 0;
+let _tourSincronizar = null;
+let _tourOnClose = null;
+let _tourGen = 0;
+
+function _iniciarTour(pasos, opts) {
+  opts = opts || {};
+  _tourPasos = pasos;
+  _tourPaso = 0;
+  _tourSincronizar = opts.sincronizar || null;
+  _tourOnClose = opts.onClose || null;
+  const overlay = $id('tour-overlay');
   if (!overlay) return;
   overlay.classList.add('open');
-  window.addEventListener('resize', _moldeoTourReposicionar);
-  document.addEventListener('keydown', _moldeoTourTeclado);
-  _moldeoTourMostrarPaso();
+  window.addEventListener('resize', _tourReposicionar);
+  document.addEventListener('keydown', _tourTeclado);
+  _tourMostrarPaso();
 }
 
-function _moldeoTourTeclado(e) {
-  if (e.key === 'Escape') _moldeoTourCerrar();
-  else if (e.key === 'ArrowRight') _moldeoTourSiguiente();
-  else if (e.key === 'ArrowLeft') _moldeoTourAnterior();
+function _tourTeclado(e) {
+  if (e.key === 'Escape') _tourCerrar();
+  else if (e.key === 'ArrowRight') _tourSiguiente();
+  else if (e.key === 'ArrowLeft') _tourAnterior();
 }
 
-function _moldeoTourCerrar() {
-  const overlay = $id('moldeo-tour-overlay');
+function _tourCerrar() {
+  const overlay = $id('tour-overlay');
   if (overlay) overlay.classList.remove('open');
-  window.removeEventListener('resize', _moldeoTourReposicionar);
-  document.removeEventListener('keydown', _moldeoTourTeclado);
-  // Si se salio del recorrido en uno de los pasos de adentro de "Agregar sin
-  // OT", ese popup se abrio para explicarlo y hay que cerrarlo tambien.
-  if ($id('moldeo-sinot-modal')?.classList.contains('open')) _moldeoCerrarSinOT();
+  window.removeEventListener('resize', _tourReposicionar);
+  document.removeEventListener('keydown', _tourTeclado);
+  if (_tourOnClose) _tourOnClose();
 }
 
-function _moldeoTourSiguiente() {
-  if (_moldeoTourPaso >= _MOLDEO_TOUR_PASOS.length - 1) { _moldeoTourCerrar(); return; }
-  _moldeoTourPaso++;
-  _moldeoTourMostrarPaso();
+function _tourSiguiente() {
+  if (_tourPaso >= _tourPasos.length - 1) { _tourCerrar(); return; }
+  _tourPaso++;
+  _tourMostrarPaso();
 }
 
-function _moldeoTourAnterior() {
-  if (_moldeoTourPaso <= 0) return;
-  _moldeoTourPaso--;
-  _moldeoTourMostrarPaso();
+function _tourAnterior() {
+  if (_tourPaso <= 0) return;
+  _tourPaso--;
+  _tourMostrarPaso();
 }
 
+// Cada paso apunta a un elemento fijo (paso.sel, un id), lo busca en el
+// momento (paso.buscar, para casos como una fila cualquiera de una tabla,
+// sin id fijo), o -- si paso.buscar devuelve un array -- señala la unión de
+// varios elementos a la vez (ej. una fila de pedido MAS su fila desplegada
+// debajo, que son hermanas sin un contenedor propio que las una a las dos
+// solas). Siempre se normaliza a un array acá, así el resto del motor no
+// necesita saber cuál de los dos casos es.
+function _tourElemento(paso) {
+  const res = paso.buscar ? paso.buscar() : document.querySelector(paso.sel);
+  const arr = Array.isArray(res) ? res : [res];
+  return arr.filter(Boolean);
+}
+
+// Busca el elemento del paso actual, arma el globo de texto (una sola vez
+// por paso) y lo trae a la vista -- puede estar mas abajo de la tabla, y a
+// veces hay DOS contenedores con scroll de por medio (#main, que scrollea
+// vertical, y .tbl-wrap, que scrollea horizontal si la tabla no entra) que
+// no siempre terminan al mismo tiempo. En vez de adivinar un timeout fijo
+// (que quedaba mal calculado y el agujero terminaba apuntando a la posicion
+// vieja, de antes de que el scroll terminara), se sigue al elemento en cada
+// frame mientras dura el scroll -- ver _tourSeguir.
+//
+// opts.sincronizar puede devolver una promesa (ej. el modo calendario de
+// Pendiente de fundir pide datos la primera vez que se activa) -- se espera
+// ANTES de buscar el elemento, si no el paso buscaría en un calendario que
+// todavía dice "Cargando…" y se saltaría solo. _tourGen (capturado en `gen`
+// al arrancar, no al final) distingue cada llamado de los anteriores: si se
+// toca "Siguiente" rapido, antes de que el await o el loop de seguimiento del
+// paso viejo terminen, esos se cancelan solos en vez de seguir pisando la
+// posicion o el contenido del paso nuevo con los del viejo.
+async function _tourMostrarPaso() {
+  const paso = _tourPasos[_tourPaso];
+  const gen = ++_tourGen;
+  if (_tourSincronizar) await _tourSincronizar(paso);
+  if (gen !== _tourGen) return; // se pidió otro paso mientras esperábamos
+  const els = _tourElemento(paso);
+  if (!els.length) { _tourSiguiente(); return; }
+  _tourRenderTip(paso);
+  els[0].scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+  _tourSeguir(els, gen);
+}
+
+function _tourRenderTip(paso) {
+  const total = _tourPasos.length;
+  const esUltimo = _tourPaso === total - 1;
+  const tip = $id('tour-tip');
+  tip.innerHTML = `
+    <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Paso ${_tourPaso + 1} de ${total}</div>
+    <div style="font-weight:700;color:var(--accent);margin-bottom:6px;font-size:14px">${paso.titulo}</div>
+    <div style="font-size:13px;line-height:1.5;color:var(--fg);margin-bottom:12px">${paso.texto}</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+      <button class="page-btn" style="font-size:11px;padding:4px 8px" onclick="_tourCerrar()">Saltar</button>
+      <div style="display:flex;gap:6px">
+        ${_tourPaso > 0 ? '<button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="_tourAnterior()">&#8249; Atr&#225;s</button>' : ''}
+        <button class="page-btn" style="font-size:11px;padding:4px 10px;font-weight:600;background:var(--accent-dim);border-color:var(--accent);color:var(--accent)" onclick="_tourSiguiente()">${esUltimo ? 'Listo' : 'Siguiente &#8250;'}</button>
+      </div>
+    </div>`;
+}
+
+function _tourSeguir(els, gen) {
+  let quietos = 0, ticks = 0, prevTop = null, prevLeft = null;
+  const maxTicks = 180;
+  const tick = () => {
+    if (gen !== _tourGen) return; // paso viejo (se avanzo/retrocedio antes de terminar) -- se cancela solo
+    if (!$id('tour-overlay')?.classList.contains('open')) return; // se cerro mientras tanto
+    const r = _tourReposicionarSpot(els);
+    if (r.top === prevTop && r.left === prevLeft) quietos++;
+    else { quietos = 0; prevTop = r.top; prevLeft = r.left; }
+    ticks++;
+    if (quietos < 6 && ticks < maxTicks) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+// Une el rectángulo de uno o varios elementos (ver _tourElemento) en un solo
+// spotlight.
+function _tourReposicionarSpot(els) {
+  const rects = els.map(el => el.getBoundingClientRect());
+  const r = {
+    top: Math.min(...rects.map(x => x.top)),
+    left: Math.min(...rects.map(x => x.left)),
+    bottom: Math.max(...rects.map(x => x.bottom)),
+    right: Math.max(...rects.map(x => x.right)),
+  };
+  r.width = r.right - r.left;
+  r.height = r.bottom - r.top;
+  const pad = 6;
+  const spot = $id('tour-spot');
+  spot.style.top = (r.top - pad) + 'px';
+  spot.style.left = (r.left - pad) + 'px';
+  spot.style.width = (r.width + pad * 2) + 'px';
+  spot.style.height = (r.height + pad * 2) + 'px';
+
+  // Se posiciona debajo del elemento resaltado, salvo que no entre en la
+  // pantalla -- ahi pasa a mostrarse arriba. Mismo criterio para izquierda.
+  const tip = $id('tour-tip');
+  const tipW = tip.offsetWidth || 300, tipH = tip.offsetHeight || 140;
+  let tipTop = r.bottom + 14;
+  if (tipTop + tipH > window.innerHeight - 10) tipTop = Math.max(10, r.top - tipH - 14);
+  let left = r.left;
+  if (left + tipW > window.innerWidth - 10) left = window.innerWidth - tipW - 10;
+  if (left < 10) left = 10;
+  tip.style.top = tipTop + 'px';
+  tip.style.left = left + 'px';
+  return r;
+}
+
+function _tourReposicionar() {
+  if (!$id('tour-overlay')?.classList.contains('open')) return;
+  const els = _tourElemento(_tourPasos[_tourPaso]);
+  if (els.length) _tourReposicionarSpot(els);
+}
+
+// ── Recorrido de Cargar moldeo (específico de esta pantalla) ───────────────
 // Varios pasos apuntan a un boton/icono que vive DENTRO de una fila (uno
 // distinto por OT, sin id fijo) en vez de a un control unico de la pantalla
 // -- se busca el primero realmente visible en la tabla actual
@@ -8645,11 +9975,106 @@ function _moldeoTourBuscarXOcultar() {
   return _moldeoTourBuscarEnFilas('span[onclick^="_moldeoOcultarOT"]', '#moldeo-th-accion');
 }
 
-// Cada paso apunta a un elemento fijo (paso.sel, un id) o lo busca en el
-// momento (paso.buscar, para casos como la x roja de arriba que vive en una
-// fila cualquiera, no en un id fijo).
-function _moldeoTourElemento(paso) {
-  return paso.buscar ? paso.buscar() : document.querySelector(paso.sel);
+// ── Ejemplo con datos FALSOS para el tramo "Conjuntos" del recorrido ────────
+// Todo se arma solo en pantalla (nada toca la base ni las variables de estado
+// reales: no hay OT, conjunto, roster ni carga verdadera detrás) y se desarma
+// solo: al pasar a un paso que no lo necesita, al cerrar el recorrido
+// (_moldeoIniciarTour) o al reentrar a la pantalla (showMoldeo). Las filas de
+// ejemplo NO llevan data-q / data-conjunto-* (por eso ningún filtro, orden ni
+// Guardar las ve) ni ids reales -- los números 9000xx no existen.
+let _moldeoTourDemoActivo = false; // true mientras corre el recorrido: _moldeoGuardarConjunto no hace nada
+
+function _moldeoTourOTsFalsas() {
+  const base = { estadotrabajo: 'P', cliente_nombre: 'Cliente de ejemplo S.A.' };
+  return [
+    { ...base, iditemtrabajo: 900001, nombrepieza: 'Buje chico (ejemplo)',  fechaprevista: '2026-09-30' },
+    { ...base, iditemtrabajo: 900002, nombrepieza: 'Tapa lateral (ejemplo)', fechaprevista: '2026-10-02' },
+    { ...base, iditemtrabajo: 900003, nombrepieza: 'Brida (ejemplo)',        fechaprevista: '2026-10-05' },
+  ];
+}
+
+const _MOLDEO_DEMO_TAG = '<span style="font-size:10px;font-weight:700;color:#fff;background:#f39c12;border-radius:8px;padding:1px 7px;margin-left:6px">EJEMPLO</span>';
+
+// Fila del conjunto de ejemplo + sus dos OT (escondidas hasta "desplegar"):
+// mismo aspecto que las reales (ver _moldeoConjuntoHeaderHtml y la fila de
+// cada OT en showMoldeo), sin ningún handler que llame a la API.
+function _moldeoDemoFilasHtml() {
+  const c = _MOLDEO_CONJUNTO_COLOR;
+  const ots = [
+    { id: 900001, pieza: 'Buje chico (ejemplo)',  cod: 'EJ-01', ent: '30/09/2026' },
+    { id: 900002, pieza: 'Tapa lateral (ejemplo)', cod: 'EJ-02', ent: '02/10/2026' },
+  ];
+  const chip = n => `<span style="display:inline-flex;align-items:center;gap:3px;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:1px 6px;font-size:11px;white-space:nowrap">${n} <span style="opacity:.6;font-weight:700">&#10005;</span></span>`;
+  const quitar = '<span class="moldeo-resp-quitar">&#10005;</span>';
+  const btn = t => `<button class="page-btn" style="font-size:10px;padding:2px 7px">${t}</button>`;
+  const delConj = '<span style="font-size:11px;color:var(--muted)">&#8212; del conjunto</span>';
+  const header = `
+    <tr id="moldeo-demo-header" data-demo="1" style="background:${c}22;border-left:4px solid ${c}">
+      <td colspan="4" style="padding:8px 10px">
+        <span id="moldeo-demo-toggle" style="font-size:10px;margin-right:6px;display:inline-block;width:10px">&#9654;</span>
+        <b>Conjunto</b> <span style="color:var(--muted);font-size:11px">(caja compartida)</span>${_MOLDEO_DEMO_TAG}
+        <div style="margin-top:3px">${ots.map(o => `<code>${o.id}</code>`).join(' ')}</div>
+        <span id="moldeo-demo-romper" style="color:#e74c3c;font-weight:700;font-size:11px">&#10005; Romper</span>
+      </td>
+      <td id="moldeo-demo-ayd" class="moldeo-col-divide" style="min-width:150px"><div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center">${chip('Ayudante Ejemplo')}${btn('+ Ayudante')}</div></td>
+      <td id="moldeo-demo-resp" class="moldeo-td-resp"><div class="moldeo-resp-lista"><div style="display:flex;align-items:center;gap:4px;margin-bottom:3px"><span class="moldeo-resp-nombre">Operario Ejemplo 1</span>${quitar}</div>${btn('+ Responsable')}</div><div style="font-size:10px;color:var(--muted);margin-top:4px">Las piezas se cargan por OT, al desplegar</div></td>
+      <td id="moldeo-demo-noyos" class="moldeo-td-respnoyos moldeo-col-divide"><div class="moldeo-respnoyos-lista"><div style="display:flex;align-items:center;gap:4px;margin-bottom:3px"><span class="moldeo-resp-nombre">Operario Ejemplo 2</span><input class="inp moldeo-qty-input" type="number" placeholder="noyos" disabled>${quitar}</div>${btn('+ Responsable')}</div></td>
+      <td class="moldeo-col-divide"></td>
+    </tr>`;
+  const sub = ots.map(o => `
+    <tr data-demo="1" data-demo-sub="1" style="background:${c}22;border-left:4px solid ${c};display:none">
+      <td style="white-space:nowrap"><code>${o.id}</code> <span style="font-size:12px">&#128279;</span></td>
+      <td>${o.pieza}<div style="font-size:11px;color:var(--muted)">${o.cod}</div></td>
+      <td style="font-size:12px;color:var(--muted);white-space:nowrap">${o.ent}</td>
+      <td style="font-size:12px;color:var(--muted)">Cliente de ejemplo S.A.</td>
+      <td class="moldeo-col-divide" style="min-width:150px">${delConj}</td>
+      <td class="moldeo-td-resp">${_moldeoConjuntoBloqueMarkup(o.id, 0, 1)}</td>
+      <td class="moldeo-td-respnoyos moldeo-col-divide">${delConj}</td>
+      <td class="moldeo-col-divide"></td>
+    </tr>`).join('');
+  return header + sub;
+}
+
+// Dos entradas de "Cargas del día" de ejemplo, con la foto fija del conjunto.
+function _moldeoDemoCargasHtml() {
+  const foto = {
+    ots: [{ trabajo_id: 900001, nombrepieza: 'Buje chico (ejemplo)' }, { trabajo_id: 900002, nombrepieza: 'Tapa lateral (ejemplo)' }],
+    ayudantes: ['Ayudante Ejemplo'], responsables_moldeo: ['Operario Ejemplo 1'], responsables_noyos: ['Operario Ejemplo 2'],
+  };
+  const fila = (id, pieza) => `
+    <tr style="background:${_MOLDEO_CONJUNTO_COLOR}11">
+      <td>Operario Ejemplo 1</td><td>${id}</td>
+      <td>${pieza}${_moldeoConjuntoFotoHtml(foto)}</td>
+      <td style="font-size:12px;color:var(--muted)">Cliente de ejemplo S.A.</td>
+      <td style="text-align:right;color:var(--muted)">&#8212;</td>
+      <td style="text-align:right;font-weight:600">1 <span style="font-size:10px;font-weight:400;color:var(--muted)">pzs &#128279;</span></td>
+      <td style="text-align:right;color:var(--muted)">&#8212;</td><td></td>
+    </tr>`;
+  return `<div id="moldeo-demo-cargas" style="margin-bottom:10px">
+    <div style="font-size:11px;color:var(--muted);margin-bottom:4px">${_MOLDEO_DEMO_TAG.replace('margin-left:6px', 'margin-right:6px')} as&iacute; queda cada carga de un conjunto</div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Operario</th><th>OT</th><th>Pieza</th><th>Cliente</th><th style="text-align:right">Cajas sin cerrar</th><th style="text-align:right">Cajas cerradas</th><th style="text-align:right">Noyos</th><th></th></tr></thead>
+      <tbody>${fila(900001, 'Buje chico (ejemplo)')}${fila(900002, 'Tapa lateral (ejemplo)')}</tbody>
+    </table></div></div>`;
+}
+
+// Arma (una sola vez) el ejemplo en la tabla y en "Cargas del día" -- al
+// principio de la tabla, así se ve sin tener que scrollear entre las OT
+// reales -- y lo deja desplegado o no según el paso.
+function _moldeoTourDemoTabla(expandido) {
+  const tbody = $id('moldeo-ot-tbody');
+  if (tbody && !$id('moldeo-demo-header')) tbody.insertAdjacentHTML('afterbegin', _moldeoDemoFilasHtml());
+  const lista = $id('moldeo-lista');
+  if (lista && !$id('moldeo-demo-cargas')) lista.insertAdjacentHTML('beforebegin', _moldeoDemoCargasHtml());
+  document.querySelectorAll('#moldeo-ot-tbody tr[data-demo-sub]').forEach(tr => { tr.style.display = expandido ? '' : 'none'; });
+  const ic = $id('moldeo-demo-toggle');
+  if (ic) ic.innerHTML = expandido ? '&#9660;' : '&#9654;';
+}
+
+function _moldeoTourDemoLimpiar() {
+  document.querySelectorAll('#moldeo-ot-tbody tr[data-demo]').forEach(el => el.remove());
+  const c = $id('moldeo-demo-cargas');
+  if (c) c.remove();
 }
 
 // Abre o cierra el popup de "Agregar sin OT" segun lo que pida el paso
@@ -8660,6 +10085,24 @@ function _moldeoTourElemento(paso) {
 // asi que los campos quedan igual de limpios que si se hubiera abierto a
 // mano.
 function _moldeoTourSincronizarModal(paso) {
+  // Creador de conjuntos con OT de ejemplo (paso.modalConjunto): se abre/
+  // cierra segun el paso; paso.conjuntoTildar deja las dos primeras tildadas
+  // (como si el operario ya las hubiera elegido) para mostrar su cantidad.
+  const mc = $id('moldeo-conjunto-modal');
+  if (mc) {
+    const pideConj = !!paso.modalConjunto;
+    const abiertoConj = mc.classList.contains('open');
+    if (pideConj && !abiertoConj) _moldeoAbrirConjunto(_moldeoTourOTsFalsas());
+    else if (!pideConj && abiertoConj) _moldeoCerrarConjunto();
+    if (pideConj && paso.conjuntoTildar) {
+      Array.from(document.querySelectorAll('#moldeo-conjunto-tbody .moldeo-conjunto-check')).slice(0, 2)
+        .forEach(chk => { if (!chk.checked) { chk.checked = true; _moldeoConjuntoToggleFila(chk); } });
+    }
+  }
+  // Fila de conjunto de ejemplo en la tabla y en "Cargas del día".
+  if (paso.demo) _moldeoTourDemoTabla(paso.conjunto === 'expandido');
+  else _moldeoTourDemoLimpiar();
+
   const modal = $id('moldeo-sinot-modal');
   if (!modal) return;
   const debeEstarAbierto = !!paso.modal;
@@ -8677,106 +10120,26 @@ function _moldeoTourSincronizarModal(paso) {
   }
 }
 
-// Busca el elemento del paso actual, arma el globo de texto (una sola vez
-// por paso) y lo trae a la vista -- puede estar mas abajo de la tabla, y a
-// veces hay DOS contenedores con scroll de por medio (#main, que scrollea
-// vertical, y .tbl-wrap, que scrollea horizontal si la tabla no entra) que
-// no siempre terminan al mismo tiempo. En vez de adivinar un timeout fijo
-// (que quedaba mal calculado y el agujero terminaba apuntando a la posicion
-// vieja, de antes de que el scroll terminara), se sigue al elemento en cada
-// frame mientras dura el scroll -- ver _moldeoTourSeguir. _moldeoTourGen
-// distingue cada llamado a este paso de los anteriores: si se toca
-// "Siguiente" rapido (antes de que el loop de seguimiento del paso viejo
-// termine sus 500ms), ese loop viejo se cancela solo en vez de seguir
-// pisando la posicion del paso nuevo con la del viejo -- eso era lo que
-// hacia que a veces un paso (tipicamente uno de los ultimos, si se clickeo
-// rapido para llegar) terminara apuntando mal.
-let _moldeoTourGen = 0;
-
-function _moldeoTourMostrarPaso() {
-  const paso = _MOLDEO_TOUR_PASOS[_moldeoTourPaso];
-  _moldeoTourSincronizarModal(paso);
-  const el = _moldeoTourElemento(paso);
-  if (!el) { _moldeoTourSiguiente(); return; }
-  _moldeoTourGen++;
-  _moldeoTourRenderTip(paso);
-  el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
-  _moldeoTourSeguir(el, _moldeoTourGen);
-}
-
-function _moldeoTourRenderTip(paso) {
-  const total = _MOLDEO_TOUR_PASOS.length;
-  const esUltimo = _moldeoTourPaso === total - 1;
-  const tip = $id('moldeo-tour-tip');
-  tip.innerHTML = `
-    <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Paso ${_moldeoTourPaso + 1} de ${total}</div>
-    <div style="font-weight:700;color:var(--accent);margin-bottom:6px;font-size:14px">${paso.titulo}</div>
-    <div style="font-size:13px;line-height:1.5;color:var(--fg);margin-bottom:12px">${paso.texto}</div>
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-      <button class="page-btn" style="font-size:11px;padding:4px 8px" onclick="_moldeoTourCerrar()">Saltar</button>
-      <div style="display:flex;gap:6px">
-        ${_moldeoTourPaso > 0 ? '<button class="page-btn" style="font-size:11px;padding:4px 10px" onclick="_moldeoTourAnterior()">&#8249; Atr&#225;s</button>' : ''}
-        <button class="page-btn" style="font-size:11px;padding:4px 10px;font-weight:600;background:var(--accent-dim);border-color:var(--accent);color:var(--accent)" onclick="_moldeoTourSiguiente()">${esUltimo ? 'Listo' : 'Siguiente &#8250;'}</button>
-      </div>
-    </div>`;
-}
-
-// Reposiciona en cada requestAnimationFrame hasta que la posicion del
-// elemento deja de moverse (6 frames seguidos exactamente igual, ~100ms
-// quieto) en vez de parar a un tiempo fijo -- un scroll largo (ej. bajar
-// desde una fila del medio de la tabla hasta "Guardar") puede tardar mas que
-// cualquier numero fijo que se hubiera puesto, y cortar el seguimiento antes
-// de que el scroll termine de verdad dejaba el agujero congelado a mitad de
-// camino, a veces coincidiendo con la posicion de OTRO control cercano (asi
-// se veia "Guardar" apuntando en realidad a "Agregar sin OT", que esta
-// justo debajo). maxTicks es solo un techo de seguridad (unos 3s) por si
-// alguna vez la posicion nunca se asienta.
-function _moldeoTourSeguir(el, gen) {
-  let quietos = 0, ticks = 0, prevTop = null, prevLeft = null;
-  const maxTicks = 180;
-  const tick = () => {
-    if (gen !== _moldeoTourGen) return; // paso viejo (se avanzo/retrocedio antes de terminar) -- se cancela solo
-    if (!$id('moldeo-tour-overlay')?.classList.contains('open')) return; // se cerro mientras tanto
-    const r = _moldeoTourReposicionarSpot(el);
-    if (r.top === prevTop && r.left === prevLeft) quietos++;
-    else { quietos = 0; prevTop = r.top; prevLeft = r.left; }
-    ticks++;
-    if (quietos < 6 && ticks < maxTicks) requestAnimationFrame(tick);
-  };
-  requestAnimationFrame(tick);
-}
-
-function _moldeoTourReposicionarSpot(el) {
-  const r = el.getBoundingClientRect();
-  const pad = 6;
-  const spot = $id('moldeo-tour-spot');
-  spot.style.top = (r.top - pad) + 'px';
-  spot.style.left = (r.left - pad) + 'px';
-  spot.style.width = (r.width + pad * 2) + 'px';
-  spot.style.height = (r.height + pad * 2) + 'px';
-
-  // Se posiciona debajo del elemento resaltado, salvo que no entre en la
-  // pantalla -- ahi pasa a mostrarse arriba. Mismo criterio para izquierda.
-  const tip = $id('moldeo-tour-tip');
-  const tipW = tip.offsetWidth || 300, tipH = tip.offsetHeight || 140;
-  let top = r.bottom + 14;
-  if (top + tipH > window.innerHeight - 10) top = Math.max(10, r.top - tipH - 14);
-  let left = r.left;
-  if (left + tipW > window.innerWidth - 10) left = window.innerWidth - tipW - 10;
-  if (left < 10) left = 10;
-  tip.style.top = top + 'px';
-  tip.style.left = left + 'px';
-  return r;
-}
-
-function _moldeoTourReposicionar() {
-  if (!$id('moldeo-tour-overlay')?.classList.contains('open')) return;
-  const el = _moldeoTourElemento(_MOLDEO_TOUR_PASOS[_moldeoTourPaso]);
-  if (el) _moldeoTourReposicionarSpot(el);
+function _moldeoIniciarTour() {
+  _moldeoTourDemoActivo = true;
+  _iniciarTour(_MOLDEO_TOUR_PASOS, {
+    sincronizar: _moldeoTourSincronizarModal,
+    // Si se salio del recorrido en uno de los pasos de adentro de "Agregar
+    // sin OT" o del creador de conjuntos, esos popups se abrieron para
+    // explicarlos y hay que cerrarlos tambien -- y se desarma el ejemplo con
+    // datos falsos, así no queda nada de él en la pantalla.
+    onClose: () => {
+      if ($id('moldeo-sinot-modal')?.classList.contains('open')) _moldeoCerrarSinOT();
+      if ($id('moldeo-conjunto-modal')?.classList.contains('open')) _moldeoCerrarConjunto();
+      _moldeoTourDemoLimpiar();
+      _moldeoTourDemoActivo = false;
+    },
+  });
 }
 
 async function showMoldeo() {
   setMain('<div class="loading">Cargando...</div>');
+  _moldeoTourDemoActivo = false; // por si se salió a otra pantalla en pleno recorrido
 
   if (!_moldeoPersonal) {
     try { _moldeoPersonal = await api('/api/personal?meses=1'); }
@@ -8820,6 +10183,9 @@ async function showMoldeo() {
       (_moldeoResponsablesNoyos[a.trabajo_id] || (_moldeoResponsablesNoyos[a.trabajo_id] = [])).push(a);
     });
   } catch(e) { _moldeoResponsablesNoyos = {}; }
+  try { _moldeoGrupos = await api('/api/moldeo/grupos'); }
+  catch(e) { _moldeoGrupos = []; }
+  _moldeoGrupoPorOT = _moldeoArmarGrupoPorOT(_moldeoGrupos);
   _moldeoExistentes = {};
   _moldeoSortCol = null;
   _moldeoSortDir = 1;
@@ -8854,15 +10220,24 @@ async function showMoldeo() {
     const entregaISO = (r.fechaprevista || '').slice(0, 10);
     const entrega = entregaISO ? entregaISO.split('-').reverse().join('/') : '—';
     const oculta = !!_moldeoOcultas[r.iditemtrabajo];
-    const bgColor = _moldeoColorEstado(r.estadotrabajo);
+    const grupoInfo = _moldeoGrupoPorOT[r.iditemtrabajo];
+    // Un conjunto se pinta con el color de su grupo en vez del tinte por
+    // estado de siempre -- se distingue de un vistazo de una OT suelta (ver
+    // mismo criterio en _moldeoAplicarGrupoAFilas). Cada OT del conjunto
+    // sigue siendo una fila normal y completa, con su propia identidad --
+    // lo que representa al conjunto es la fila-header aparte (ver
+    // _moldeoConjuntoHeaderHtml), nunca esta fila.
+    const bgColor = grupoInfo ? _moldeoGrupoColor(grupoInfo.grupoId) + '22' : _moldeoColorEstado(r.estadotrabajo);
+    const grupoBorde = grupoInfo ? `;border-left:4px solid ${_moldeoGrupoColor(grupoInfo.grupoId)}` : '';
+    const grupoAttrs = grupoInfo ? ` data-conjunto-sub="${grupoInfo.grupoId}"` : '';
     return `
-    <tr id="moldeo-tr-${i}" style="background:${bgColor}" data-q="${q}" data-asignado="${todosLosIds.length ? '1' : '0'}"
+    <tr id="moldeo-tr-${i}" style="background:${bgColor}${grupoBorde}" data-q="${q}" data-asignado="${todosLosIds.length ? '1' : '0'}"
         data-op-ids="${todosLosIds.join(',')}" data-oculta="${oculta ? '1' : '0'}"
-        data-fundida="${esFundida ? '1' : '0'}"
+        data-fundida="${esFundida ? '1' : '0'}"${grupoAttrs}
         data-sort-ot="${r.iditemtrabajo}" data-sort-pieza="${_esc((r.nombrepieza||'').toLowerCase())}"
         data-sort-cliente="${_esc((r.cliente_nombre||'').toLowerCase())}" data-sort-entrega="${entregaISO||''}"
         onclick="_moldeoMarcarFilaActiva(this)">
-      <td style="white-space:nowrap"><code>${String(r.iditemtrabajo).padStart(6,'0')}</code>${esFundida ? ' <span style="font-size:10px;color:var(--muted)">Fundido</span>' : ''}${r.estadotrabajo === 'I' ? ' <span style="font-size:10px;color:var(--muted)">Inicial</span>' : ''}</td>
+      <td style="white-space:nowrap"><code>${String(r.iditemtrabajo).padStart(6,'0')}</code>${esFundida ? ' <span style="font-size:10px;color:var(--muted)">Fundido</span>' : ''}${r.estadotrabajo === 'I' ? ' <span style="font-size:10px;color:var(--muted)">Inicial</span>' : ''}<span id="moldeo-ot-badge-${i}">${_moldeoConjuntoBadgeHtml(r.iditemtrabajo)}</span></td>
       <td>${r.nombrepieza || '—'}<div style="font-size:11px;color:var(--muted)">${r.codigo_pieza || ''}</div></td>
       <td style="font-size:12px;color:var(--muted);white-space:nowrap">${entrega}</td>
       <td style="font-size:12px;color:var(--muted)">${r.cliente_nombre || '—'}</td>
@@ -8912,6 +10287,7 @@ async function showMoldeo() {
         <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer">
           <input type="checkbox" id="moldeo-ver-fundidas" onchange="_moldeoAplicarFiltro()"> Ver fundidas
         </label>
+        <button class="page-btn" id="moldeo-imprimir-ocultas-btn" style="display:none;font-size:11px;padding:3px 10px" onclick="_moldeoImprimirOcultas()">&#128438; Imprimir lista de OT ocultadas</button>
       </div>
       <div class="tbl-wrap" style="margin-bottom:10px">
         <table>
@@ -8936,11 +10312,15 @@ async function showMoldeo() {
     <div class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:6px">
         <div style="font-size:12px;font-weight:600;color:var(--fg)">Cargas del d&#237;a</div>
-        <button class="page-btn" id="moldeo-sinot-abrir-btn" style="font-size:11px;padding:4px 10px" onclick="_moldeoAbrirSinOT()">+ Agregar sin OT</button>
+        <div style="display:flex;gap:8px">
+          <button class="page-btn" id="moldeo-conjunto-abrir-btn" style="font-size:11px;padding:4px 10px" onclick="_moldeoAbrirConjunto()">&#128279; Crear conjunto</button>
+          <button class="page-btn" id="moldeo-sinot-abrir-btn" style="font-size:11px;padding:4px 10px" onclick="_moldeoAbrirSinOT()">+ Agregar sin OT</button>
+        </div>
       </div>
       <div id="moldeo-lista"><div class="loading" style="padding:8px 0">Cargando...</div></div>
     </div>
   `);
+  _moldeoReagruparConjuntos();
   _moldeoCargarExistentes();
 }
 
@@ -8995,6 +10375,7 @@ function _moldeoOrdenarPor(col) {
   filas.forEach(tr => tbody.appendChild(tr));
   const vacio = $id('moldeo-ot-vacio');
   if (vacio) tbody.appendChild(vacio);
+  _moldeoReagruparConjuntos();
 
   document.querySelectorAll('.moldeo-sort-ico').forEach(el => {
     el.textContent = el.dataset.col === _moldeoSortCol ? (_moldeoSortDir === 1 ? ' ▲' : ' ▼') : '';
@@ -9008,7 +10389,7 @@ function _moldeoAccionCellHtml(trabajoId, oculta) {
 }
 
 async function _moldeoOcultarOT(trabajoId) {
-  if (!confirm('¿Ocultar la OT ' + String(trabajoId).padStart(6,'0') + ' de esta tabla?\n\nEs un parche local para OT trabadas en Programado -- solo afecta esta pantalla, no Pendiente de fundir ni el resto de la app. Se puede revertir tildando "Ver OT ocultas".')) return;
+  if (!confirm('¿Ocultar la OT ' + String(trabajoId).padStart(6,'0') + ' de esta tabla?\n\nEs un parche local para OT trabadas en Programado -- no toca Access, pero se comparte con Pendiente de fundir (ocultarla acá también la saca de ahí). Si alguien la corrige en Access y cambia de estado, se vuelve a mostrar sola -- también se puede revertir a mano tildando "Ver OT ocultas".')) return;
   try { await api('/api/trabajos_ocultos/' + trabajoId, { method: 'POST' }); }
   catch(e) { alert('No se pudo ocultar: ' + e.message); return; }
   _moldeoOcultas[trabajoId] = true;
@@ -9032,6 +10413,62 @@ function _moldeoActualizarFilaOculta(trabajoId, oculta) {
   _moldeoAplicarFiltro();
 }
 
+// Trae /api/trabajos_ocultos de nuevo (no _moldeoOcultas, que solo guarda un
+// booleano) porque acá hace falta quién y cuándo ocultó cada una -- es la
+// lista que alguien se lleva a Access para corregir esas OT trabadas.
+async function _moldeoImprimirOcultas() {
+  let ocultas;
+  try { ocultas = await api('/api/trabajos_ocultos'); }
+  catch(e) { alert('No se pudo cargar la lista de OT ocultas: ' + e.message); return; }
+  if (!ocultas.length) { alert('No hay OT ocultas para imprimir.'); return; }
+
+  const porId = {};
+  (_moldeoTodasOTs || []).forEach(r => { porId[r.iditemtrabajo] = r; });
+
+  const filas = ocultas
+    .slice()
+    .sort((a, b) => a.trabajo_id - b.trabajo_id)
+    .map(o => {
+      const r = porId[o.trabajo_id] || {};
+      return `<tr>
+        <td><code>${String(o.trabajo_id).padStart(6,'0')}</code></td>
+        <td>${_esc(r.nombrepieza || '—')}</td>
+        <td>${_esc(r.cliente_nombre || '—')}</td>
+        <td>${_OT_ESTADO[r.estadotrabajo] || r.estadotrabajo || '—'}</td>
+        <td style="text-align:right;font-weight:600">${_cantidadPedidoProducidaHtml(o.cantidadpedida, o.cantidad_producida_cadena)}</td>
+      </tr>`;
+    }).join('');
+
+  const now = new Date().toLocaleString('es-AR');
+  const w = window.open('', '_blank', 'width=860,height=680,scrollbars=yes');
+  if (!w) { alert('Permitir ventanas emergentes para usar esta función.'); return; }
+  w.document.open();
+  w.document.write(`<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<title>OT ocultas — Cargar moldeo</title>
+<style>
+:root{--red:#ef5350;--green:#66bb6a;--accent:#1e88e5}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;font-size:12px;color:#111;background:#fff;padding:24px 28px}
+h1{font-size:17px;font-weight:700;color:#333;margin-bottom:3px}
+.period{font-size:11px;color:#888;margin-bottom:20px}
+table{border-collapse:collapse;width:100%;font-size:12px}
+th{text-align:left;padding:5px 8px;background:#f2f2f2;border-bottom:2px solid #ccc;font-size:10px;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}
+td{padding:5px 8px;border-bottom:1px solid #eee;vertical-align:middle}
+code{font-family:ui-monospace,monospace}
+@media print{ body{padding:0} @page{margin:15mm;size:A4} }
+</style></head><body>
+<h1>OT ocultas &mdash; Cargar moldeo</h1>
+<div class="period">${ocultas.length} OT &mdash; impreso ${now}</div>
+<table>
+<thead><tr><th>OT</th><th>Pieza</th><th>Cliente</th><th>Estado</th><th style="text-align:right">Cant. pedido / producida</th></tr></thead>
+<tbody>${filas}</tbody>
+</table>
+</body></html>`);
+  w.document.close();
+  setTimeout(() => w.print(), 500);
+}
+
 // Sin busqueda ni filtro de operario: solo se ven las OT ya asignadas a
 // alguien (lista corta, las que estan en curso). El combo "Operario" filtra
 // a las filas de esa persona -- no participa del guardado, eso lo decide el
@@ -9041,15 +10478,15 @@ function _moldeoActualizarFilaOculta(trabajoId, oculta) {
 // en cuanto el buscador queda vacio de nuevo. Una OT oculta o fundida nunca
 // se ve salvo que se tilde su checkbox correspondiente, sin importar los
 // demas filtros.
-// Una OT "tiene carga" ese día si algún operario (cualquiera de los dos
-// roles, moldeo o noyos) ya le cargó cantidad de cajas, cajas sin cerrar o
-// cantidad de noyos -- _moldeoExistentes se llena en _moldeoCargarExistentes
-// (por fecha), así que este chequeo siempre está al día con la fecha elegida.
+// Una OT "tiene carga" si alguna vez se le cargó cantidad de cajas, cajas sin
+// cerrar o cantidad de noyos -- a propósito NO se mira solo el día elegido
+// (_moldeoExistentes), porque una OT que se sigue cargando día a día no
+// tiene por qué desaparecer de la vista por defecto justo el día que todavía
+// no se cargó nada (ver _moldeoOtsConCarga, que trae /con_carga sin filtrar
+// por fecha). Una OT que ya terminó de todos modos no se acumula acá para
+// siempre sin límite -- queda oculta por el filtro aparte "Ver fundidas".
 function _moldeoOtTieneCarga(trabajoId) {
-  const porOperario = _moldeoExistentes[trabajoId];
-  if (!porOperario) return false;
-  return Object.values(porOperario).some(e =>
-    (e.cantidad_cajas || 0) > 0 || (e.cajas_sin_cerrar || 0) > 0 || (e.cantidad_noyos || 0) > 0);
+  return _moldeoOtsConCarga.has(trabajoId);
 }
 
 // OT que hay que mostrar por defecto: las que tienen carga, MAS toda la
@@ -9084,6 +10521,8 @@ function _moldeoAplicarFiltro() {
   const verTodas = $id('moldeo-ver-todas')?.checked || false;
   const verOcultas = $id('moldeo-ver-ocultas')?.checked || false;
   const verFundidas = $id('moldeo-ver-fundidas')?.checked || false;
+  const btnImprimirOcultas = $id('moldeo-imprimir-ocultas-btn');
+  if (btnImprimirOcultas) btnImprimirOcultas.style.display = verOcultas ? '' : 'none';
   const otsVisiblesPorCarga = _moldeoOtsVisiblesPorCarga();
   let visibles = 0;
   document.querySelectorAll('#moldeo-ot-tbody tr[data-q]').forEach(tr => {
@@ -9094,8 +10533,47 @@ function _moldeoAplicarFiltro() {
     else if (operarioFiltro) mostrar = (tr.dataset.opIds||'').split(',').includes(operarioFiltro);
     else if (verTodas) mostrar = true;
     else mostrar = otsVisiblesPorCarga.has(Number(tr.dataset.sortOt));
+    // Toda OT de un conjunto (data-conjunto-sub, ninguna excluida) queda
+    // escondida por defecto -- la fila-header aparte es la que siempre se
+    // ve (ver _moldeoConjuntoHeaderHtml), como el modo "por pedido" de
+    // Trabajos. "Por defecto" tiene que ganarle a otsVisiblesPorCarga (casi
+    // siempre true para un miembro con piezas ya cargadas, que es el caso
+    // normal; si no le ganara, el conjunto nunca se veria colapsado en el
+    // uso real). Solo una busqueda de texto EXPLICITA despliega el conjunto
+    // entero, para que la OT que se busca no desaparezca sin explicacion;
+    // el filtro por operario NO (el roster vive en la fila-header, que ya
+    // se filtra sola más abajo) y "ver todas" respeta el estado de
+    // despliegue tal cual esta (no lo pisa ni lo fuerza) y listo.
+    const grupoSub = tr.dataset.conjuntoSub;
+    if (grupoSub) {
+      const busquedaExplicita = !!q;
+      if (busquedaExplicita && mostrar) {
+        if (!_moldeoConjuntoExpandido[grupoSub]) {
+          _moldeoConjuntoExpandido[grupoSub] = true;
+          const icon = document.querySelector('.moldeo-conjunto-toggle[data-grupo-id="' + grupoSub + '"]');
+          if (icon) icon.innerHTML = '&#9660;';
+        }
+      } else if (!busquedaExplicita) {
+        mostrar = !!_moldeoConjuntoExpandido[grupoSub];
+      }
+    }
     tr.style.display = mostrar ? '' : 'none';
     if (mostrar) visibles++;
+  });
+  // La fila-header de cada conjunto se ve siempre, salvo que el buscador o
+  // el filtro por operario apunten a otra cosa: con búsqueda, si alguna de
+  // sus OT coincide; con operario, si está en el roster compartido del
+  // conjunto (data-op-ids de la propia fila).
+  document.querySelectorAll('#moldeo-ot-tbody tr[data-conjunto-header]').forEach(h => {
+    let mostrarH = true;
+    if (q) {
+      mostrarH = Array.from(document.querySelectorAll('#moldeo-ot-tbody tr[data-conjunto-sub="' + h.dataset.conjuntoHeader + '"]'))
+        .some(m => m.dataset.q.includes(q));
+    } else if (operarioFiltro) {
+      mostrarH = (h.dataset.opIds || '').split(',').includes(operarioFiltro);
+    }
+    h.style.display = mostrarH ? '' : 'none';
+    if (mostrarH) visibles++;
   });
   const vacio = $id('moldeo-ot-vacio');
   if (vacio) vacio.style.display = visibles ? 'none' : '';
@@ -9135,6 +10613,9 @@ function _moldeoCambiarOperarioFiltro(delta) {
 // llenan cantidades.
 async function _moldeoCargarExistentes() {
   _moldeoExistentes = {};
+  _moldeoConjuntoExistentes = {};
+  try { _moldeoOtsConCarga = new Set(await api('/api/produccion_moldeo/con_carga')); }
+  catch(e) { /* deja el set anterior si falla */ }
   const fecha = $id('moldeo-fecha')?.value;
   if (fecha) {
     let rows = [];
@@ -9147,8 +10628,16 @@ async function _moldeoCargarExistentes() {
     // registro) -- por eso alcanza con una sola entrada por operario_id, leida
     // por las dos celdas. La API viene ORDER BY id DESC, asi que la primera
     // que aparece para cada (trabajo_id, operario_id) ya es la mas reciente.
+    // Las filas de un conjunto (grupo_id no nulo) van aparte -- su unidad es
+    // piezas por OT y dia, no cajas por operario (ver _moldeoConjuntoBloqueHtml).
     rows.forEach(r => {
       if (!r.trabajo_id) return;
+      if (r.grupo_id) {
+        if (!_moldeoConjuntoExistentes[r.trabajo_id]) {
+          _moldeoConjuntoExistentes[r.trabajo_id] = { id: r.id, operario_id: r.operario_id, cantidad_piezas: r.cantidad_piezas };
+        }
+        return;
+      }
       const porOT = _moldeoExistentes[r.trabajo_id] || (_moldeoExistentes[r.trabajo_id] = {});
       if (!porOT[r.operario_id]) {
         porOT[r.operario_id] = { id: r.id, cantidad_cajas: r.cantidad_cajas, cajas_sin_cerrar: r.cajas_sin_cerrar, cantidad_noyos: r.cantidad_noyos, operario_nombre: r.operario_nombre };
@@ -9161,13 +10650,26 @@ async function _moldeoCargarExistentes() {
     if (celdaResp) celdaResp.innerHTML = _moldeoRespMoldeoCeldaHtml(r.iditemtrabajo, _moldeoResponsablesMoldeo[r.iditemtrabajo], esFundida, r);
     const celdaNoyos = $id('moldeo-respnoyos-'+i);
     if (celdaNoyos) celdaNoyos.innerHTML = _moldeoRespNoyosCeldaHtml(r.iditemtrabajo, _moldeoResponsablesNoyos[r.iditemtrabajo], esFundida);
+    // También la de ayudantes: al armar o romper un conjunto cambia entre
+    // "roster propio" y "— del conjunto" (las otras dos ya se refrescan acá).
+    const celdaAyd = $id('moldeo-ayd-'+i);
+    if (celdaAyd) celdaAyd.innerHTML = _moldeoAyudantesCeldaHtml(r.iditemtrabajo, _moldeoAyudantes[r.iditemtrabajo], esFundida);
+  });
+  // Las cantidades de noyos de un conjunto se cargan en su fila-header:
+  // prellenarlas para la fecha elegida igual que las de cualquier fila.
+  document.querySelectorAll('#moldeo-ot-tbody tr[data-conjunto-header]').forEach(h => {
+    _moldeoRefrescarHeaderConjunto(h.dataset.conjuntoHeader, 'noyos');
   });
   _moldeoAplicarFiltro();
   _moldeoLoadLista();
 }
 
 // ── Ayudantes de una OT (fijos, N a N -- ver _trabajo_ayudante) ────────────────
-function _moldeoAyudantesCeldaHtml(trabajoId, lista, esFundida) {
+// comoHeader (solo la fila-header de un conjunto lo pasa en true): una OT
+// que es de un conjunto NO muestra su propio roster (lo tiene el conjunto,
+// ver _moldeoMiembrosDe), salvo que se pida explícitamente el del header.
+function _moldeoAyudantesCeldaHtml(trabajoId, lista, esFundida, comoHeader) {
+  if (_moldeoGrupoPorOT[trabajoId] && !comoHeader) return '<span style="font-size:11px;color:var(--muted)">&#8212; del conjunto</span>';
   const chips = (lista || []).map(a => `
     <span style="display:inline-flex;align-items:center;gap:3px;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:1px 6px;font-size:11px;white-space:nowrap">
       ${a.operario_nombre}${esFundida ? '' : `
@@ -9180,7 +10682,7 @@ function _moldeoAyudantesCeldaHtml(trabajoId, lista, esFundida) {
 function _moldeoAbrirAyudante(trabajoId) {
   _moldeoAyudanteTrabajoId = trabajoId;
   const moldeadores = (_moldeoPersonal || []).filter(p => p.sector < 2);
-  const yaAsignados = new Set((_moldeoAyudantes[trabajoId] || []).map(a => String(a.operario_id)));
+  const yaAsignados = new Set(_moldeoRosterDe(_moldeoAyudantes, trabajoId).map(a => String(a.operario_id)));
   const sel = $id('moldeo-ayudante-operario');
   if (sel) {
     sel.innerHTML = ['<option value="">Elegir operario&#8230;</option>',
@@ -9201,25 +10703,17 @@ async function _moldeoGuardarAyudante() {
   const trabajoId = _moldeoAyudanteTrabajoId;
   const operarioId = $id('moldeo-ayudante-operario')?.value;
   if (!trabajoId || !operarioId) { alert('Elegí un operario.'); return; }
-  let lista;
-  try {
-    lista = await api('/api/trabajos/' + trabajoId + '/ayudantes', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ operario_id: Number(operarioId) }),
-    });
-  } catch(e) { alert('No se pudo agregar: ' + e.message); return; }
-  _moldeoAyudantes[trabajoId] = lista;
-  _moldeoRefrescarCeldaAyudantes(trabajoId);
+  const res = await _moldeoRosterAplicar(trabajoId, 'ayudantes', Number(operarioId), _moldeoAyudantes, 'add');
+  if (res.falla) alert('No se pudo agregar en ' + res.falla + ' OT: ' + res.error);
+  _moldeoRefrescarRoster('ayd', trabajoId, res.miembros);
   _moldeoSinOTRefrescarAyudantes(trabajoId);
   _moldeoCerrarAyudante();
 }
 
 async function _moldeoQuitarAyudante(trabajoId, operarioId) {
-  try {
-    await api('/api/trabajos/' + trabajoId + '/ayudantes/' + operarioId, { method: 'DELETE' });
-  } catch(e) { alert('No se pudo quitar: ' + e.message); return; }
-  _moldeoAyudantes[trabajoId] = (_moldeoAyudantes[trabajoId] || []).filter(a => a.operario_id !== operarioId);
-  _moldeoRefrescarCeldaAyudantes(trabajoId);
+  const res = await _moldeoRosterAplicar(trabajoId, 'ayudantes', operarioId, _moldeoAyudantes, 'del');
+  if (res.falla) alert('No se pudo quitar en ' + res.falla + ' OT: ' + res.error);
+  _moldeoRefrescarRoster('ayd', trabajoId, res.miembros);
   _moldeoSinOTRefrescarAyudantes(trabajoId);
 }
 
@@ -9241,7 +10735,86 @@ function _moldeoRefrescarCeldaAyudantes(trabajoId) {
 // OT Fundida no usa este roster -- muestra de solo lectura el responsable que
 // confirmo Access (responsable_confirmado), que es single-valued y un campo
 // totalmente distinto.
-function _moldeoRespMoldeoCeldaHtml(trabajoId, lista, esFundida, r) {
+// Conjunto (caja compartida, ver _moldeo_grupo/_moldeo_grupo_ot): badge chico
+// en la celda de OT, con las OT hermanas en el tooltip -- se identifica el
+// grupo sin importar el orden de la tabla (un borde "alrededor del bloque"
+// se rompe apenas se ordena por otra columna). El botón para romper el
+// conjunto vive en su fila-header (ver _moldeoConjuntoHeaderHtml), no acá:
+// dos ✕ rojas en la misma fila (esta y la de "ocultar OT" de la columna
+// Acción) se confundían entre sí.
+function _moldeoConjuntoBadgeHtml(trabajoId) {
+  const info = _moldeoGrupoPorOT[trabajoId];
+  if (!info) return '';
+  const hermanos = info.siblingIds.map(id => String(id).padStart(6, '0')).join(', ');
+  return ` <span title="Conjunto (caja compartida) con OT ${_esc(hermanos)}" style="cursor:help;font-size:12px">&#128279;</span>`;
+}
+
+// Romper un conjunto: baja logica en el backend (_moldeo_grupo.activo=0),
+// las OT vuelven a ser filas independientes -- ver GET /api/moldeo/grupos,
+// que ya no lo trae, y _moldeoAplicarGrupoAFilas, que limpia borde/badge/
+// triangulo/atributos de sus ex-miembros en cuanto se refresca. Las piezas
+// ya cargadas para este conjunto en dias anteriores no se tocan, quedan
+// como historial (mismo criterio que _moldeo_validar_body en el backend).
+async function _moldeoRomperConjunto(grupoId) {
+  if (!confirm('¿Romper este conjunto?\n\nLas OT vuelven a ser independientes -- dejan de compartir caja y de aparecer agrupadas. Las piezas ya cargadas en días anteriores para este conjunto no se borran, quedan como historial.')) return;
+  try { await api('/api/moldeo/grupos/' + grupoId, { method: 'DELETE' }); }
+  catch(e) { alert('No se pudo romper el conjunto: ' + e.message); return; }
+  delete _moldeoConjuntoExpandido[grupoId];
+  await _moldeoRefrescarGrupos();
+  await _moldeoCargarExistentes();
+}
+
+// Input de "piezas hoy" del conjunto -- separado del roster de responsables
+// de moldeo (quien trabajó la OT no cambia), una sola cantidad por OT y por
+// día (no por responsable). Prellenado desde _moldeoConjuntoExistentes (ver
+// _moldeoCargarExistentes).
+function _moldeoConjuntoBloqueHtml(trabajoId) {
+  const info = _moldeoGrupoPorOT[trabajoId];
+  if (!info) return '';
+  const ex = _moldeoConjuntoExistentes[trabajoId];
+  return _moldeoConjuntoBloqueMarkup(trabajoId, info.grupoId, ex && ex.cantidad_piezas ? ex.cantidad_piezas : 1);
+}
+
+// Solo el markup (sin leer estado), aparte para que el ejemplo del recorrido
+// guiado (ver _moldeoDemoFilasHtml) se vea exactamente igual que el real.
+function _moldeoConjuntoBloqueMarkup(trabajoId, grupoId, valor) {
+  return `
+    <div class="moldeo-conjunto-bloque" style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--border);display:flex;align-items:center;gap:6px">
+      <span style="font-size:11px;color:var(--muted)">Piezas en el conjunto</span>
+      <div class="moldeo-piezas-stepper" style="display:flex;align-items:center;gap:3px">
+        <button type="button" class="page-btn moldeo-paso" onclick="event.stopPropagation();_moldeoPiezasPaso(this,-1)" title="Restar 1">&#8722;</button>
+        <input class="inp moldeo-paso moldeo-piezas-conjunto-input" type="number" min="0" step="1"
+          data-trabajo-id="${trabajoId}" data-grupo-id="${grupoId}"
+          value="${valor}">
+        <button type="button" class="page-btn moldeo-paso" onclick="event.stopPropagation();_moldeoPiezasPaso(this,1)" title="Sumar 1">+</button>
+      </div>
+    </div>`;
+}
+
+// Suma o resta 1 al input de piezas que está junto al botón (nunca baja de
+// 0; un campo vacío cuenta como 0). Sirve tanto para la fila de cada OT del
+// conjunto como para la ventana "Crear conjunto".
+function _moldeoPiezasPaso(btn, delta) {
+  const inp = btn.parentElement.querySelector('input');
+  if (!inp || inp.disabled) return;
+  inp.value = Math.max(0, (Number(inp.value) || 0) + delta);
+}
+
+function _moldeoRespMoldeoCeldaHtml(trabajoId, lista, esFundida, r, comoHeader) {
+  // Conjunto: el roster de responsables de moldeo es UNO para todas sus OT y
+  // vive en la fila-header (sin cantidades de cajas -- la producción del
+  // conjunto se carga en piezas, por OT, ver _moldeoConjuntoBloqueHtml). La
+  // fila de cada OT solo muestra ese input de piezas.
+  if (_moldeoGrupoPorOT[trabajoId]) {
+    if (!comoHeader) return _moldeoConjuntoBloqueHtml(trabajoId);
+    const chips = (lista || []).map(a => `
+      <div style="display:flex;align-items:center;gap:4px;margin-bottom:3px">
+        <span class="moldeo-resp-nombre" title="${_esc(a.operario_nombre||'')}">${_esc(a.operario_nombre||'')}</span>
+        <span class="moldeo-resp-quitar" onclick="_moldeoQuitarRespMoldeo(${trabajoId},${a.operario_id})" title="Quitar de todo el conjunto">&#10005;</span>
+      </div>`).join('');
+    return `<div class="moldeo-resp-lista">${chips}<button class="page-btn" style="font-size:10px;padding:2px 7px" onclick="_moldeoAbrirRespMoldeo(${trabajoId})">+ Responsable</button></div>`
+      + `<div style="font-size:10px;color:var(--muted);margin-top:4px">Las piezas se cargan por OT, al desplegar</div>`;
+  }
   if (esFundida) {
     return r.responsable_confirmado
       ? `<span style="font-size:12px">${r.responsable_confirmado} &#10003;</span>`
@@ -9278,7 +10851,7 @@ function _moldeoRespMoldeoCeldaHtml(trabajoId, lista, esFundida, r) {
 function _moldeoAbrirRespMoldeo(trabajoId) {
   _moldeoRespMoldeoTrabajoId = trabajoId;
   const moldeadores = (_moldeoPersonal || []).filter(p => p.sector < 2);
-  const yaAsignados = new Set((_moldeoResponsablesMoldeo[trabajoId] || []).map(a => String(a.operario_id)));
+  const yaAsignados = new Set(_moldeoRosterDe(_moldeoResponsablesMoldeo, trabajoId).map(a => String(a.operario_id)));
   const sel = $id('moldeo-respmoldeo-operario');
   if (sel) {
     sel.innerHTML = ['<option value="">Elegir operario&#8230;</option>',
@@ -9299,25 +10872,17 @@ async function _moldeoGuardarRespMoldeo() {
   const trabajoId = _moldeoRespMoldeoTrabajoId;
   const operarioId = $id('moldeo-respmoldeo-operario')?.value;
   if (!trabajoId || !operarioId) { alert('Elegí un operario.'); return; }
-  let lista;
-  try {
-    lista = await api('/api/trabajos/' + trabajoId + '/responsables_moldeo', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ operario_id: Number(operarioId) }),
-    });
-  } catch(e) { alert('No se pudo agregar: ' + e.message); return; }
-  _moldeoResponsablesMoldeo[trabajoId] = lista;
-  _moldeoRefrescarCeldaRespMoldeo(trabajoId);
+  const res = await _moldeoRosterAplicar(trabajoId, 'responsables_moldeo', Number(operarioId), _moldeoResponsablesMoldeo, 'add');
+  if (res.falla) alert('No se pudo agregar en ' + res.falla + ' OT: ' + res.error);
+  _moldeoRefrescarRoster('resp', trabajoId, res.miembros);
   _moldeoSinOTRefrescarResp(trabajoId);
   _moldeoCerrarRespMoldeo();
 }
 
 async function _moldeoQuitarRespMoldeo(trabajoId, operarioId) {
-  try {
-    await api('/api/trabajos/' + trabajoId + '/responsables_moldeo/' + operarioId, { method: 'DELETE' });
-  } catch(e) { alert('No se pudo quitar: ' + e.message); return; }
-  _moldeoResponsablesMoldeo[trabajoId] = (_moldeoResponsablesMoldeo[trabajoId] || []).filter(a => a.operario_id !== operarioId);
-  _moldeoRefrescarCeldaRespMoldeo(trabajoId);
+  const res = await _moldeoRosterAplicar(trabajoId, 'responsables_moldeo', operarioId, _moldeoResponsablesMoldeo, 'del');
+  if (res.falla) alert('No se pudo quitar en ' + res.falla + ' OT: ' + res.error);
+  _moldeoRefrescarRoster('resp', trabajoId, res.miembros);
   _moldeoSinOTRefrescarResp(trabajoId);
 }
 
@@ -9352,7 +10917,11 @@ function _moldeoRefrescarCeldaRespMoldeo(trabajoId) {
 // ningun campo confirmado por Access para este rol (a diferencia de
 // responsable de moldeo, que sí lo tiene) -- se muestra el roster propio de
 // solo lectura, o "sin asignar" si quedo vacio.
-function _moldeoRespNoyosCeldaHtml(trabajoId, lista, esFundida) {
+function _moldeoRespNoyosCeldaHtml(trabajoId, lista, esFundida, comoHeader) {
+  // Igual que responsables de moldeo: en un conjunto el roster de noyos es
+  // UNO para todas sus OT y vive en la fila-header (que carga las cantidades
+  // de noyos contra su OT ancla, ver _moldeoConjuntoHeaderCeldas).
+  if (_moldeoGrupoPorOT[trabajoId] && !comoHeader) return '<span style="font-size:11px;color:var(--muted)">&#8212; del conjunto</span>';
   if (esFundida) {
     return (lista && lista.length)
       ? lista.map(a => `<span style="font-size:12px">${a.operario_nombre}</span>`).join(', ')
@@ -9384,7 +10953,7 @@ function _moldeoRespNoyosCeldaHtml(trabajoId, lista, esFundida) {
 function _moldeoAbrirRespNoyos(trabajoId) {
   _moldeoRespNoyosTrabajoId = trabajoId;
   const moldeadores = (_moldeoPersonal || []).filter(p => p.sector < 2);
-  const yaAsignados = new Set((_moldeoResponsablesNoyos[trabajoId] || []).map(a => String(a.operario_id)));
+  const yaAsignados = new Set(_moldeoRosterDe(_moldeoResponsablesNoyos, trabajoId).map(a => String(a.operario_id)));
   const sel = $id('moldeo-respnoyos-operario');
   if (sel) {
     sel.innerHTML = ['<option value="">Elegir operario&#8230;</option>',
@@ -9405,26 +10974,18 @@ async function _moldeoGuardarRespNoyos() {
   const trabajoId = _moldeoRespNoyosTrabajoId;
   const operarioId = $id('moldeo-respnoyos-operario')?.value;
   if (!trabajoId || !operarioId) { alert('Elegí un operario.'); return; }
-  let lista;
-  try {
-    lista = await api('/api/trabajos/' + trabajoId + '/responsables_noyos', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ operario_id: Number(operarioId) }),
-    });
-  } catch(e) { alert('No se pudo agregar: ' + e.message); return; }
-  _moldeoResponsablesNoyos[trabajoId] = lista;
-  _moldeoRefrescarCeldaRespNoyos(trabajoId);
+  const res = await _moldeoRosterAplicar(trabajoId, 'responsables_noyos', Number(operarioId), _moldeoResponsablesNoyos, 'add');
+  if (res.falla) alert('No se pudo agregar en ' + res.falla + ' OT: ' + res.error);
+  _moldeoRefrescarRoster('noyos', trabajoId, res.miembros);
   _moldeoSinOTRefrescarRespNoyos(trabajoId);
   _moldeoCerrarRespNoyos();
 }
 
 async function _moldeoQuitarRespNoyos(trabajoId, operarioId) {
-  try {
-    await api('/api/trabajos/' + trabajoId + '/responsables_noyos/' + operarioId, { method: 'DELETE' });
-  } catch(e) { alert('No se pudo quitar: ' + e.message); return; }
-  _moldeoResponsablesNoyos[trabajoId] = (_moldeoResponsablesNoyos[trabajoId] || []).filter(a => a.operario_id !== operarioId);
+  const res = await _moldeoRosterAplicar(trabajoId, 'responsables_noyos', operarioId, _moldeoResponsablesNoyos, 'del');
+  if (res.falla) alert('No se pudo quitar en ' + res.falla + ' OT: ' + res.error);
+  _moldeoRefrescarRoster('noyos', trabajoId, res.miembros);
   _moldeoSinOTRefrescarRespNoyos(trabajoId);
-  _moldeoRefrescarCeldaRespNoyos(trabajoId);
 }
 
 function _moldeoRefrescarCeldaRespNoyos(trabajoId) {
@@ -9446,8 +11007,20 @@ function _moldeoRefrescarCeldaRespNoyos(trabajoId) {
 // terminan juntas en una sola carga en vez de dos filas separadas para la
 // misma persona el mismo dia. Compartir el mapa entre containers es lo que
 // permite que _moldeoGuardarTodo junte varias filas de una sola pasada.
-function _moldeoJuntarLineasDe(contenedor, trabajoId, porClave) {
+// porClaveConjunto (opcional, clave trabajoId -> {trabajoId, grupoId,
+// cantidadPiezas}): junta el input "piezas hoy" de un conjunto (ver
+// _moldeoConjuntoBloqueHtml), aparte de porClave porque su unidad es piezas
+// por OT y dia, no cajas por operario -- no tiene sentido en el roster de
+// "Agregar sin OT", que nunca ofrece una OT ya agrupada.
+function _moldeoJuntarLineasDe(contenedor, trabajoId, porClave, porClaveConjunto) {
   const clave = trabajoId + ':';
+  if (porClaveConjunto) {
+    contenedor.querySelectorAll('.moldeo-piezas-conjunto-input').forEach(inp => {
+      const piezas = Number((inp.value || '').trim()) || 0;
+      if (!(piezas > 0)) return;
+      porClaveConjunto.set(trabajoId, { trabajoId, grupoId: Number(inp.dataset.grupoId), cantidadPiezas: piezas });
+    });
+  }
   contenedor.querySelectorAll('.moldeo-resp-linea').forEach(linea => {
     const operarioId = Number(linea.dataset.operarioId);
     const inpSc = linea.querySelector('input[data-campo="sc"]');
@@ -9478,18 +11051,25 @@ async function _moldeoGuardarTodo() {
   if (!fecha) { alert('Elegí una fecha.'); return; }
 
   const porClave = new Map();
+  const porClaveConjunto = new Map();
   document.querySelectorAll('#moldeo-ot-tbody tr[data-q]').forEach(tr => {
     if (tr.dataset.oculta === '1') return; // OT trabada -- no se guarda aunque tenga algo tipeado
     const trabajoId = Number(tr.dataset.sortOt);
     if (!trabajoId) return;
-    _moldeoJuntarLineasDe(tr, trabajoId, porClave);
+    _moldeoJuntarLineasDe(tr, trabajoId, porClave, porClaveConjunto);
+  });
+  // Cantidades de noyos de cada conjunto: se cargan en su fila-header y se
+  // guardan contra su OT ancla (piezas y noyos son filas de carga distintas).
+  document.querySelectorAll('#moldeo-ot-tbody tr[data-conjunto-header]').forEach(h => {
+    _moldeoJuntarLineasDe(h, Number(h.dataset.anchor), porClave, null);
   });
   const pendientes = Array.from(porClave.values());
-  if (!pendientes.length) { alert('Ingresá cajas cerradas, sin cerrar o noyos en al menos una OT.'); return; }
+  const pendientesConjunto = Array.from(porClaveConjunto.values());
+  if (!pendientes.length && !pendientesConjunto.length) { alert('Ingresá cajas cerradas, sin cerrar, noyos o piezas de un conjunto en al menos una OT.'); return; }
 
   const btn = $id('moldeo-guardar-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Guardando...'; }
-  let ok = 0, fail = 0;
+  let ok = 0, fail = 0, sinResponsable = 0;
   for (const { trabajoId, operarioId, cantidad, sinCerrar, noyos } of pendientes) {
     const existente = (_moldeoExistentes[trabajoId] || {})[operarioId];
     const body = { fecha, operario_id: operarioId, trabajo_id: trabajoId, cantidad_cajas: cantidad, cajas_sin_cerrar: sinCerrar, cantidad_noyos: noyos };
@@ -9502,10 +11082,49 @@ async function _moldeoGuardarTodo() {
       ok++;
     } catch(e) { fail++; }
   }
+  // Piezas de conjunto: se atribuyen al primer responsable de moldeo ya
+  // asignado a esa OT (el roster de siempre, sin tocarlo) -- si todavia no
+  // tiene ninguno, no hay a quien atribuirselas (operario_id es obligatorio
+  // en _produccion_moldeo) y se avisa aparte en vez de fallar en silencio.
+  for (const { trabajoId, grupoId, cantidadPiezas } of pendientesConjunto) {
+    const roster = _moldeoRosterDe(_moldeoResponsablesMoldeo, trabajoId);
+    if (!roster.length) { sinResponsable++; continue; }
+    const operarioId = roster[0].operario_id;
+    const existente = _moldeoConjuntoExistentes[trabajoId];
+    const body = { fecha, operario_id: operarioId, trabajo_id: trabajoId, grupo_id: grupoId, cantidad_piezas: cantidadPiezas, cantidad_cajas: 0, cajas_sin_cerrar: 0, cantidad_noyos: 0 };
+    try {
+      if (existente) {
+        await api('/api/produccion_moldeo/' + existente.id, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+      } else {
+        await api('/api/produccion_moldeo', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+      }
+      ok++;
+    } catch(e) { fail++; }
+  }
   if (btn) { btn.disabled = false; btn.textContent = 'Guardar'; }
 
   await _moldeoCargarExistentes();
-  if (fail) alert(`Se guardaron ${ok} carga(s). ${fail} fallaron.`);
+  if (fail || sinResponsable) {
+    let msg = `Se guardaron ${ok} carga(s).`;
+    if (fail) msg += ` ${fail} fallaron.`;
+    if (sinResponsable) msg += ` ${sinResponsable} OT de un conjunto no tienen responsable de moldeo asignado todavía -- asignalo con "+ Responsable" y volvé a cargar sus piezas.`;
+    alert(msg);
+  }
+}
+
+// Foto FIJA del conjunto que se guardó junto con esa carga (ver
+// _moldeo_conjunto_snapshot en el backend): qué OT lo formaban y quiénes
+// eran sus ayudantes/responsables ese día. No cambia aunque después se
+// rompa el conjunto, se reemplace una de sus OT o se edite su roster.
+function _moldeoConjuntoFotoHtml(c) {
+  if (!c) return '';
+  const ots = (c.ots || []).map(o => String(o.trabajo_id).padStart(6, '0') + (o.nombrepieza ? ' ' + o.nombrepieza : '')).join(' · ');
+  const lista = arr => (arr && arr.length) ? arr.join(', ') : '—';
+  const nota = c.reconstruido ? ' (reconstruida con el estado actual: la carga se guardó antes de que existiera esta foto)' : '';
+  return `<div style="font-size:10px;color:var(--muted);margin-top:2px" title="Foto fija del conjunto al guardar esta carga${_esc(nota)}">`
+    + `&#128279; Conjunto: ${_esc(ots)}<br>`
+    + `Ayudantes: ${_esc(lista(c.ayudantes))} &middot; Resp. moldeo: ${_esc(lista(c.responsables_moldeo))} &middot; Noyos: ${_esc(lista(c.responsables_noyos))}`
+    + `${c.reconstruido ? ' <i>(reconstruida)</i>' : ''}</div>`;
 }
 
 async function _moldeoLoadLista() {
@@ -9529,10 +11148,12 @@ async function _moldeoLoadLista() {
           <tr style="background:${_moldeoColorEstado(r.estadotrabajo)}">
             <td>${r.operario_nombre || r.operario_id}</td>
             <td>${r.trabajo_id ? String(r.trabajo_id).padStart(6,'0') : '<span style="color:var(--muted);font-style:italic">sin OT</span>'}</td>
-            <td>${r.nombrepieza || '—'}${r.nota ? `<div style="font-size:10px;color:var(--muted);font-style:italic" title="${_esc(r.nota)}">${_esc(r.nota)}</div>` : ''}</td>
+            <td>${r.nombrepieza || '—'}${r.nota ? `<div style="font-size:10px;color:var(--muted);font-style:italic" title="${_esc(r.nota)}">${_esc(r.nota)}</div>` : ''}${_moldeoConjuntoFotoHtml(r.conjunto)}</td>
             <td style="font-size:12px;color:var(--muted)">${r.cliente_nombre || '—'}</td>
             <td style="text-align:right;color:var(--muted)">${r.cajas_sin_cerrar ? fmt(r.cajas_sin_cerrar) : '—'}</td>
-            <td style="text-align:right;font-weight:600">${fmt(r.cantidad_cajas)}</td>
+            <td style="text-align:right;font-weight:600">${r.grupo_id
+              ? `${fmt(r.cantidad_piezas)} <span style="font-size:10px;font-weight:400;color:var(--muted)" title="Carga de un conjunto (caja compartida): se cuenta en piezas, no en cajas">pzs &#128279;</span>`
+              : fmt(r.cantidad_cajas)}</td>
             <td style="text-align:right;color:var(--muted)">${r.cantidad_noyos ? fmt(r.cantidad_noyos) : '—'}</td>
             <td style="white-space:nowrap">
               <span onclick="_moldeoBorrar(${r.id})" style="cursor:pointer;padding:0 4px;opacity:.6" title="Eliminar">&#10005;</span>
@@ -9548,6 +11169,126 @@ async function _moldeoBorrar(id) {
   try { await api('/api/produccion_moldeo/' + id, { method: 'DELETE' }); }
   catch(e) { alert('No se pudo eliminar: ' + e.message); return; }
   await _moldeoCargarExistentes();
+}
+
+// ── Crear conjunto (cajas compartidas) ──────────────────────────────────────
+// Para cuando una misma caja física trae piezas de varias OT distintas
+// (piezas chicas, aprovechan el molde juntas). El modal reusa la misma lista
+// de OT activas que la tabla principal (mismas columnas OT/Pieza/F.
+// entrega/Cliente y buscador), sin ayudantes/responsables/noyos -- eso sigue
+// viviendo en la tabla principal una vez creado el conjunto -- y suma un
+// checkbox + cantidad de piezas por fila. "Crear conjunto" solo arma la
+// plantilla (POST /api/moldeo/grupos); las piezas del día se guardan con el
+// mismo POST/PUT /api/produccion_moldeo de siempre, una carga por miembro.
+function _moldeoAbrirConjunto(otsDemo) {
+  // Una OT oculta (trabada en Programado, ver _moldeoOcultas) no se ofrece
+  // para armar un conjunto nuevo -- mismo criterio que la tabla principal,
+  // que tampoco la muestra salvo que se tilde "Ver OT ocultas". otsDemo
+  // (solo lo pasa el recorrido guiado) reemplaza la lista real por OT de
+  // ejemplo -- ver _moldeoTourOTsFalsas.
+  const activas = otsDemo || (_moldeoTodasOTs || []).filter(r => (r.estadotrabajo === 'I' || r.estadotrabajo === 'P') && !_moldeoOcultas[r.iditemtrabajo]);
+  const tbody = $id('moldeo-conjunto-tbody');
+  if (tbody) {
+    tbody.innerHTML = activas.map(r => {
+      const entregaISO = (r.fechaprevista || '').slice(0, 10);
+      const entrega = entregaISO ? entregaISO.split('-').reverse().join('/') : '—';
+      const q = _esc((String(r.iditemtrabajo) + ' ' + (r.nombrepieza||'') + ' ' + (r.cliente_nombre||'')).toLowerCase());
+      return `
+      <tr data-q="${q}">
+        <td><input type="checkbox" class="moldeo-conjunto-check" data-trabajo-id="${r.iditemtrabajo}" onchange="_moldeoConjuntoToggleFila(this)"></td>
+        <td><code>${String(r.iditemtrabajo).padStart(6,'0')}</code></td>
+        <td>${r.nombrepieza || '—'}</td>
+        <td style="font-size:12px;color:var(--muted);white-space:nowrap">${entrega}</td>
+        <td style="font-size:12px;color:var(--muted)">${r.cliente_nombre || '—'}</td>
+        <td><div class="moldeo-piezas-stepper" style="display:flex;align-items:center;gap:3px">
+          <button type="button" class="page-btn moldeo-paso" onclick="_moldeoPiezasPaso(this,-1)" disabled title="Restar 1">&#8722;</button>
+          <input class="inp moldeo-paso moldeo-conjunto-piezas-input" type="number" min="0" step="1" value="1" data-trabajo-id="${r.iditemtrabajo}" disabled>
+          <button type="button" class="page-btn moldeo-paso" onclick="_moldeoPiezasPaso(this,1)" disabled title="Sumar 1">+</button>
+        </div></td>
+      </tr>`;
+    }).join('');
+  }
+  const filtro = $id('moldeo-conjunto-filtro');
+  if (filtro) filtro.value = '';
+  const modal = $id('moldeo-conjunto-modal');
+  if (modal) modal.classList.add('open');
+}
+
+function _moldeoConjuntoToggleFila(chk) {
+  chk.closest('tr')?.querySelectorAll('.moldeo-piezas-stepper input, .moldeo-piezas-stepper button')
+    .forEach(el => { el.disabled = !chk.checked; });
+}
+
+function _moldeoConjuntoAplicarFiltro() {
+  const q = ($id('moldeo-conjunto-filtro')?.value || '').trim().toLowerCase();
+  document.querySelectorAll('#moldeo-conjunto-tbody tr[data-q]').forEach(tr => {
+    tr.style.display = (!q || tr.dataset.q.includes(q)) ? '' : 'none';
+  });
+}
+
+function _moldeoCerrarConjunto() {
+  const modal = $id('moldeo-conjunto-modal');
+  if (modal) modal.classList.remove('open');
+}
+
+async function _moldeoGuardarConjunto() {
+  // Durante el recorrido guiado el popup muestra OT de ejemplo -- nunca se
+  // crea nada de verdad (ver _moldeoIniciarTour).
+  if (_moldeoTourDemoActivo) return;
+  const tildadas = Array.from(document.querySelectorAll('#moldeo-conjunto-tbody .moldeo-conjunto-check:checked'));
+  if (tildadas.length < 2) { alert('Tildá al menos 2 OT para armar un conjunto.'); return; }
+  const miembros = tildadas.map(chk => {
+    const trabajoId = Number(chk.dataset.trabajoId);
+    const inp = chk.closest('tr')?.querySelector('.moldeo-conjunto-piezas-input');
+    const piezas = Number((inp?.value || '').trim()) || 0;
+    return { trabajoId, piezas };
+  });
+
+  const btn = $id('moldeo-conjunto-guardar-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Creando...'; }
+  let grupo;
+  try {
+    grupo = await api('/api/moldeo/grupos', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ trabajo_ids: miembros.map(m => m.trabajoId) }),
+    });
+  } catch(e) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Crear conjunto'; }
+    alert('No se pudo crear el conjunto: ' + e.message); return;
+  }
+
+  const fecha = $id('moldeo-fecha')?.value;
+  let ok = 0, fail = 0, sinResponsable = 0;
+  for (const { trabajoId, piezas } of miembros) {
+    if (!(piezas > 0)) continue; // el conjunto queda creado igual -- las piezas de hoy son opcionales
+    // El conjunto todavía no está en _moldeoGrupoPorOT (se refresca abajo),
+    // así que la unión de responsables se arma acá con los miembros elegidos.
+    const roster = miembros.flatMap(m => _moldeoResponsablesMoldeo[m.trabajoId] || []);
+    if (!roster.length) { sinResponsable++; continue; }
+    const body = { fecha, operario_id: roster[0].operario_id, trabajo_id: trabajoId, grupo_id: grupo.grupo_id, cantidad_piezas: piezas, cantidad_cajas: 0, cajas_sin_cerrar: 0, cantidad_noyos: 0 };
+    try { await api('/api/produccion_moldeo', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) }); ok++; }
+    catch(e) { fail++; }
+  }
+  if (btn) { btn.disabled = false; btn.textContent = 'Crear conjunto'; }
+  _moldeoCerrarConjunto();
+  await _moldeoRefrescarGrupos();
+  await _moldeoCargarExistentes();
+
+  let msg = 'Conjunto creado.';
+  if (ok) msg += ` ${ok} carga(s) de piezas guardadas.`;
+  if (fail) msg += ` ${fail} fallaron.`;
+  if (sinResponsable) msg += ` ${sinResponsable} OT sin responsable de moldeo asignado todavía -- asignalo con "+ Responsable" y volvé a cargar sus piezas.`;
+  alert(msg);
+}
+
+// Re-trae /api/moldeo/grupos y aplica el resultado a la tabla -- se llama
+// despues de crear un conjunto nuevo. _moldeoAplicarGrupoAFilas nunca toca
+// tr.style.cssText entero (pisaría el display:none que le puso
+// _moldeoAplicarFiltro a las OT no-principales de un conjunto ya existente).
+async function _moldeoRefrescarGrupos() {
+  try { _moldeoGrupos = await api('/api/moldeo/grupos'); }
+  catch(e) { _moldeoGrupos = []; }
+  _moldeoAplicarGrupoAFilas();
 }
 
 // ── Agregar sin OT ───────────────────────────────────────────────────────────
@@ -9841,6 +11582,7 @@ async function openMoldeoProductividadModal() {
   _moldeoProdUnidad = 'cajas';
 
   body.innerHTML = `
+    <div id="moldeo-prod-aviso-horas" style="margin-bottom:8px"></div>
     <div style="display:flex;align-items:center;justify-content:flex-end;gap:6px;margin-bottom:8px">
       <button class="page-btn" id="moldeo-prod-un-cajas" onclick="_moldeoProdCambiarUnidad('cajas')">Cajas</button>
       <button class="page-btn" id="moldeo-prod-un-kg" onclick="_moldeoProdCambiarUnidad('kg')">Kg</button>
@@ -9868,6 +11610,10 @@ async function openMoldeoProductividadModal() {
   _moldeoProdRenderTabla();
   _moldeoProdMarcarUnidad();
   _moldeoProdMarcarPeriodo();
+  _horasUltimaCarga().then(info => {
+    const el = $id('moldeo-prod-aviso-horas');
+    if (el) el.innerHTML = _horasAvisoHtml(info);
+  });
   await _moldeoProdCargarDetalle();
 }
 
@@ -10090,6 +11836,8 @@ async function loadTrabajos() {
       <table>
         <thead><tr>
           <th>N&#176; OT</th>
+          <th>Cu&#241;o</th>
+          <th>Colada</th>
           <th>OT Ant.</th>
           <th>F. Entrega</th>
           <th>Cliente</th>
@@ -10103,6 +11851,8 @@ async function loadTrabajos() {
           ? d.rows.map(r => `
             <tr class="tr-link" onclick="go('trabajo',${r.iditemtrabajo})">
               <td><code style="color:var(--accent)">${String(r.iditemtrabajo).padStart(6,'0')}</code></td>
+              <td>${r.cuno ? _esc(r.cuno) : '<span style="color:var(--muted)">—</span>'}</td>
+              <td>${r.fundicion ? fmtColada(r.fundicion, r.colada_pos) : '<span style="color:var(--muted)">—</span>'}</td>
               <td>${r.origen ? `<code style="font-size:11px;color:var(--muted);cursor:pointer" onclick="event.stopPropagation();go('trabajo',${r.origen})">${String(r.origen).padStart(6,'0')}</code>` : '<span style="color:var(--muted)">—</span>'}</td>
               <td style="white-space:nowrap;font-size:12px">${r.fechaprevista ? r.fechaprevista.slice(0,10) : '—'}</td>
               <td onclick="event.stopPropagation();chipAddClient('tr','${(r.codigo_cliente||'').replace(/'/g,"&apos;")}','${(r.cliente_nombre||r.codigo_cliente||'').replace(/'/g,"&apos;")}')" title="Filtrar por cliente" style="cursor:copy">
@@ -10118,7 +11868,7 @@ async function loadTrabajos() {
               <td style="text-align:right;color:${(r.cantidadrechazada||0)>0?'var(--yellow)':'inherit'}">${r.cantidadrechazada || '—'}</td>
               <td style="text-align:right;color:var(--green)">${r.cantidadentregada ?? '—'}</td>
             </tr>`).join('')
-          : '<tr><td colspan="9" class="empty">Sin resultados</td></tr>'}
+          : '<tr><td colspan="11" class="empty">Sin resultados</td></tr>'}
 
         </tbody>
       </table>
